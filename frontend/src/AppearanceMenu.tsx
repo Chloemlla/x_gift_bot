@@ -32,6 +32,11 @@ export function AppearanceMenu() {
         colors[dark ? "dark" : "light"].background.default,
       );
   }, [mode, systemMode]);
+  function closeMenu() {
+    const trigger = anchor;
+    setAnchor(null);
+    requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
+  }
   const current = options.find((option) => option.value === mode) ?? options[0];
   return (
     <>
@@ -47,10 +52,14 @@ export function AppearanceMenu() {
         <current.Icon />
       </IconButton>
       <Menu
+        // A small appearance menu must not hide the page scrollbar or scroll
+        // the card when returning keyboard focus to its trigger.
+        disableScrollLock
+        disableRestoreFocus
         id="appearance-menu"
         anchorEl={anchor}
         open={!!anchor}
-        onClose={() => setAnchor(null)}
+        onClose={closeMenu}
         slotProps={{ list: { "aria-label": "选择外观" } }}
       >
         {options.map(({ value, label, Icon }) => (
@@ -61,7 +70,7 @@ export function AppearanceMenu() {
             aria-checked={current.value === value}
             onClick={() => {
               setMode(value);
-              setAnchor(null);
+              closeMenu();
             }}
             sx={{ minHeight: 44 }}
           >

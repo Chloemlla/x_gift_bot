@@ -58,6 +58,7 @@ type limit struct {
 	count int
 }
 type codeRow struct {
+	Folder      string `json:"folder"`
 	ID          string `json:"id"`
 	Hint        string `json:"hint"`
 	Batch       string `json:"batch"`
@@ -172,6 +173,9 @@ func Run(ctx context.Context) error {
 			return err
 		}
 	}
+	if err = migrateFolders(db); err != nil {
+		return err
+	}
 	// A crash is never interpreted as permission to submit the same payment again.
 	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "订单处理被中断，请查询原订单或联系管理员核实；请勿重复兑换。", time.Now().Unix()); err != nil {
 		return err
@@ -211,6 +215,10 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/admin/codes", s.admin(s.list))
 	mux.HandleFunc("POST /api/admin/codes", s.admin(s.generate))
 	mux.HandleFunc("POST /api/admin/revoke", s.admin(s.revoke))
+	mux.HandleFunc("POST /api/admin/folders", s.admin(s.createFolder))
+	mux.HandleFunc("POST /api/admin/folders/rename", s.admin(s.renameFolder))
+	mux.HandleFunc("POST /api/admin/folders/delete", s.admin(s.deleteFolder))
+	mux.HandleFunc("POST /api/admin/codes/move", s.admin(s.moveCodes))
 	addr := os.Getenv("XGIFT_LISTEN")
 	if addr == "" {
 		addr = "127.0.0.1:8787"
@@ -586,6 +594,7 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 }
 func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 	var q struct {
+		Folder string `json:"folder"`
 		Months int    `json:"months"`
 		Count  int    `json:"count"`
 		Batch  string `json:"batch"`
@@ -594,7 +603,7 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q.Batch = strings.TrimSpace(q.Batch)
-	if (q.Months != 3 && q.Months != 6) || q.Count < 1 || q.Count > 500 || len(q.Batch) > 120 {
+	if (q.Months != 3 && q.Months != 6) || q.Count < 1 || q.Count > 500 || len(q.Batch) > 120 || (q.Folder != "" && !folderIDPattern.MatchString(q.Folder)) {
 		message(w, 400, "请选择 3 或 6 个月，数量 1–500，批次名称不超过 120 字节。")
 		return
 	}
@@ -607,11 +616,24 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	var folder any
+	if q.Folder != "" {
+		var id string
+		if e = tx.QueryRow("SELECT id FROM folders WHERE id=?", q.Folder).Scan(&id); e != nil {
+			if errors.Is(e, sql.ErrNoRows) {
+				message(w, 404, "文件夹不存在，请刷新列表。")
+			} else {
+				message(w, 503, "无法核实文件夹，尚未生成兑换码。")
+			}
+			return
+		}
+		folder = q.Folder
+	}
 	codes := make([]string, 0, q.Count)
 	now := time.Now().Unix()
 	for i := 0; i < q.Count; i++ {
 		code := "XG-" + strings.ToUpper(token(24))
-		_, e = tx.Exec("INSERT INTO codes(id,hash,hint,batch,months,status,created,updated) VALUES(?,?,?,?,?,'active',?,?)", token(16), hash(code), code[len(code)-8:], q.Batch, q.Months, now, now)
+		_, e = tx.Exec("INSERT INTO codes(id,hash,hint,batch,months,status,created,updated,folder_id) VALUES(?,?,?,?,?,'active',?,?,?)", token(16), hash(code), code[len(code)-8:], q.Batch, q.Months, now, now, folder)
 		if e != nil {
 			message(w, 503, "生成失败，没有保存本批兑换码。")
 			return
@@ -622,42 +644,7 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		message(w, 503, "保存结果不确定，请在后台核实批次后再操作。")
 		return
 	}
-	reply(w, 201, map[string]any{"codes": codes, "batch": q.Batch, "months": q.Months})
-}
-func (s *server) list(w http.ResponseWriter, r *http.Request) {
-	page := 0
-	if raw := r.URL.Query().Get("page"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 0 || n > 100000 {
-			message(w, 400, "页码不正确。")
-			return
-		}
-		page = n
-	}
-	rows, e := s.db.Query("SELECT id,hint,batch,months,status,username,message,created,updated,progress FROM codes ORDER BY created DESC,rowid DESC LIMIT 101 OFFSET ?", page*100)
-	if e != nil {
-		message(w, 503, "无法读取兑换码。")
-		return
-	}
-	defer rows.Close()
-	codes := []codeRow{}
-	for rows.Next() {
-		var c codeRow
-		if e = rows.Scan(&c.ID, &c.Hint, &c.Batch, &c.Months, &c.Status, &c.Username, &c.Message, &c.Created, &c.Updated, &c.Progress); e != nil {
-			message(w, 503, "无法读取兑换码。")
-			return
-		}
-		codes = append(codes, c)
-	}
-	if rows.Err() != nil {
-		message(w, 503, "无法读取兑换码。")
-		return
-	}
-	hasMore := len(codes) > 100
-	if hasMore {
-		codes = codes[:100]
-	}
-	reply(w, 200, map[string]any{"codes": codes, "payments_enabled": s.payments, "page": page, "has_more": hasMore})
+	reply(w, 201, map[string]any{"codes": codes, "batch": q.Batch, "months": q.Months, "folder": q.Folder})
 }
 func (s *server) revoke(w http.ResponseWriter, r *http.Request) {
 	var q struct {

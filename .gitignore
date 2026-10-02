@@ -1,0 +1,17 @@
+.venv/
+.private/
+__pycache__/
+*.har
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.tar.gz
+/sqlite/
+/bin/
+
+.playwright-cli/
+.cloudflare/

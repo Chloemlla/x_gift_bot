@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>XGift · 管理后台</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/admin.js" defer></script>
+  </head>
+  <body>
+    <header class="nav">
+      <a class="brand" href="/">X<span class="brand-dot">✦</span>GIFT</a
+      ><span class="eyebrow">ADMIN CONSOLE</span>
+    </header>
+    <main class="admin">
+      <div class="admin-heading">
+        <div>
+          <span class="step">CONTROL ROOM</span>
+          <h1>兑换码管理</h1>
+        </div>
+        <span id="service-status" class="pill">正在读取状态</span>
+      </div>
+      <div class="admin-grid">
+        <section class="card">
+          <h2>批量生成</h2>
+          <p class="muted">兑换码明文只在生成时显示，请立即下载保存。</p>
+          <form id="generate-form">
+            <label for="months">套餐</label
+            ><select id="months">
+              <option value="6">6 个月 Premium · 600 BDT</option>
+              <option value="3">3 个月 Premium · 300 BDT</option></select
+            ><label for="count">数量</label
+            ><input
+              id="count"
+              type="number"
+              min="1"
+              max="500"
+              value="10"
+              required
+            /><label for="batch">批次名称 <span>选填</span></label
+            ><input
+              id="batch"
+              maxlength="40"
+              placeholder="例如：十月赠礼"
+            /><button id="generate-button" type="submit">
+              生成兑换码 <span>＋</span>
+            </button>
+          </form>
+          <div id="admin-result" class="result" role="status" hidden></div>
+          <div id="generated" hidden>
+            <label for="new-codes">本次生成的兑换码</label
+            ><textarea id="new-codes" rows="9" readonly></textarea
+            ><button id="download" class="secondary" type="button">
+              下载兑换码 TXT</button
+            ><button id="clear-codes" class="secondary" type="button">
+              已保存，清除本页明文
+            </button>
+          </div>
+        </section>
+        <section class="card admin-info">
+          <span class="tiny-star">✦</span>
+          <h2>每一次兑换，<br />都有明确的状态。</h2>
+          <dl>
+            <dt>可使用</dt>
+            <dd>用户可以提交，停用后不可再兑换。</dd>
+            <dt>处理中</dt>
+            <dd>兑换码已锁定，请等待结果。</dd>
+            <dt>已完成</dt>
+            <dd>仅在支付服务确认成功后显示。</dd>
+            <dt>待核实</dt>
+            <dd>结果不确定或需要额外验证，必须人工核对，不会自动再次付款。</dd>
+          </dl>
+          <p class="muted">
+            付款限额：3 个月恰好 300 BDT；6 个月恰好 600
+            BDT。金额或币种不符时停止。
+          </p>
+        </section>
+      </div>
+      <section class="card table-card">
+        <div class="table-heading">
+          <h2>兑换码列表</h2>
+          <button id="refresh" class="secondary compact" type="button">
+            刷新
+          </button>
+        </div>
+        <p class="muted">
+          每页 100 条，展示末 8 位识别码。没有自动重试或强制标记成功入口。
+        </p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>识别码 / 批次</th>
+                <th>套餐</th>
+                <th>状态</th>
+                <th>用户名</th>
+                <th>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="codes-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <button id="prev" class="secondary compact" type="button">
+            上一页</button
+          ><span id="page-label"></span
+          ><button id="next" class="secondary compact" type="button">
+            下一页
+          </button>
+        </div>
+      </section>
+    </main>
+    <footer>
+      <span>XGift · 管理后台</span
+      ><span>请勿分享管理员密码或未使用的兑换码</span>
+    </footer>
+  </body>
+</html>

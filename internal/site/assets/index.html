@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>XGift · Premium 兑换</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="nav">
+      <a class="brand" href="/">X<span class="brand-dot">✦</span>GIFT</a
+      ><span class="eyebrow">A LITTLE MORE PREMIUM</span>
+    </header>
+    <main class="landing">
+      <section class="intro">
+        <div class="pill"><span class="dot"></span> PREMIUM GIFT</div>
+        <h1>让你的 X，<br />多一点<span class="accent">可能。</span></h1>
+        <p class="lede">
+          一枚兑换码，一份 Premium。<br />输入你的用户名，接收属于你的赠礼。
+        </p>
+        <div class="benefits">
+          <div>
+            <span class="benefit-icon">✓</span
+            ><span>只需用户名<small>无需提供 X 密码</small></span>
+          </div>
+          <div>
+            <span class="benefit-icon">↗</span
+            ><span>进度随时可查<small>保留兑换码即可查询</small></span>
+          </div>
+        </div>
+        <div class="art" aria-hidden="true">
+          <span class="art-star">✦</span><span class="art-word">PREMIUM</span
+          ><span class="art-tag">A GIFT FOR YOU ↗</span>
+        </div>
+      </section>
+      <section class="card redeem-card">
+        <div class="card-top">
+          <span class="step">01 / REDEEM</span><span class="tiny-star">✦</span>
+        </div>
+        <h2>兑换你的 Premium</h2>
+        <p class="muted">套餐时长以兑换码为准。</p>
+        <div id="service-notice" class="result" role="status" hidden></div>
+        <form id="redeem-form">
+          <label for="code">兑换码</label
+          ><textarea
+            id="code"
+            name="code"
+            rows="2"
+            placeholder="粘贴 XG- 开头的完整兑换码"
+            maxlength="80"
+            required
+            spellcheck="false"
+            autocomplete="off"
+          ></textarea
+          ><label for="username">X 用户名 <span>不是显示名称</span></label>
+          <div class="username-input">
+            <span>@</span
+            ><input
+              id="username"
+              name="username"
+              placeholder="your_username"
+              maxlength="16"
+              pattern="@?[A-Za-z0-9_]{1,15}"
+              autocomplete="off"
+              spellcheck="false"
+              required
+            />
+          </div>
+          <p class="field-help">请核对用户名，赠送成功后无法更换账号。</p>
+          <button id="redeem-button" type="submit">
+            兑换 Premium <span>↗</span></button
+          ><button id="status-button" class="secondary" type="button">
+            查询兑换进度
+          </button>
+        </form>
+        <div
+          id="result"
+          class="result"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></div>
+        <div class="card-note">
+          <span>ⓘ</span>
+          <p>
+            我们会先检查账号能否接收赠送。若 X
+            暂不允许赠送，会在这里告诉你，兑换码不会因此被使用。
+          </p>
+        </div>
+      </section>
+    </main>
+    <footer>
+      <span>XGift · 把 Premium 赠予你</span
+      ><span>独立兑换服务，与 X 无隶属关系</span>
+    </footer>
+  </body>
+</html>

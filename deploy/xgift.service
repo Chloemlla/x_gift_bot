@@ -1,0 +1,31 @@
+[Unit]
+Description=XGift redemption site
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=xgift
+Group=xgift
+WorkingDirectory=/opt/xgift
+EnvironmentFile=/etc/xgift/site.env
+ExecStart=/opt/xgift/bin/xgift-web
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=65
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/xgift
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

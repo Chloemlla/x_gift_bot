@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -163,3 +164,41 @@ func (v *Vault) Get(name string) ([]byte, error) {
 	return v.aead.Open(nil, b[:n], b[n:], []byte("xgift-v1:"+name))
 }
 func (v *Vault) Close() error { return v.db.Close() }
+
+// Archive atomically preserves an authenticated record under a new name and removes
+// its active key, only if its contents still match the verified snapshot.
+func (v *Vault) Archive(name, archive string, expected, archived []byte) error {
+	tx, err := v.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var payload []byte
+	if err = tx.QueryRow("SELECT payload FROM secrets WHERE name=?", name).Scan(&payload); err != nil {
+		return err
+	}
+	n := v.aead.NonceSize()
+	if len(payload) < n {
+		return errors.New("invalid encrypted record")
+	}
+	plain, err := v.aead.Open(nil, payload[:n], payload[n:], []byte("xgift-v1:"+name))
+	if err != nil {
+		return err
+	}
+	defer clear(plain)
+	if !bytes.Equal(plain, expected) {
+		return errors.New("order changed since verification")
+	}
+	nonce := make([]byte, n)
+	if _, err = rand.Read(nonce); err != nil {
+		return err
+	}
+	encrypted := v.aead.Seal(nonce, nonce, archived, []byte("xgift-v1:"+archive))
+	if _, err = tx.Exec("INSERT INTO secrets(name,payload) VALUES (?,?)", archive, encrypted); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("DELETE FROM secrets WHERE name=?", name); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

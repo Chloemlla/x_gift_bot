@@ -66,6 +66,7 @@ func run() error {
 	profile := f.String("profile", "Default", "Chrome directory name")
 	port := f.Int("port", 0, "local proxy port; default automatic (proxy command: 18791)")
 	months := f.Int("months", 6, "Premium gift duration: 3 (300 BDT) or 6 (600 BDT)")
+	retire := f.Bool("retire-canceled", false, "archive an inactive, canceled, unpaid order after read-only verification")
 	inspect := f.Bool("inspect", false, "read the existing Stripe order status without paying")
 	pay := f.Bool("pay", false, "pay only at the exact allowed BDT total")
 	name := f.String("name", "", "secret name for put")
@@ -260,6 +261,12 @@ func run() error {
 	}
 	if *inspect {
 		return checkout.Inspect(ctx, v, command, *port, *months)
+	}
+	if *retire {
+		if *pay {
+			return errors.New("--retire-canceled cannot be combined with --pay")
+		}
+		return checkout.RetireCanceled(ctx, v, command, *port, *months)
 	}
 	result, e := checkout.Run(ctx, v, command, *pay, *port, *months)
 	if result != nil {

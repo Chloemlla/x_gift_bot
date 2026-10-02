@@ -73,7 +73,7 @@ go vet ./...
 | `/etc/xgift/site.env` | 服务配置，生产站点 `XGIFT_PAYMENTS_ENABLED=true`，模板默认关闭 |
 | `/etc/caddy/conf.d/xp.example.com.caddy` | 本站反向代理 |
 
-配置模板在 `deploy/`。程序仅允许绑定回环 IP；Caddy 必须覆盖 `X-Real-IP`，不能透传客户端提供的值。DNS 使用直连 A 记录，Caddy 自动签发 HTTPS 证书。现有站点配置不改动。
+配置模板在 `deploy/`。程序仅允许绑定回环 IP；Caddy 覆盖 `X-Real-IP`。`xp.example.com` 的 A 记录已开启 Cloudflare 代理（橙云），源站保留 Caddy HTTPS。仅当 TCP 来源属于 Cloudflare 官方 IP 段时使用 `CF-Connecting-IP`，直连请求仍使用实际来源 IP，避免伪造请求头绕过限流。IP 段来自 `https://www.cloudflare.com/ips-v4` 和 `https://www.cloudflare.com/ips-v6`，更新时须同步 `deploy/Caddyfile`。兑换、查询与后台响应维持 `Cache-Control: no-store`，不缓存订单或管理数据。
 
 ```sh
 ssh example-server 'sudo systemctl status xgift --no-pager'

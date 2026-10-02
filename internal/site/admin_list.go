@@ -47,7 +47,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 		args = append(args, filter)
 	}
 	args = append(args, page*100)
-	rows, err := tx.Query("SELECT id,hint,batch,months,status,username,message,created,updated,progress,COALESCE(folder_id,'') FROM codes"+where+" ORDER BY created DESC,rowid DESC LIMIT 101 OFFSET ?", args...)
+	rows, err := tx.Query("SELECT id,hint,batch,months,status,username,message,created,updated,progress,COALESCE(folder_id,''),copyable FROM codes"+where+" ORDER BY created DESC,rowid DESC LIMIT 101 OFFSET ?", args...)
 	if err != nil {
 		message(w, 503, "无法读取兑换码。")
 		return
@@ -55,7 +55,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	codes := []codeRow{}
 	for rows.Next() {
 		var c codeRow
-		if err = rows.Scan(&c.ID, &c.Hint, &c.Batch, &c.Months, &c.Status, &c.Username, &c.Message, &c.Created, &c.Updated, &c.Progress, &c.Folder); err != nil {
+		if err = rows.Scan(&c.ID, &c.Hint, &c.Batch, &c.Months, &c.Status, &c.Username, &c.Message, &c.Created, &c.Updated, &c.Progress, &c.Folder, &c.Copyable); err != nil {
 			rows.Close()
 			message(w, 503, "无法读取兑换码。")
 			return

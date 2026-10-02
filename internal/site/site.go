@@ -58,6 +58,7 @@ type limit struct {
 	count int
 }
 type codeRow struct {
+	Copyable    bool   `json:"copyable"`
 	Folder      string `json:"folder"`
 	ID          string `json:"id"`
 	Hint        string `json:"hint"`
@@ -176,6 +177,9 @@ func Run(ctx context.Context) error {
 	if err = migrateFolders(db); err != nil {
 		return err
 	}
+	if err = migrateBatches(db); err != nil {
+		return err
+	}
 	// A crash is never interpreted as permission to submit the same payment again.
 	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "订单处理被中断，请查询原订单或联系管理员核实；请勿重复兑换。", time.Now().Unix()); err != nil {
 		return err
@@ -219,6 +223,7 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/admin/folders/rename", s.admin(s.renameFolder))
 	mux.HandleFunc("POST /api/admin/folders/delete", s.admin(s.deleteFolder))
 	mux.HandleFunc("POST /api/admin/codes/move", s.admin(s.moveCodes))
+	mux.HandleFunc("POST /api/admin/codes/copy", s.admin(s.copyCode))
 	addr := os.Getenv("XGIFT_LISTEN")
 	if addr == "" {
 		addr = "127.0.0.1:8787"
@@ -616,24 +621,27 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	var folder any
-	if q.Folder != "" {
-		var id string
-		if e = tx.QueryRow("SELECT id FROM folders WHERE id=?", q.Folder).Scan(&id); e != nil {
-			if errors.Is(e, sql.ErrNoRows) {
-				message(w, 404, "文件夹不存在，请刷新列表。")
-			} else {
-				message(w, 503, "无法核实文件夹，尚未生成兑换码。")
-			}
-			return
-		}
-		folder = q.Folder
+	folder, e := ensureBatch(tx, q.Batch)
+	if e != nil {
+		message(w, 503, "无法保存批次。")
+		return
+	}
+	if e = tx.QueryRow("SELECT name FROM folders WHERE id=?", folder).Scan(&q.Batch); e != nil {
+		message(w, 503, "无法读取批次。")
+		return
 	}
 	codes := make([]string, 0, q.Count)
 	now := time.Now().Unix()
 	for i := 0; i < q.Count; i++ {
 		code := "XG-" + strings.ToUpper(token(24))
-		_, e = tx.Exec("INSERT INTO codes(id,hash,hint,batch,months,status,created,updated,folder_id) VALUES(?,?,?,?,?,'active',?,?,?)", token(16), hash(code), code[len(code)-8:], q.Batch, q.Months, now, now, folder)
+		id := token(16)
+		// Persist encrypted content first; an interrupted transaction can only leave an
+		// unreachable vault record, never an active code without its encrypted value.
+		if e = s.vault.Put("redemption:"+id, []byte(code)); e != nil {
+			message(w, 503, "无法加密保存兑换码，尚未生成本批。")
+			return
+		}
+		_, e = tx.Exec("INSERT INTO codes(id,hash,hint,batch,months,status,created,updated,folder_id,copyable) VALUES(?,?,?,?,?,'active',?,?,?,1)", id, hash(code), code[len(code)-8:], q.Batch, q.Months, now, now, folder)
 		if e != nil {
 			message(w, 503, "生成失败，没有保存本批兑换码。")
 			return
@@ -644,7 +652,7 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		message(w, 503, "保存结果不确定，请在后台核实批次后再操作。")
 		return
 	}
-	reply(w, 201, map[string]any{"codes": codes, "batch": q.Batch, "months": q.Months, "folder": q.Folder})
+	reply(w, 201, map[string]any{"codes": codes, "batch": q.Batch, "months": q.Months, "folder": folder})
 }
 func (s *server) revoke(w http.ResponseWriter, r *http.Request) {
 	var q struct {

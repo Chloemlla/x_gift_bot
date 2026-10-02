@@ -90,8 +90,17 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	var r Record
 	raw, e := v.Get("checkout:" + recipient)
 	if e == nil {
-		if json.Unmarshal(raw, &r) != nil || r.RecipientID != recipient || r.Months != plan.Months || r.Amount != plan.Minor || r.Currency != "BDT" || r.ProductID != plan.ProductID || !sessionURL(r.URL, r.SessionID) {
+		if json.Unmarshal(raw, &r) != nil || r.RecipientID != recipient || r.Months != plan.Months || r.Amount != plan.Minor || r.Currency != "BDT" || r.ProductID != plan.ProductID {
 			return nil, errors.New("existing checkout differs from this recipient or plan; refusing another order")
+		}
+		if r.Status == "creating" {
+			if r.SessionID != "" || r.URL != "" || r.PaymentMethod != "" || r.ConfirmParameters != "" || r.ConfirmKey != "" || r.SubmittedAt != 0 || r.PreflightSaved {
+				return nil, errors.New("creation record contains inconsistent payment evidence")
+			}
+			return &r, errors.New("previous checkout creation outcome is unknown; inspect it before creating another")
+		}
+		if !sessionURL(r.URL, r.SessionID) {
+			return nil, errors.New("existing checkout URL or session is invalid")
 		}
 	} else if !errors.Is(e, sql.ErrNoRows) {
 		return nil, e
@@ -101,9 +110,6 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	}
 	if r.Status != "" && r.Status != "created" && r.Status != "creating" {
 		return &r, fmt.Errorf("existing checkout status is %s; no payment will be resubmitted", r.Status)
-	}
-	if r.Status == "creating" {
-		return &r, errors.New("previous checkout creation outcome is unknown; inspect it before creating another")
 	}
 	if pay {
 		if e = CheckPaymentConfiguration(v); e != nil {

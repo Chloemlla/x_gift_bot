@@ -167,7 +167,7 @@ func Run(ctx context.Context) error {
 		}
 	}
 	// A crash is never interpreted as permission to submit the same payment again.
-	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "付款结果暂未确认，请点击「查询兑换进度」核实原订单；请勿重复兑换。", time.Now().Unix()); err != nil {
+	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "订单处理被中断，请查询原订单或联系管理员核实；请勿重复兑换。", time.Now().Unix()); err != nil {
 		return err
 	}
 	raw, err := v.Get("proxy")
@@ -487,7 +487,28 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 			}
 		})
 		record, err := checkout.RunForRecipient(ctx, s.vault, user, recipient, true, s.port, c.Months)
-		status, msg := "review", "付款结果暂未确认，请点击「查询兑换进度」核实原订单；请勿重复兑换。"
+		if err != nil {
+			stage := "before_order"
+			if record != nil {
+				stage = record.Status
+			}
+			failure, marshalErr := json.Marshal(map[string]any{"code_id": c.ID, "recipient_id": recipient, "months": c.Months, "stage": stage, "error": err.Error(), "observed_at": time.Now().Unix()})
+			if marshalErr != nil || s.vault.Put(fmt.Sprintf("redemption-failure:%s:%d", c.ID, time.Now().UnixNano()), failure) != nil {
+				log.Printf("order %s failure details could not be persisted", c.ID)
+			}
+			clear(failure)
+			log.Printf("order %s stopped at stage %s; upstream details remain encrypted", c.ID, stage)
+		}
+		status, msg := "review", "订单尚未完成，请联系管理员核实处理阶段；请勿重复兑换。"
+		if record != nil && record.SubmittedAt != 0 {
+			msg = "付款结果暂未确认，请点击「查询兑换进度」核实原订单；请勿重复兑换。"
+		} else if record != nil && record.ConfirmParameters == "" && record.ConfirmKey == "" {
+			if record.Status == "creating" {
+				msg = "创建赠送订单未完成，尚未提交付款。请联系管理员处理，请勿重复兑换。"
+			} else if record.Status == "created" {
+				msg = "订单已创建，但付款准备未完成，尚未提交付款。请联系管理员处理。"
+			}
+		}
 		if err == nil && record != nil && record.Status == "succeeded" && record.RecipientID == recipient && record.Months == c.Months && record.Amount == c.Months*10000 && record.Currency == "BDT" {
 			status, msg = "succeeded", fmt.Sprintf("已为 @%s 完成 %d 个月 Premium 赠送。", user, c.Months)
 		}

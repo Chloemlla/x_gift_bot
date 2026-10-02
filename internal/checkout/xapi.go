@@ -44,6 +44,7 @@ func planFor(months int) (Plan, error) {
 func (p Plan) Name() string { return fmt.Sprintf("Premium Gift - %d months", p.Months) }
 
 type xClient struct {
+	vault   *vault.Vault
 	http    *http.Client
 	headers http.Header
 }
@@ -92,10 +93,47 @@ func newXClient(v *vault.Vault, port int) (*xClient, error) {
 	}
 	p, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
 	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(p), TLSHandshakeTimeout: 15 * time.Second}, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("unexpected X API redirect") }}
-	return &xClient{client, h}, nil
+	return &xClient{http: client, headers: h, vault: v}, nil
 }
 func (c *xClient) close() { c.http.CloseIdleConnections() }
-func (c *xClient) call(ctx context.Context, user, name, id string, variables any, mutation bool, out any) error {
+func (c *xClient) call(ctx context.Context, user, name, id string, variables any, mutation bool, out any) (callErr error) {
+	// A fixed-operation audit is encrypted before sending, then completed even on
+	// transport/body failures. Never store request headers or cookies here.
+	var audit struct {
+		Operation  string `json:"operation"`
+		Variables  any    `json:"variables"`
+		StartedAt  int64  `json:"started_at"`
+		FinishedAt int64  `json:"finished_at,omitempty"`
+		Phase      string `json:"phase"`
+		HTTP       int    `json:"http_status,omitempty"`
+		Body       string `json:"body,omitempty"`
+		Cause      string `json:"cause,omitempty"`
+		Failure    string `json:"failure,omitempty"`
+	}
+	if mutation {
+		audit.Operation, audit.Variables, audit.StartedAt, audit.Phase = name, variables, time.Now().Unix(), "request_pending"
+		key := fmt.Sprintf("x-create-attempt:%s:%d", user, time.Now().UnixNano())
+		persist := func() error {
+			b, e := json.Marshal(audit)
+			if e != nil {
+				return e
+			}
+			defer clear(b)
+			return c.vault.Put(key, b)
+		}
+		if e := persist(); e != nil {
+			return errors.New("could not preserve X creation attempt before sending")
+		}
+		defer func() {
+			audit.FinishedAt = time.Now().Unix()
+			if callErr != nil {
+				audit.Failure = callErr.Error()
+			}
+			if e := persist(); e != nil {
+				callErr = errors.Join(callErr, errors.New("could not preserve X creation outcome"))
+			}
+		}()
+	}
 	target := "https://x.com/i/api/graphql/" + id + "/" + name
 	method := "GET"
 	var body []byte
@@ -118,15 +156,26 @@ func (c *xClient) call(ctx context.Context, user, name, id string, variables any
 	req.Header.Set("Referer", "https://x.com/"+user+"/gift-premium")
 	res, e := c.http.Do(req)
 	if e != nil {
+		audit.Phase, audit.Cause = "transport_failed", e.Error()
 		return fmt.Errorf("X %s request failed", name)
 	}
+	audit.HTTP, audit.Phase = res.StatusCode, "response_received"
 	defer res.Body.Close()
+	raw, e := io.ReadAll(io.LimitReader(res.Body, (2<<20)+1))
+	defer clear(raw)
+	if len(raw) > 2<<20 {
+		audit.Body = string(raw[:2<<20])
+		audit.Phase = "response_too_large"
+		return errors.New("X response exceeded size limit")
+	}
+	audit.Body = string(raw)
+	if e != nil {
+		audit.Phase, audit.Cause = "response_read_failed", e.Error()
+		return errors.New("X response could not be read")
+	}
+	audit.Phase = "response_validation"
 	if res.StatusCode != 200 {
 		return fmt.Errorf("X %s returned HTTP %d; no payment attempted", name, res.StatusCode)
-	}
-	raw, e := io.ReadAll(io.LimitReader(res.Body, 2<<20))
-	if e != nil {
-		return e
 	}
 	var envelope struct {
 		Errors []json.RawMessage `json:"errors"`
@@ -137,7 +186,11 @@ func (c *xClient) call(ctx context.Context, user, name, id string, variables any
 	if len(envelope.Errors) > 0 {
 		return fmt.Errorf("X %s rejected the operation", name)
 	}
-	return json.Unmarshal(raw, out)
+	if e = json.Unmarshal(raw, out); e != nil {
+		return e
+	}
+	audit.Phase = "response_decoded"
+	return nil
 }
 func (c *xClient) recipient(ctx context.Context, user string) (string, error) {
 	return c.identity(ctx, user, true)

@@ -7,12 +7,14 @@ import { randomBytes } from "node:crypto";
 const port = Number(process.env.PREVIEW_PORT || 4173);
 const paused = process.env.PREVIEW_PAUSED === "true";
 const states = new Map();
-let folders = [];
+let folders = [{ id: "a".repeat(32), name: "本地预览 · 示例批次" }];
+const plaintext = new Map();
 const now = Math.floor(Date.now() / 1000);
 let codes = ["active", "processing", "succeeded", "review", "revoked"].map(
   (status, index) => ({
     id: (index + 1).toString(16).padStart(32, "0"),
-    folder: "",
+    folder: "a".repeat(32),
+    copyable: false,
     hint: `DEMO000${index}`,
     batch: "本地预览 · 示例批次",
     months: index % 2 ? 3 : 6,
@@ -149,6 +151,8 @@ createServer(async (req, res) => {
           return;
         }
         folder.name = name;
+        for (const code of codes)
+          if (code.folder === folder.id) code.batch = name;
         json(200, { message: "已重命名。" });
         return;
       }
@@ -163,7 +167,11 @@ createServer(async (req, res) => {
         return;
       }
       folders = folders.filter((folder) => folder.id !== body.id);
-      for (const code of codes) if (code.folder === body.id) code.folder = "";
+      for (const code of codes)
+        if (code.folder === body.id) {
+          code.folder = "";
+          code.batch = "";
+        }
       json(200, { message: "文件夹已删除，兑换码已移至未分类。" });
       return;
     }
@@ -183,7 +191,10 @@ createServer(async (req, res) => {
         return;
       }
       for (const code of codes)
-        if (body.ids.includes(code.id)) code.folder = body.folder || "";
+        if (body.ids.includes(code.id)) {
+          code.folder = body.folder || "";
+          code.batch = folders.find((f) => f.id === code.folder)?.name || "";
+        }
       json(200, { message: "已更新分类。" });
       return;
     }
@@ -203,23 +214,37 @@ createServer(async (req, res) => {
         json(404, { message: "文件夹不存在。" });
         return;
       }
-      const batch = body.batch || "本地预览-" + Date.now();
+      let batch = body.batch || "本地预览-" + Date.now();
+      let folder = folders.find(
+        (f) => f.name.toLowerCase() === batch.toLowerCase(),
+      );
+      if (!folder) {
+        folder = { id: randomBytes(16).toString("hex"), name: batch };
+        folders.push(folder);
+      }
+      batch = folder.name;
+      body.folder = folder.id;
       const generated = Array.from(
         { length: body.count },
         () => "XG-" + randomBytes(24).toString("hex").toUpperCase(),
       );
       codes = [
-        ...generated.map((code) => ({
-          id: randomBytes(16).toString("hex"),
-          folder: body.folder || "",
-          hint: code.slice(-8),
-          batch,
-          months: body.months,
-          status: "active",
-          username: "",
-          message: "",
-          created: now,
-        })),
+        ...generated.map((code) => {
+          const id = randomBytes(16).toString("hex");
+          plaintext.set(id, code);
+          return {
+            id,
+            copyable: true,
+            folder: body.folder || "",
+            hint: code.slice(-8),
+            batch,
+            months: body.months,
+            status: "active",
+            username: "",
+            message: "",
+            created: now,
+          };
+        }),
         ...codes,
       ];
       json(201, {
@@ -228,6 +253,14 @@ createServer(async (req, res) => {
         months: body.months,
         folder: body.folder || "",
       });
+      return;
+    }
+    if (url.pathname === "/api/admin/codes/copy") {
+      const code = plaintext.get(body.id);
+      json(
+        code ? 200 : 409,
+        code ? { code } : { message: "历史兑换码未保存完整内容。" },
+      );
       return;
     }
     if (url.pathname === "/api/admin/revoke") {

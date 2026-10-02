@@ -11,6 +11,9 @@ import {
   DialogContentText,
   DialogTitle,
   LinearProgress,
+  IconButton,
+  Tooltip,
+  Snackbar,
   MenuItem,
   Paper,
   Stack,
@@ -23,6 +26,9 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
+import BlockOutlined from "@mui/icons-material/BlockOutlined";
+import ContentCopyOutlined from "@mui/icons-material/ContentCopyOutlined";
+import DriveFileMoveOutlined from "@mui/icons-material/DriveFileMoveOutlined";
 import AddRounded from "@mui/icons-material/AddRounded";
 import DownloadRounded from "@mui/icons-material/DownloadRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
@@ -34,6 +40,7 @@ import { adminApi as api, type AdminStats, type Folder } from "./adminApi";
 import { FolderPanel } from "./FolderPanel";
 
 type Code = {
+  copyable: boolean;
   folder: string;
   id: string;
   hint: string;
@@ -59,8 +66,7 @@ type Generated = {
   months: number;
   folder: string;
 };
-type Confirmation =
-  { kind: "revoke"; code: Code } | { kind: "replace" | "clear" } | null;
+type Confirmation = { kind: "revoke"; code: Code } | null;
 const statuses: Record<
   string,
   { label: string; color: "default" | "primary" | "success" | "warning" }
@@ -79,7 +85,8 @@ function Admin() {
   const [months, setMonths] = useState(6);
   const [count, setCount] = useState("10");
   const [batch, setBatch] = useState("");
-  const [generateFolder, setGenerateFolder] = useState("");
+  const [copyNotice, setCopyNotice] = useState("");
+  const copying = useRef(false);
   const [selectedIDs, setSelectedIDs] = useState<string[]>([]);
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveTarget, setMoveTarget] = useState("");
@@ -123,15 +130,6 @@ function Admin() {
   useEffect(() => {
     void refresh(0);
   }, [refresh]);
-  useEffect(() => {
-    if (!generated) return;
-    const prevent = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", prevent);
-    return () => window.removeEventListener("beforeunload", prevent);
-  }, [generated]);
 
   useEffect(() => {
     if (!focusTarget || confirmation || busy || loading) return;
@@ -144,6 +142,36 @@ function Admin() {
     return () => clearTimeout(timer);
   }, [focusTarget, confirmation, busy, loading]);
 
+  async function copyRow(code: Code) {
+    if (!code.copyable) {
+      setCopyNotice("历史兑换码未保存完整内容，请使用原先下载的 TXT。");
+      return;
+    }
+    if (copying.current) return;
+    copying.current = true;
+    try {
+      const result = api<{ code: string }>("/api/admin/codes/copy", {
+        id: code.id,
+      });
+      // Start the clipboard operation within the user's gesture (including Safari).
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/plain": result.then(
+              (data) => new Blob([data.code], { type: "text/plain" }),
+            ),
+          }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText((await result).code);
+      }
+      setCopyNotice(`已复制尾号 ${code.hint} 的兑换码。`);
+    } catch {
+      setCopyNotice("复制失败，请检查剪贴板权限或稍后重试。");
+    } finally {
+      copying.current = false;
+    }
+  }
   async function generate() {
     if (mutation.current) return;
     mutation.current = true;
@@ -155,11 +183,10 @@ function Admin() {
         months,
         count: Number(count),
         batch: batch.trim(),
-        folder: generateFolder,
       });
       setGenerated(data);
       setNotice({
-        text: `已生成 ${data.codes.length} 枚兑换码，请立即下载。刷新或关闭页面后无法恢复明文。`,
+        text: `已生成 ${data.codes.length} 枚兑换码，已归入批次「${data.batch}」。点击列表条目即可复制。`,
         error: false,
       });
       requestAnimationFrame(() =>
@@ -177,16 +204,6 @@ function Admin() {
     }
   }
   async function confirm() {
-    if (confirmation?.kind === "replace") {
-      await generate();
-      return;
-    }
-    if (confirmation?.kind === "clear") {
-      setFocusTarget("form");
-      setGenerated(null);
-      setConfirmation(null);
-      return;
-    }
     if (confirmation?.kind !== "revoke" || mutation.current) return;
     mutation.current = true;
     setBusy(true);
@@ -294,7 +311,6 @@ function Admin() {
           setBusy(value);
         }}
         onChanged={async (deleted) => {
-          if (deleted === generateFolder) setGenerateFolder("");
           if (deleted === filterRef.current) filterRef.current = "";
           await refresh(0);
         }}
@@ -305,7 +321,7 @@ function Admin() {
           <Typography variant="h2">生成兑换码</Typography>
         </Stack>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-          每批最多 500 枚。兑换码明文仅显示一次，生成后请及时下载保存。
+          每批最多 500 枚。同名批次自动归入同一个文件夹。
         </Typography>
         <Box
           component="form"
@@ -328,8 +344,7 @@ function Admin() {
               busy
             )
               return;
-            if (generated) setConfirmation({ kind: "replace" });
-            else void generate();
+            void generate();
           }}
         >
           <Box
@@ -338,7 +353,7 @@ function Admin() {
               gridTemplateColumns: {
                 xs: "1fr",
                 sm: "1fr 1fr",
-                md: "1fr 1fr 1.5fr 2fr",
+                md: "1fr 1fr 2fr",
               },
               gap: 2,
               alignItems: "start",
@@ -369,29 +384,6 @@ function Admin() {
               slotProps={{ htmlInput: { min: 1, max: 500, step: 1 } }}
             />
             <TextField
-              select
-              label="生成到文件夹"
-              slotProps={{
-                select: { displayEmpty: true },
-                inputLabel: { shrink: true },
-              }}
-              value={generateFolder}
-              onChange={(event) => setGenerateFolder(event.target.value)}
-              disabled={busy || loading || !!listError}
-              helperText="已有兑换码也可在下方移动"
-            >
-              <MenuItem value="">未分类</MenuItem>
-              {(listing?.folders ?? []).map((folder) => (
-                <MenuItem
-                  key={folder.id}
-                  value={folder.id}
-                  sx={{ whiteSpace: "normal" }}
-                >
-                  {folder.name}
-                </MenuItem>
-              ))}
-            </TextField>
-            <TextField
               label="批次名称（可选）"
               placeholder="例如：十月赠礼"
               value={batch}
@@ -401,7 +393,7 @@ function Admin() {
               helperText={
                 batchError
                   ? "批次名称不能超过 120 字节（约 40 个汉字）"
-                  : "留空时自动生成批次名称"
+                  : "批次名称就是文件夹名称，留空自动命名"
               }
             />
             <Button
@@ -431,7 +423,7 @@ function Admin() {
           variant="outlined"
           sx={{ p: 3, mb: 3, borderColor: "primary.main" }}
         >
-          <Typography variant="h2">请保存本批兑换码</Typography>
+          <Typography variant="h2">本批兑换码</Typography>
           <Typography
             variant="body2"
             color="text.secondary"
@@ -452,9 +444,9 @@ function Admin() {
             <Button
               variant="outlined"
               disabled={busy}
-              onClick={() => setConfirmation({ kind: "clear" })}
+              onClick={() => setGenerated(null)}
             >
-              已保存，清除明文
+              收起本批兑换码
             </Button>
           </Stack>
         </Paper>
@@ -469,24 +461,33 @@ function Admin() {
           <Box>
             <Typography variant="h2">
               {listing?.folder === "unfiled"
-                ? "未分类"
+                ? "未命名批次"
                 : (listing?.folders.find(
                     (folder) => folder.id === listing.folder,
                   )?.name ?? "全部兑换码")}
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              每页最多 100 条 · 按生成时间倒序
+              点击条目复制兑换码 · 每页最多 100 条
             </Typography>
           </Box>
-          <Button
-            ref={refreshButton}
-            startIcon={<RefreshRounded />}
-            disabled={loading || busy}
-            onClick={() => void refresh(listing?.page ?? 0)}
-            sx={{ px: 1.5 }}
-          >
-            刷新
-          </Button>
+          <Tooltip describeChild title="刷新列表">
+            <span>
+              <IconButton
+                ref={refreshButton}
+                aria-label="刷新列表"
+                disabled={loading || busy}
+                onClick={() => void refresh(listing?.page ?? 0)}
+                sx={{
+                  border: 1,
+                  borderColor: "divider",
+                  width: 44,
+                  height: 44,
+                }}
+              >
+                <RefreshRounded />
+              </IconButton>
+            </span>
+          </Tooltip>
         </Stack>
         {loading && <LinearProgress aria-label="正在加载兑换码" />}
         {listError && (
@@ -518,13 +519,15 @@ function Admin() {
             </Typography>
             <Button
               color="secondary"
+              variant="outlined"
+              startIcon={<DriveFileMoveOutlined />}
               disabled={busy || loading || !!listError}
               onClick={() => {
                 setMoveTarget("");
                 setMoveOpen(true);
               }}
             >
-              移动到文件夹
+              移动到批次
             </Button>
           </Stack>
         )}
@@ -585,8 +588,15 @@ function Admin() {
                   key={code.id}
                   hover
                   selected={selectedIDs.includes(code.id)}
+                  onClick={() => {
+                    if (!busy && !loading && !listError) void copyRow(code);
+                  }}
+                  sx={{ cursor: code.copyable ? "pointer" : "default" }}
                 >
-                  <TableCell padding="checkbox">
+                  <TableCell
+                    padding="checkbox"
+                    onClick={(e) => e.stopPropagation()}
+                  >
                     <Checkbox
                       slotProps={{
                         input: {
@@ -622,11 +632,8 @@ function Admin() {
                       variant="caption"
                       component="p"
                       color="text.secondary"
-                      sx={{ overflowWrap: "anywhere" }}
                     >
-                      {listing?.folders.find(
-                        (folder) => folder.id === code.folder,
-                      )?.name ?? "未分类"}
+                      {code.copyable ? "点击复制" : "历史码未保存"}
                     </Typography>
                   </TableCell>
                   <TableCell sx={{ whiteSpace: "nowrap" }}>
@@ -665,23 +672,57 @@ function Admin() {
                       )}
                     </Typography>
                   </TableCell>
-                  <TableCell>
-                    {code.status === "active" ? (
-                      <Button
-                        color="error"
-                        size="small"
-                        disabled={busy || loading || !!listError}
-                        onClick={() =>
-                          setConfirmation({ kind: "revoke", code })
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <Stack direction="row" spacing={1}>
+                      <Tooltip
+                        describeChild
+                        title={
+                          code.copyable
+                            ? "复制完整兑换码"
+                            : "历史码未保存完整内容，请使用原 TXT"
                         }
-                        aria-label={`停用尾号 ${code.hint} 的兑换码`}
-                        sx={{ px: 1.5 }}
                       >
-                        停用
-                      </Button>
-                    ) : (
-                      "—"
-                    )}
+                        <span>
+                          <IconButton
+                            aria-label={`复制尾号 ${code.hint} 的兑换码`}
+                            disabled={
+                              !code.copyable || busy || loading || !!listError
+                            }
+                            onClick={() => void copyRow(code)}
+                            sx={{
+                              border: 1,
+                              borderColor: "divider",
+                              width: 44,
+                              height: 44,
+                            }}
+                          >
+                            <ContentCopyOutlined fontSize="small" />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                      {code.status === "active" && (
+                        <Tooltip describeChild title="停用兑换码">
+                          <span>
+                            <IconButton
+                              color="error"
+                              disabled={busy || loading || !!listError}
+                              aria-label={`停用尾号 ${code.hint} 的兑换码`}
+                              onClick={() =>
+                                setConfirmation({ kind: "revoke", code })
+                              }
+                              sx={{
+                                border: 1,
+                                borderColor: "divider",
+                                width: 44,
+                                height: 44,
+                              }}
+                            >
+                              <BlockOutlined fontSize="small" />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      )}
+                    </Stack>
                   </TableCell>
                 </TableRow>
               ))}
@@ -744,13 +785,13 @@ function Admin() {
         <DialogContent>
           <TextField
             select
-            label="目标文件夹"
+            label="目标批次"
             value={moveTarget}
             disabled={busy}
             onChange={(event) => setMoveTarget(event.target.value)}
             sx={{ mt: 1 }}
           >
-            <MenuItem value="">未分类</MenuItem>
+            <MenuItem value="">未命名批次</MenuItem>
             {(listing?.folders ?? []).map((folder) => (
               <MenuItem
                 value={folder.id}
@@ -788,20 +829,10 @@ function Admin() {
         maxWidth="xs"
         fullWidth
       >
-        <DialogTitle id="admin-dialog-title">
-          {confirmation?.kind === "revoke"
-            ? "停用这枚兑换码？"
-            : confirmation?.kind === "replace"
-              ? "上一批兑换码已保存？"
-              : "确认清除兑换码明文？"}
-        </DialogTitle>
+        <DialogTitle id="admin-dialog-title">停用这枚兑换码？</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            {confirmation?.kind === "revoke"
-              ? `尾号 ${confirmation.code.hint} 的兑换码将无法使用。此操作不可撤销。`
-              : confirmation?.kind === "replace"
-                ? "生成下一批会替换当前显示的明文。请确认已下载并妥善保存上一批兑换码。"
-                : "清除后无法再次查看完整兑换码。请确认已下载并妥善保存本批兑换码。"}
+            {`尾号 ${confirmation?.code.hint ?? ""} 的兑换码将无法使用。此操作不可撤销。`}
           </DialogContentText>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
@@ -814,18 +845,20 @@ function Admin() {
           </Button>
           <Button
             variant="contained"
-            color={confirmation?.kind === "revoke" ? "error" : "primary"}
+            color="error"
             disabled={busy}
             onClick={() => void confirm()}
           >
-            {busy
-              ? "正在处理…"
-              : confirmation?.kind === "revoke"
-                ? "确认停用"
-                : "已保存，继续"}
+            {busy ? "正在处理…" : "确认停用"}
           </Button>
         </DialogActions>
       </Dialog>
+      <Snackbar
+        open={!!copyNotice}
+        autoHideDuration={4000}
+        onClose={() => setCopyNotice("")}
+        message={copyNotice}
+      />
     </Shell>
   );
 }

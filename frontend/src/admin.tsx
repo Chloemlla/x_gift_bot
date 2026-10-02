@@ -28,6 +28,7 @@ import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import ConfirmationNumberOutlined from "@mui/icons-material/ConfirmationNumberOutlined";
 import { mount, request, Shell } from "./shared";
 import { AppearanceMenu } from "./AppearanceMenu";
+import { CopyableCodes } from "./CopyableCodes";
 
 type Code = {
   id: string;
@@ -349,19 +350,7 @@ function Admin() {
             {generated.batch} · {generated.codes.length} 枚 · {generated.months}{" "}
             个月
           </Typography>
-          <TextField
-            label="本批兑换码明文"
-            multiline
-            rows={4}
-            value={generated.codes.join("\n")}
-            slotProps={{
-              input: {
-                readOnly: true,
-                sx: { fontFamily: "monospace", fontSize: 13 },
-              },
-            }}
-            sx={{ my: 2 }}
-          />
+          <CopyableCodes key={generated.codes[0]} codes={generated.codes} />
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
             <Button
               variant="contained"

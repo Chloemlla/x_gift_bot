@@ -4,6 +4,7 @@ import {
   Box,
   Button,
   Chip,
+  Checkbox,
   Dialog,
   DialogActions,
   DialogContent,
@@ -26,11 +27,14 @@ import AddRounded from "@mui/icons-material/AddRounded";
 import DownloadRounded from "@mui/icons-material/DownloadRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import ConfirmationNumberOutlined from "@mui/icons-material/ConfirmationNumberOutlined";
-import { mount, request, Shell } from "./shared";
+import { mount, Shell } from "./shared";
 import { AppearanceMenu } from "./AppearanceMenu";
 import { CopyableCodes } from "./CopyableCodes";
+import { adminApi as api, type AdminStats, type Folder } from "./adminApi";
+import { FolderPanel } from "./FolderPanel";
 
 type Code = {
+  folder: string;
   id: string;
   hint: string;
   batch: string;
@@ -41,12 +45,20 @@ type Code = {
   created: number;
 };
 type Listing = {
+  folder: string;
+  folders: Folder[];
+  stats: AdminStats;
   codes: Code[];
   page: number;
   has_more: boolean;
   payments_enabled: boolean;
 };
-type Generated = { codes: string[]; batch: string; months: number };
+type Generated = {
+  codes: string[];
+  batch: string;
+  months: number;
+  folder: string;
+};
 type Confirmation =
   { kind: "revoke"; code: Code } | { kind: "replace" | "clear" } | null;
 const statuses: Record<
@@ -59,12 +71,6 @@ const statuses: Record<
   review: { label: "待核实", color: "warning" },
   revoked: { label: "已停用", color: "default" },
 };
-async function api<T>(path: string, body?: unknown): Promise<T> {
-  const { ok, data } = await request<T & { message?: string }>(path, body);
-  if (!ok) throw new Error(data.message || "请求失败，请稍后重试。");
-  return data;
-}
-
 function Admin() {
   const [listing, setListing] = useState<Listing | null>(null);
   const [loading, setLoading] = useState(true);
@@ -73,6 +79,11 @@ function Admin() {
   const [months, setMonths] = useState(6);
   const [count, setCount] = useState("10");
   const [batch, setBatch] = useState("");
+  const [generateFolder, setGenerateFolder] = useState("");
+  const [selectedIDs, setSelectedIDs] = useState<string[]>([]);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveTarget, setMoveTarget] = useState("");
+  const filterRef = useRef("");
   const [generated, setGenerated] = useState<Generated | null>(null);
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(
     null,
@@ -86,20 +97,29 @@ function Admin() {
   const form = useRef<HTMLFormElement>(null);
   const generatedPanel = useRef<HTMLDivElement>(null);
   const refreshButton = useRef<HTMLButtonElement>(null);
-  const refresh = useCallback(async (page: number) => {
-    const sequence = ++listSequence.current;
-    setLoading(true);
-    setListError("");
-    try {
-      const data = await api<Listing>(`/api/admin/codes?page=${page}`);
-      if (sequence === listSequence.current) setListing(data);
-    } catch (error) {
-      if (sequence === listSequence.current)
-        setListError((error as Error).message);
-    } finally {
-      if (sequence === listSequence.current) setLoading(false);
-    }
-  }, []);
+  const refresh = useCallback(
+    async (page: number, folder = filterRef.current) => {
+      const sequence = ++listSequence.current;
+      setLoading(true);
+      setListError("");
+      try {
+        const data = await api<Listing>(
+          `/api/admin/codes?page=${page}&folder=${encodeURIComponent(folder)}`,
+        );
+        if (sequence === listSequence.current) {
+          setListing(data);
+          filterRef.current = data.folder;
+          setSelectedIDs([]);
+        }
+      } catch (error) {
+        if (sequence === listSequence.current)
+          setListError((error as Error).message);
+      } finally {
+        if (sequence === listSequence.current) setLoading(false);
+      }
+    },
+    [],
+  );
   useEffect(() => {
     void refresh(0);
   }, [refresh]);
@@ -135,6 +155,7 @@ function Admin() {
         months,
         count: Number(count),
         batch: batch.trim(),
+        folder: generateFolder,
       });
       setGenerated(data);
       setNotice({
@@ -144,7 +165,7 @@ function Admin() {
       requestAnimationFrame(() =>
         generatedPanel.current?.scrollIntoView({ block: "nearest" }),
       );
-      await refresh(0);
+      await refresh(0, data.folder || "unfiled");
     } catch (error) {
       setNotice({
         text: `${(error as Error).message} 若连接中断，请先刷新列表核实批次，不要立即重复生成。`,
@@ -178,6 +199,34 @@ function Admin() {
     } catch (error) {
       setNotice({ text: (error as Error).message, error: true });
       setConfirmation(null);
+    } finally {
+      mutation.current = false;
+      setBusy(false);
+    }
+  }
+  async function moveSelected() {
+    if (mutation.current || !selectedIDs.length) return;
+    mutation.current = true;
+    setBusy(true);
+    setNotice(null);
+    try {
+      await api("/api/admin/codes/move", {
+        ids: selectedIDs,
+        folder: moveTarget,
+      });
+      setNotice({
+        text: `已移动 ${selectedIDs.length} 枚兑换码。`,
+        error: false,
+      });
+      setMoveOpen(false);
+      setFocusTarget("list");
+      await refresh(0);
+    } catch (e) {
+      setMoveOpen(false);
+      setNotice({
+        text: `${(e as Error).message} 若连接中断，请刷新列表核实。`,
+        error: true,
+      });
     } finally {
       mutation.current = false;
       setBusy(false);
@@ -232,6 +281,24 @@ function Admin() {
           <AppearanceMenu />
         </Stack>
       </Stack>
+      <FolderPanel
+        folders={listing?.folders ?? []}
+        stats={listing?.stats}
+        filter={listing?.folder ?? ""}
+        disabled={busy || loading}
+        onSelect={(folder) => {
+          void refresh(0, folder);
+        }}
+        onBusyChange={(value) => {
+          mutation.current = value;
+          setBusy(value);
+        }}
+        onChanged={async (deleted) => {
+          if (deleted === generateFolder) setGenerateFolder("");
+          if (deleted === filterRef.current) filterRef.current = "";
+          await refresh(0);
+        }}
+      />
       <Paper variant="outlined" sx={{ p: { xs: 2.5, sm: 3 }, mb: 3 }}>
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
           <ConfirmationNumberOutlined color="primary" />
@@ -271,7 +338,7 @@ function Admin() {
               gridTemplateColumns: {
                 xs: "1fr",
                 sm: "1fr 1fr",
-                md: "1fr 1fr 2fr auto",
+                md: "1fr 1fr 1.5fr 2fr",
               },
               gap: 2,
               alignItems: "start",
@@ -302,6 +369,29 @@ function Admin() {
               slotProps={{ htmlInput: { min: 1, max: 500, step: 1 } }}
             />
             <TextField
+              select
+              label="生成到文件夹"
+              slotProps={{
+                select: { displayEmpty: true },
+                inputLabel: { shrink: true },
+              }}
+              value={generateFolder}
+              onChange={(event) => setGenerateFolder(event.target.value)}
+              disabled={busy || loading || !!listError}
+              helperText="已有兑换码也可在下方移动"
+            >
+              <MenuItem value="">未分类</MenuItem>
+              {(listing?.folders ?? []).map((folder) => (
+                <MenuItem
+                  key={folder.id}
+                  value={folder.id}
+                  sx={{ whiteSpace: "normal" }}
+                >
+                  {folder.name}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
               label="批次名称（可选）"
               placeholder="例如：十月赠礼"
               value={batch}
@@ -318,8 +408,8 @@ function Admin() {
               type="submit"
               variant="contained"
               startIcon={<AddRounded />}
-              disabled={busy}
-              sx={{ mt: { md: 0.75 } }}
+              disabled={busy || loading || !!listError}
+              sx={{ gridColumn: { sm: "1 / -1" }, justifySelf: { sm: "end" } }}
             >
               {busy ? "正在处理…" : "生成兑换码"}
             </Button>
@@ -377,7 +467,13 @@ function Admin() {
           sx={{ px: { xs: 2, sm: 3 }, py: 2 }}
         >
           <Box>
-            <Typography variant="h2">全部兑换码</Typography>
+            <Typography variant="h2">
+              {listing?.folder === "unfiled"
+                ? "未分类"
+                : (listing?.folders.find(
+                    (folder) => folder.id === listing.folder,
+                  )?.name ?? "全部兑换码")}
+            </Typography>
             <Typography variant="body2" color="text.secondary">
               每页最多 100 条 · 按生成时间倒序
             </Typography>
@@ -409,6 +505,29 @@ function Admin() {
         >
           左右滑动表格，可查看账号和操作。
         </Typography>
+        {selectedIDs.length > 0 && (
+          <Stack
+            direction="row"
+            justifyContent="space-between"
+            alignItems="center"
+            spacing={1}
+            sx={{ px: 2, py: 1, bgcolor: "action.selected" }}
+          >
+            <Typography variant="body2">
+              已选择 {selectedIDs.length} 枚
+            </Typography>
+            <Button
+              color="secondary"
+              disabled={busy || loading || !!listError}
+              onClick={() => {
+                setMoveTarget("");
+                setMoveOpen(true);
+              }}
+            >
+              移动到文件夹
+            </Button>
+          </Stack>
+        )}
         <TableContainer
           tabIndex={0}
           role="region"
@@ -418,6 +537,31 @@ function Admin() {
           <Table sx={{ minWidth: 750 }} aria-label="兑换码列表">
             <TableHead sx={{ bgcolor: "background.default" }}>
               <TableRow>
+                <TableCell padding="checkbox">
+                  <Checkbox
+                    slotProps={{
+                      input: { "aria-label": "选择本页全部兑换码" },
+                    }}
+                    disabled={
+                      busy || loading || !!listError || !listing?.codes.length
+                    }
+                    checked={
+                      !!listing?.codes.length &&
+                      selectedIDs.length === listing.codes.length
+                    }
+                    indeterminate={
+                      selectedIDs.length > 0 &&
+                      selectedIDs.length < (listing?.codes.length ?? 0)
+                    }
+                    onChange={(event) =>
+                      setSelectedIDs(
+                        event.target.checked
+                          ? (listing?.codes.map((code) => code.id) ?? [])
+                          : [],
+                      )
+                    }
+                  />
+                </TableCell>
                 {[
                   "兑换码 / 批次",
                   "套餐",
@@ -437,7 +581,29 @@ function Admin() {
             </TableHead>
             <TableBody>
               {listing?.codes.map((code) => (
-                <TableRow key={code.id} hover>
+                <TableRow
+                  key={code.id}
+                  hover
+                  selected={selectedIDs.includes(code.id)}
+                >
+                  <TableCell padding="checkbox">
+                    <Checkbox
+                      slotProps={{
+                        input: {
+                          "aria-label": `选择尾号 ${code.hint} 的兑换码`,
+                        },
+                      }}
+                      checked={selectedIDs.includes(code.id)}
+                      disabled={busy || loading || !!listError}
+                      onChange={(event) =>
+                        setSelectedIDs((ids) =>
+                          event.target.checked
+                            ? [...ids, code.id]
+                            : ids.filter((id) => id !== code.id),
+                        )
+                      }
+                    />
+                  </TableCell>
                   <TableCell sx={{ maxWidth: 260 }}>
                     <Typography
                       variant="body2"
@@ -451,6 +617,16 @@ function Admin() {
                       sx={{ overflowWrap: "anywhere" }}
                     >
                       {code.batch}
+                    </Typography>
+                    <Typography
+                      variant="caption"
+                      component="p"
+                      color="text.secondary"
+                      sx={{ overflowWrap: "anywhere" }}
+                    >
+                      {listing?.folders.find(
+                        (folder) => folder.id === code.folder,
+                      )?.name ?? "未分类"}
                     </Typography>
                   </TableCell>
                   <TableCell sx={{ whiteSpace: "nowrap" }}>
@@ -511,13 +687,13 @@ function Admin() {
               ))}
               {!loading && !listError && !listing?.codes.length && (
                 <TableRow>
-                  <TableCell colSpan={6} align="center" sx={{ py: 7 }}>
+                  <TableCell colSpan={7} align="center" sx={{ py: 7 }}>
                     <ConfirmationNumberOutlined
                       sx={{ fontSize: 40, color: "text.secondary", mb: 1 }}
                     />
-                    <Typography fontWeight={600}>还没有兑换码</Typography>
+                    <Typography fontWeight={600}>当前分类没有兑换码</Typography>
                     <Typography variant="body2" color="text.secondary">
-                      在上方生成第一批，开始送出 Premium。
+                      可在上方生成兑换码，或从其他分类移动到这里。
                     </Typography>
                   </TableCell>
                 </TableRow>
@@ -552,6 +728,56 @@ function Admin() {
           </Stack>
         </Stack>
       </Paper>
+      <Dialog
+        open={moveOpen}
+        disableRestoreFocus={focusTarget !== null}
+        onClose={() => {
+          if (!busy) setMoveOpen(false);
+        }}
+        fullWidth
+        maxWidth="xs"
+        aria-labelledby="move-dialog-title"
+      >
+        <DialogTitle id="move-dialog-title">
+          移动 {selectedIDs.length} 枚兑换码
+        </DialogTitle>
+        <DialogContent>
+          <TextField
+            select
+            label="目标文件夹"
+            value={moveTarget}
+            disabled={busy}
+            onChange={(event) => setMoveTarget(event.target.value)}
+            sx={{ mt: 1 }}
+          >
+            <MenuItem value="">未分类</MenuItem>
+            {(listing?.folders ?? []).map((folder) => (
+              <MenuItem
+                value={folder.id}
+                key={folder.id}
+                sx={{ whiteSpace: "normal" }}
+              >
+                {folder.name}
+              </MenuItem>
+            ))}
+          </TextField>
+          <DialogContentText sx={{ mt: 2 }}>
+            只修改归属分类，不改变兑换码、账号和订单状态。
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button autoFocus disabled={busy} onClick={() => setMoveOpen(false)}>
+            取消
+          </Button>
+          <Button
+            variant="contained"
+            disabled={busy || !selectedIDs.length}
+            onClick={() => void moveSelected()}
+          >
+            {busy ? "正在移动…" : "确认移动"}
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Dialog
         disableRestoreFocus={focusTarget !== null}
         open={!!confirmation}

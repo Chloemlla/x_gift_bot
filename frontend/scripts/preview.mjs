@@ -7,10 +7,12 @@ import { randomBytes } from "node:crypto";
 const port = Number(process.env.PREVIEW_PORT || 4173);
 const paused = process.env.PREVIEW_PAUSED === "true";
 const states = new Map();
+let folders = [];
 const now = Math.floor(Date.now() / 1000);
 let codes = ["active", "processing", "succeeded", "review", "revoked"].map(
   (status, index) => ({
-    id: `preview-${index}`,
+    id: (index + 1).toString(16).padStart(32, "0"),
+    folder: "",
     hint: `DEMO000${index}`,
     batch: "本地预览 · 示例批次",
     months: index % 2 ? 3 : 6,
@@ -68,10 +70,42 @@ createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/api/admin/codes") {
       const page = Math.max(0, Number(url.searchParams.get("page")) || 0);
+      const folder = url.searchParams.get("folder") || "";
+      if (
+        folder &&
+        folder !== "unfiled" &&
+        !folders.some((item) => item.id === folder)
+      ) {
+        json(404, { message: "文件夹不存在，请刷新列表。" });
+        return;
+      }
+      const filtered = codes.filter(
+        (code) =>
+          !folder ||
+          (folder === "unfiled" ? !code.folder : code.folder === folder),
+      );
+      const stats = {
+        total: codes.length,
+        active: 0,
+        processing: 0,
+        succeeded: 0,
+        review: 0,
+        revoked: 0,
+        unfiled: codes.filter((code) => !code.folder).length,
+      };
+      for (const code of codes) stats[code.status]++;
       json(200, {
-        codes: codes.slice(page * 100, (page + 1) * 100),
+        codes: filtered.slice(page * 100, (page + 1) * 100),
         page,
-        has_more: codes.length > (page + 1) * 100,
+        folder,
+        stats,
+        folders: folders
+          .map((item) => ({
+            ...item,
+            count: codes.filter((code) => code.folder === item.id).length,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+        has_more: filtered.length > (page + 1) * 100,
         payments_enabled: !paused,
       });
       return;
@@ -89,6 +123,70 @@ createServer(async (req, res) => {
       }
     }
     const body = JSON.parse(raw);
+    if (
+      url.pathname === "/api/admin/folders" ||
+      url.pathname === "/api/admin/folders/rename"
+    ) {
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      if (!name || Buffer.byteLength(name) > 120) {
+        json(400, { message: "请输入有效文件夹名称（最多 120 字节）。" });
+        return;
+      }
+      if (
+        folders.some(
+          (folder) =>
+            folder.name.toLowerCase() === name.toLowerCase() &&
+            folder.id !== body.id,
+        )
+      ) {
+        json(409, { message: "已存在同名文件夹。" });
+        return;
+      }
+      if (url.pathname.endsWith("/rename")) {
+        const folder = folders.find((item) => item.id === body.id);
+        if (!folder) {
+          json(404, { message: "文件夹不存在。" });
+          return;
+        }
+        folder.name = name;
+        json(200, { message: "已重命名。" });
+        return;
+      }
+      const folder = { id: randomBytes(16).toString("hex"), name };
+      folders.push(folder);
+      json(201, { ...folder, count: 0 });
+      return;
+    }
+    if (url.pathname === "/api/admin/folders/delete") {
+      if (!folders.some((folder) => folder.id === body.id)) {
+        json(404, { message: "文件夹不存在。" });
+        return;
+      }
+      folders = folders.filter((folder) => folder.id !== body.id);
+      for (const code of codes) if (code.folder === body.id) code.folder = "";
+      json(200, { message: "文件夹已删除，兑换码已移至未分类。" });
+      return;
+    }
+    if (url.pathname === "/api/admin/codes/move") {
+      if (
+        !Array.isArray(body.ids) ||
+        !body.ids.length ||
+        body.ids.length > 100 ||
+        new Set(body.ids).size !== body.ids.length ||
+        !body.ids.every((id) => codes.some((code) => code.id === id))
+      ) {
+        json(409, { message: "兑换码选择无效，请刷新列表。" });
+        return;
+      }
+      if (body.folder && !folders.some((folder) => folder.id === body.folder)) {
+        json(404, { message: "文件夹不存在。" });
+        return;
+      }
+      for (const code of codes)
+        if (body.ids.includes(code.id)) code.folder = body.folder || "";
+      json(200, { message: "已更新分类。" });
+      return;
+    }
     if (url.pathname === "/api/admin/codes") {
       if (
         ![3, 6].includes(body.months) ||
@@ -101,6 +199,10 @@ createServer(async (req, res) => {
         json(400, { message: "请检查套餐、数量和批次名称。" });
         return;
       }
+      if (body.folder && !folders.some((folder) => folder.id === body.folder)) {
+        json(404, { message: "文件夹不存在。" });
+        return;
+      }
       const batch = body.batch || "本地预览-" + Date.now();
       const generated = Array.from(
         { length: body.count },
@@ -108,7 +210,8 @@ createServer(async (req, res) => {
       );
       codes = [
         ...generated.map((code) => ({
-          id: randomBytes(8).toString("hex"),
+          id: randomBytes(16).toString("hex"),
+          folder: body.folder || "",
           hint: code.slice(-8),
           batch,
           months: body.months,
@@ -119,7 +222,12 @@ createServer(async (req, res) => {
         })),
         ...codes,
       ];
-      json(201, { codes: generated, batch, months: body.months });
+      json(201, {
+        codes: generated,
+        batch,
+        months: body.months,
+        folder: body.folder || "",
+      });
       return;
     }
     if (url.pathname === "/api/admin/revoke") {

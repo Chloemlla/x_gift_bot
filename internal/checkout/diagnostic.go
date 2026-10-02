@@ -82,7 +82,11 @@ func inspect(ctx context.Context, v *vault.Vault, user string, port, months int,
 	guard := p.guard(&r, plan, false)
 	fmt.Printf("ledger=%s stripe_session=%s payment_status=%s amount_minor=%d currency=%s intent_present=%t guard=%v\n", r.Status, p.Status, p.PaymentStatus, p.Total.Total, p.Currency, p.Intent != nil, guard)
 	if p.Intent != nil {
-		fmt.Printf("intent_status=%s amount_received_minor=%d\n", p.Intent.Status, p.Intent.AmountReceived)
+		if p.Intent.AmountReceived == nil {
+			fmt.Printf("intent_status=%s amount_received_minor=unavailable\n", p.Intent.Status)
+		} else {
+			fmt.Printf("intent_status=%s amount_received_minor=%d\n", p.Intent.Status, *p.Intent.AmountReceived)
+		}
 	}
 	fmt.Printf("order_age_seconds=%d\n", time.Now().Unix()-r.Created)
 	var all map[string]json.RawMessage

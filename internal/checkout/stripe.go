@@ -114,6 +114,7 @@ func (s *stripeClient) call(ctx context.Context, method, path string, form url.V
 }
 
 type paymentPage struct {
+	raw           json.RawMessage
 	IntentPresent bool   `json:"-"`
 	IntentNull    bool   `json:"-"`
 	SessionID     string `json:"session_id"`
@@ -152,7 +153,7 @@ type paymentPage struct {
 	Intent *struct {
 		ID, Status, Currency string
 		Amount               int
-		AmountReceived       int `json:"amount_received"`
+		AmountReceived       *int `json:"amount_received"`
 	} `json:"payment_intent"`
 }
 
@@ -167,6 +168,7 @@ func (p *paymentPage) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	*p = paymentPage(value)
+	p.raw = append(json.RawMessage(nil), b...)
 	raw, ok := fields["payment_intent"]
 	p.IntentPresent = ok
 	p.IntentNull = ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
@@ -194,7 +196,7 @@ func (p *paymentPage) guard(r *Record, plan Plan, before bool) error {
 		if before {
 			return errors.New("an existing payment intent requires inspection before another submission")
 		}
-		if p.PaymentStatus == "paid" && (p.Intent.Status != "succeeded" || p.Intent.AmountReceived != plan.Minor) {
+		if p.PaymentStatus == "paid" && (p.Intent.Status != "succeeded" || (p.Intent.AmountReceived == nil || *p.Intent.AmountReceived != plan.Minor)) {
 			return errors.New("Stripe payment intent does not confirm the exact received amount")
 		}
 	}
@@ -318,8 +320,17 @@ func (s *stripeClient) confirm(ctx context.Context, r *Record) (*paymentPage, er
 	if e != nil {
 		return nil, e
 	}
+	var raw json.RawMessage
+	e = s.call(ctx, "POST", "payment_pages/"+r.SessionID+"/confirm", form, r.ConfirmKey, &raw)
+	defer clear(raw)
+	if e != nil {
+		return nil, e
+	}
+	if e = s.vault.Put("stripe-confirm:"+r.SessionID, raw); e != nil {
+		return nil, e
+	}
 	var result paymentPage
-	e = s.call(ctx, "POST", "payment_pages/"+r.SessionID+"/confirm", form, r.ConfirmKey, &result)
+	e = json.Unmarshal(raw, &result)
 	return &result, e
 }
 

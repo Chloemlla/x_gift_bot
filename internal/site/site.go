@@ -54,15 +54,17 @@ type limit struct {
 	count int
 }
 type codeRow struct {
-	ID       string `json:"id"`
-	Hint     string `json:"hint"`
-	Batch    string `json:"batch"`
-	Months   int    `json:"months"`
-	Status   string `json:"status"`
-	Username string `json:"username"`
-	Message  string `json:"message"`
-	Created  int64  `json:"created"`
-	Updated  int64  `json:"updated"`
+	ID          string `json:"id"`
+	Hint        string `json:"hint"`
+	Batch       string `json:"batch"`
+	Months      int    `json:"months"`
+	Status      string `json:"status"`
+	Progress    int    `json:"progress"`
+	RecipientID string `json:"-"`
+	Username    string `json:"username"`
+	Message     string `json:"message"`
+	Created     int64  `json:"created"`
+	Updated     int64  `json:"updated"`
 }
 
 func Run(ctx context.Context) error {
@@ -136,8 +138,36 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Inspect the schema so upgrades preserve all existing redemption codes.
+	columns, err := db.Query("PRAGMA table_info(codes)")
+	if err != nil {
+		return err
+	}
+	hasProgress := false
+	for columns.Next() {
+		var cid, required, primary int
+		var name, typ string
+		var defaultValue any
+		if err = columns.Scan(&cid, &name, &typ, &required, &defaultValue, &primary); err != nil {
+			columns.Close()
+			return err
+		}
+		if name == "progress" {
+			hasProgress = true
+		}
+	}
+	err = columns.Err()
+	columns.Close()
+	if err != nil {
+		return err
+	}
+	if !hasProgress {
+		if _, err = db.Exec("ALTER TABLE codes ADD COLUMN progress INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
 	// A crash is never interpreted as permission to submit the same payment again.
-	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "订单需要人工核实，请联系管理员；请勿重复兑换。", time.Now().Unix()); err != nil {
+	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "付款结果暂未确认，请点击「查询兑换进度」核实原订单；请勿重复兑换。", time.Now().Unix()); err != nil {
 		return err
 	}
 	raw, err := v.Get("proxy")
@@ -325,7 +355,7 @@ func (s *server) admin(next http.HandlerFunc) http.HandlerFunc {
 }
 func (s *server) find(code string) (codeRow, error) {
 	var c codeRow
-	e := s.db.QueryRow("SELECT id,hint,batch,months,status,username,message,created,updated FROM codes WHERE hash=?", hash(code)).Scan(&c.ID, &c.Hint, &c.Batch, &c.Months, &c.Status, &c.Username, &c.Message, &c.Created, &c.Updated)
+	e := s.db.QueryRow("SELECT id,hint,batch,months,status,username,message,created,updated,progress,COALESCE(recipient_id,'') FROM codes WHERE hash=?", hash(code)).Scan(&c.ID, &c.Hint, &c.Batch, &c.Months, &c.Status, &c.Username, &c.Message, &c.Created, &c.Updated, &c.Progress, &c.RecipientID)
 	return c, e
 }
 func readInput(w http.ResponseWriter, r *http.Request) (string, string, bool) {
@@ -354,7 +384,10 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 		message(w, 404, "兑换码或用户名不匹配。")
 		return
 	}
-	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message})
+	if c.Status == "review" {
+		s.reconcileStatus(r.Context(), &c)
+	}
+	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message, "progress": c.Progress})
 }
 func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	code, user, ok := readInput(w, r)
@@ -372,7 +405,7 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	}
 	if c.Status != "active" {
 		if c.Username == user && (c.Status == "processing" || c.Status == "review" || c.Status == "succeeded") {
-			reply(w, 200, map[string]any{"status": c.Status, "message": c.Message, "months": c.Months})
+			reply(w, 200, map[string]any{"status": c.Status, "message": c.Message, "months": c.Months, "progress": c.Progress})
 			return
 		}
 		message(w, 409, "兑换码已使用或已停用，请联系提供方。")
@@ -428,7 +461,7 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	result, e := s.db.Exec("UPDATE codes SET status='processing',username=?,recipient_id=?,message=?,updated=? WHERE id=? AND status='active'", user, recipient, "正在处理，请不要重复提交。", time.Now().Unix(), c.ID)
+	result, e := s.db.Exec("UPDATE codes SET status='processing',progress=20,username=?,recipient_id=?,message=?,updated=? WHERE id=? AND status='active'", user, recipient, "正在处理，请不要重复提交。", time.Now().Unix(), c.ID)
 	if e != nil {
 		release()
 		message(w, 409, "无法创建订单；该账号可能已有兑换记录。兑换码未使用。")
@@ -448,12 +481,20 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		defer release()
 		ctx, cancel := context.WithTimeout(s.ctx, 150*time.Second)
 		defer cancel()
+		ctx = checkout.WithProgress(ctx, func(percent int, msg string) {
+			if _, err := s.db.Exec("UPDATE codes SET progress=?,message=?,updated=? WHERE id=? AND status='processing'", percent, msg, time.Now().Unix(), c.ID); err != nil {
+				log.Printf("order %s progress could not be saved", c.ID)
+			}
+		})
 		record, err := checkout.RunForRecipient(ctx, s.vault, user, recipient, true, s.port, c.Months)
-		status, msg := "review", "订单需要人工核实，请联系管理员；请勿重复兑换。"
+		status, msg := "review", "付款结果暂未确认，请点击「查询兑换进度」核实原订单；请勿重复兑换。"
 		if err == nil && record != nil && record.Status == "succeeded" && record.RecipientID == recipient && record.Months == c.Months && record.Amount == c.Months*10000 && record.Currency == "BDT" {
 			status, msg = "succeeded", fmt.Sprintf("已为 @%s 完成 %d 个月 Premium 赠送。", user, c.Months)
 		}
-		updated, e := s.db.Exec("UPDATE codes SET status=?,message=?,updated=? WHERE id=? AND status='processing'", status, msg, time.Now().Unix(), c.ID)
+		if record != nil && record.Status == "requires_action" {
+			msg = "付款需要持卡人完成银行验证，请联系管理员。请勿重复兑换。"
+		}
+		updated, e := s.db.Exec("UPDATE codes SET status=?,message=?,updated=?,progress=CASE WHEN ?='succeeded' THEN 100 ELSE progress END WHERE id=? AND status='processing'", status, msg, time.Now().Unix(), status, c.ID)
 		if e != nil {
 			log.Printf("order %s requires database reconciliation", c.ID)
 			return
@@ -466,7 +507,7 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		// Never log the checkout URL, credentials or upstream payloads.
 		log.Printf("order %s finished: %s", c.ID, status)
 	}()
-	reply(w, 202, map[string]any{"status": "processing", "months": c.Months, "message": "正在处理，请保留本页并等待结果。"})
+	reply(w, 202, map[string]any{"status": "processing", "progress": 20, "months": c.Months, "message": "正在处理，请保留本页并等待结果。"})
 }
 func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 	var q struct {
@@ -518,7 +559,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 		}
 		page = n
 	}
-	rows, e := s.db.Query("SELECT id,hint,batch,months,status,username,message,created,updated FROM codes ORDER BY created DESC,rowid DESC LIMIT 101 OFFSET ?", page*100)
+	rows, e := s.db.Query("SELECT id,hint,batch,months,status,username,message,created,updated,progress FROM codes ORDER BY created DESC,rowid DESC LIMIT 101 OFFSET ?", page*100)
 	if e != nil {
 		message(w, 503, "无法读取兑换码。")
 		return
@@ -527,7 +568,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	codes := []codeRow{}
 	for rows.Next() {
 		var c codeRow
-		if e = rows.Scan(&c.ID, &c.Hint, &c.Batch, &c.Months, &c.Status, &c.Username, &c.Message, &c.Created, &c.Updated); e != nil {
+		if e = rows.Scan(&c.ID, &c.Hint, &c.Batch, &c.Months, &c.Status, &c.Username, &c.Message, &c.Created, &c.Updated, &c.Progress); e != nil {
 			message(w, 503, "无法读取兑换码。")
 			return
 		}

@@ -42,6 +42,11 @@
         </div>
         <h2>兑换你的 Premium</h2>
         <p class="muted">套餐时长以兑换码为准。</p>
+        <ol class="quick-guide">
+          <li>粘贴兑换码，填写 @ 后的用户名。</li>
+          <li>核对账号后提交，等待下方进度完成。</li>
+          <li>成功后打开 X；保留兑换码可随时查询。</li>
+        </ol>
         <div id="service-notice" class="result" role="status" hidden></div>
         <form id="redeem-form">
           <label for="code">兑换码</label
@@ -76,6 +81,37 @@
             查询兑换进度
           </button>
         </form>
+        <section
+          id="progress-panel"
+          class="progress-panel"
+          aria-label="兑换进度"
+          hidden
+        >
+          <div class="progress-heading">
+            <span id="progress-title">正在准备兑换</span
+            ><strong id="progress-percent">0%</strong>
+          </div>
+          <div
+            id="progress-track"
+            class="progress-track"
+            role="progressbar"
+            aria-label="兑换阶段进度"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+          >
+            <div id="progress-fill" class="progress-fill"></div>
+          </div>
+          <ol class="progress-steps">
+            <li data-threshold="40">核对账号</li>
+            <li data-threshold="70">核验订单</li>
+            <li data-threshold="100">付款处理</li>
+            <li data-threshold="100">兑换完成</li>
+          </ol>
+          <p id="progress-help" class="field-help">
+            百分比表示已完成的流程阶段，不是预计耗时。请勿重复提交。
+          </p>
+        </section>
         <div
           id="result"
           class="result"
@@ -83,6 +119,15 @@
           aria-live="polite"
           hidden
         ></div>
+        <a
+          id="open-x"
+          class="open-x"
+          href="https://x.com/"
+          target="_blank"
+          rel="noopener noreferrer"
+          hidden
+          >打开 X 查看 Premium ↗</a
+        >
         <div class="card-note">
           <span>ⓘ</span>
           <p>

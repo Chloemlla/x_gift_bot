@@ -14,6 +14,7 @@ import (
 )
 
 type Record struct {
+	PreflightSaved    bool         `json:"preflight_saved,omitempty"`
 	PaymentMethod     string       `json:"payment_method,omitempty"`
 	ConfirmParameters string       `json:"confirm_parameters,omitempty"`
 	ConfirmKey        string       `json:"confirm_key,omitempty"`
@@ -72,6 +73,7 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 		return nil, e
 	}
 	defer x.close()
+	progress(ctx, 25, "正在核对接收账号与赠送资格…")
 	recipient, e := x.recipient(ctx, user)
 	if e != nil {
 		return nil, e
@@ -108,6 +110,7 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 			return &r, e
 		}
 	}
+	progress(ctx, 40, "正在核对套餐时长和价格…")
 	if e = x.quote(ctx, user, plan); e != nil {
 		return nil, e
 	}
@@ -117,6 +120,7 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 		if e = save(v, &r); e != nil {
 			return nil, e
 		}
+		progress(ctx, 50, "正在创建专属赠送订单…")
 		r.SessionID, r.URL, e = x.create(ctx, user, recipient, plan)
 		if e != nil {
 			return &r, e
@@ -131,6 +135,7 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 		return &r, e
 	}
 	defer s.close()
+	progress(ctx, 60, "正在核验订单金额和收款方…")
 	page, e := s.page(ctx, &r, true)
 	if e != nil {
 		return &r, e
@@ -152,6 +157,7 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	if e != nil {
 		return &r, e
 	}
+	progress(ctx, 70, "正在准备付款，请勿重复提交…")
 	method, e := s.tokenize(ctx, &r, c)
 	if e != nil {
 		return &r, e
@@ -168,6 +174,13 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 }
 
 func submitAndObserve(ctx context.Context, v *vault.Vault, r *Record, s *stripeClient, page *paymentPage, method string, plan Plan, status string) (*Record, error) {
+	if len(page.raw) == 0 {
+		return r, errors.New("missing original preflight response")
+	}
+	if err := v.Put("stripe-preflight:"+r.SessionID, page.raw); err != nil {
+		return r, err
+	}
+	r.PreflightSaved = true
 	r.PaymentMethod = method
 	r.ConfirmParameters = confirmationForm(r, page, method, plan).Encode()
 	r.ConfirmKey = idempotency(r, "confirm")
@@ -181,29 +194,34 @@ func confirmAndObserve(ctx context.Context, v *vault.Vault, r *Record, s *stripe
 	if e = save(v, r); e != nil {
 		return r, e
 	}
+	progress(ctx, 80, "正在提交付款，请勿重复提交…")
 	_, confirmErr := s.confirm(ctx, r)
+	progress(ctx, 90, "已尝试提交付款，正在核实最终结果…")
 	if confirmErr != nil {
 		var se *stripeError
 		if errors.As(confirmErr, &se) {
 			r.LastError = se
 		}
 	}
-	// Never issue confirm twice, even if the response is lost or a validation error occurs.
-	for i := 0; i < 6; i++ {
+	// Poll the result endpoint: init is no longer available once a session completes.
+	// This loop only reads status; confirmation is never resubmitted.
+observe:
+	for i := 0; i < 20; i++ {
 		if i > 0 {
 			select {
 			case <-ctx.Done():
-				break
+				break observe
 			case <-time.After(2 * time.Second):
 			}
 		}
-		current, readErr := s.page(ctx, r, true)
-		if readErr == nil && current.guard(r, plan, false) == nil {
-			if current.Status == "complete" && current.PaymentStatus == "paid" {
+		state, readErr := s.poll(ctx, r, plan)
+		if readErr == nil {
+			if state == "succeeded" {
 				r.Status = "succeeded"
+				r.LastError = nil
 				return r, save(v, r)
 			}
-			if current.Intent != nil && current.Intent.Status == "requires_action" {
+			if state == "requires_action" {
 				r.Status = "requires_action"
 				if e = save(v, r); e != nil {
 					return r, e
@@ -211,7 +229,7 @@ func confirmAndObserve(ctx context.Context, v *vault.Vault, r *Record, s *stripe
 				return r, errors.New("bank authentication is required; use this existing checkout")
 			}
 		}
-		if confirmErr != nil {
+		if confirmErr != nil || ctx.Err() != nil {
 			break
 		}
 	}

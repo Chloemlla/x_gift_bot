@@ -140,6 +140,9 @@ func (c *xClient) call(ctx context.Context, user, name, id string, variables any
 	return json.Unmarshal(raw, out)
 }
 func (c *xClient) recipient(ctx context.Context, user string) (string, error) {
+	return c.identity(ctx, user, true)
+}
+func (c *xClient) identity(ctx context.Context, user string, requireEligible bool) (string, error) {
 	var r struct {
 		Data struct {
 			User struct {
@@ -163,7 +166,7 @@ func (c *xClient) recipient(ctx context.Context, user string) (string, error) {
 	if !strings.EqualFold(u.Core.Screen, user) {
 		return "", errors.New("recipient identity or gift eligibility could not be verified")
 	}
-	if !u.Eligible {
+	if requireEligible && !u.Eligible {
 		return "", ErrNotEligible
 	}
 	return u.ID, nil

@@ -1,6 +1,7 @@
 package checkout
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -20,16 +21,19 @@ import (
 const xMerchant = "acct_EXAMPLE"
 
 type stripeClient struct {
-	http *http.Client
-	key  string
+	http  *http.Client
+	key   string
+	vault *vault.Vault
 }
 type stripeError struct {
-	Code, Type string
-	HTTP       int
+	Code, Type                string
+	Message, Param, RequestID string
+	HTTP                      int
+	Replayed                  bool
 }
 
 func (e *stripeError) Error() string {
-	return fmt.Sprintf("Stripe rejected the request (HTTP %d, type=%s, code=%s)", e.HTTP, e.Type, e.Code)
+	return fmt.Sprintf("Stripe rejected the request (HTTP %d, type=%s, code=%s, param=%s, request=%s): %s", e.HTTP, e.Type, e.Code, e.Param, e.RequestID, e.Message)
 }
 func newStripe(v *vault.Vault, port int) (*stripeClient, error) {
 	key, e := v.Get("stripe-key")
@@ -40,7 +44,7 @@ func newStripe(v *vault.Vault, port int) (*stripeClient, error) {
 		return nil, errors.New("invalid Stripe merchant publishable key")
 	}
 	p, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
-	return &stripeClient{http: &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(p), TLSHandshakeTimeout: 15 * time.Second}, Timeout: 35 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("unexpected Stripe API redirect") }}, key: string(key)}, nil
+	return &stripeClient{http: &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(p), TLSHandshakeTimeout: 15 * time.Second}, Timeout: 35 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("unexpected Stripe API redirect") }}, key: string(key), vault: v}, nil
 }
 func (s *stripeClient) close() { s.http.CloseIdleConnections() }
 func (s *stripeClient) call(ctx context.Context, method, path string, form url.Values, idempotency string, out any) error {
@@ -71,13 +75,37 @@ func (s *stripeClient) call(ctx context.Context, method, path string, form url.V
 	}
 	defer clear(raw)
 	var envelope struct {
-		Error *struct{ Type, Code string } `json:"error"`
+		Error *struct{ Type, Code, Message, Param string } `json:"error"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return errors.New("Stripe returned non-JSON data")
 	}
 	if envelope.Error != nil {
-		return &stripeError{Code: envelope.Error.Code, Type: envelope.Error.Type, HTTP: res.StatusCode}
+		diagnostic, _ := json.Marshal(map[string]any{"http_status": res.StatusCode, "request_id": res.Header.Get("Request-Id"), "idempotent_replayed": res.Header.Get("Idempotent-Replayed"), "path": path, "error": envelope.Error})
+		if err := s.vault.Put("stripe-error:last", diagnostic); err != nil {
+			return errors.New("could not persist Stripe error; order requires inspection")
+		}
+		msg := envelope.Error.Message
+		for name, values := range form {
+			if strings.Contains(name, "card[") || strings.Contains(name, "billing_details") || name == "key" {
+				for _, value := range values {
+					if value != "" {
+						msg = strings.ReplaceAll(msg, value, "[redacted]")
+					}
+				}
+			}
+		}
+		msg = regexp.MustCompile(`[0-9]{12,19}|(?:cs_live_|pm_|pi_|pk_live_|sk_live_)[A-Za-z0-9_]+`).ReplaceAllString(msg, "[redacted]")
+		msg = strings.Map(func(r rune) rune {
+			if r < 32 || r == 127 {
+				return ' '
+			}
+			return r
+		}, msg)
+		if len(msg) > 600 {
+			msg = msg[:600]
+		}
+		return &stripeError{Code: safeErrorField(envelope.Error.Code), Type: safeErrorField(envelope.Error.Type), HTTP: res.StatusCode, Message: msg, Param: safeErrorField(envelope.Error.Param), RequestID: safeErrorField(res.Header.Get("Request-Id")), Replayed: res.Header.Get("Idempotent-Replayed") == "true"}
 	}
 	if res.StatusCode != 200 {
 		return &stripeError{HTTP: res.StatusCode}
@@ -86,6 +114,8 @@ func (s *stripeClient) call(ctx context.Context, method, path string, form url.V
 }
 
 type paymentPage struct {
+	IntentPresent bool   `json:"-"`
+	IntentNull    bool   `json:"-"`
 	SessionID     string `json:"session_id"`
 	Currency      string `json:"currency"`
 	Mode          string `json:"mode"`
@@ -126,6 +156,22 @@ type paymentPage struct {
 	} `json:"payment_intent"`
 }
 
+func (p *paymentPage) UnmarshalJSON(b []byte) error {
+	type plain paymentPage
+	var value plain
+	if err := json.Unmarshal(b, &value); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return err
+	}
+	*p = paymentPage(value)
+	raw, ok := fields["payment_intent"]
+	p.IntentPresent = ok
+	p.IntentNull = ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+	return nil
+}
 func nullJSON(v json.RawMessage) bool { return len(v) == 0 || string(v) == "null" }
 func (p *paymentPage) guard(r *Record, plan Plan, before bool) error {
 	if p.SessionID != r.SessionID || p.Account.ID != xMerchant || !p.Live || p.Mode != "payment" || p.Currency != "bdt" || p.Group.Currency != "bdt" || p.SuccessURL != "https://x.com/"+r.Username+"/gift-premium/success" || p.CancelURL != "https://x.com/"+r.Username+"/gift-premium" {
@@ -151,6 +197,9 @@ func (p *paymentPage) guard(r *Record, plan Plan, before bool) error {
 		if p.PaymentStatus == "paid" && (p.Intent.Status != "succeeded" || p.Intent.AmountReceived != plan.Minor) {
 			return errors.New("Stripe payment intent does not confirm the exact received amount")
 		}
+	}
+	if before && (!p.IntentPresent || !p.IntentNull) {
+		return errors.New("Stripe must explicitly return a null payment intent before submitting")
 	}
 	if before && (p.Status != "open" || p.PaymentStatus != "unpaid" || p.Total.Due != plan.Minor || p.Group.Due != plan.Minor || p.Checksum == "") {
 		return errors.New("Stripe checkout is not open and unpaid at the exact authorized amount")
@@ -180,6 +229,10 @@ type card struct {
 	Email   string `json:"email"`
 	Country string `json:"billing_country"`
 	Postal  string `json:"billing_postal_code"`
+	Line1   string `json:"billing_address_line1"`
+	Line2   string `json:"billing_address_line2"`
+	City    string `json:"billing_city"`
+	State   string `json:"billing_state"`
 }
 
 func readCard(v *vault.Vault) (card, error) {
@@ -214,10 +267,18 @@ func readCard(v *vault.Vault) (card, error) {
 	if !time.Now().Before(time.Date(year, time.Month(month)+1, 1, 0, 0, 0, 0, time.UTC)) {
 		return c, errors.New("card has expired")
 	}
-	if c.Country != "" && !regexp.MustCompile(`^[A-Z]{2}$`).MatchString(c.Country) {
+	if c.Country == "" {
+		return c, errors.New("Stripe requires a billing address; supply the card billing country and applicable address fields")
+	}
+	if !regexp.MustCompile(`^[A-Z]{2}$`).MatchString(c.Country) {
 		return c, errors.New("invalid supplied billing country")
 	}
 	return c, nil
+}
+
+func CheckPaymentConfiguration(v *vault.Vault) error {
+	_, err := readCard(v)
+	return err
 }
 func (s *stripeClient) tokenize(ctx context.Context, r *Record, c card) (string, error) {
 	form := url.Values{"type": {"card"}, "card[number]": {c.Number}, "card[exp_month]": {c.Month}, "card[exp_year]": {c.Year}, "card[cvc]": {c.CVC}, "billing_details[name]": {c.Name}, "billing_details[email]": {c.Email}}
@@ -226,6 +287,11 @@ func (s *stripeClient) tokenize(ctx context.Context, r *Record, c card) (string,
 	}
 	if c.Postal != "" {
 		form.Set("billing_details[address][postal_code]", c.Postal)
+	}
+	for name, value := range map[string]string{"line1": c.Line1, "line2": c.Line2, "city": c.City, "state": c.State} {
+		if value != "" {
+			form.Set("billing_details[address]["+name+"]", value)
+		}
 	}
 	var pm struct {
 		ID, Type string
@@ -244,9 +310,25 @@ func idempotency(r *Record, operation string) string {
 	sum := sha256.Sum256([]byte("xgift-v1:" + operation + ":" + r.SessionID + ":" + r.RecipientID + ":" + strconv.Itoa(r.Months)))
 	return "xgift-" + hex.EncodeToString(sum[:])
 }
-func (s *stripeClient) confirm(ctx context.Context, r *Record, p *paymentPage, method string, plan Plan) (*paymentPage, error) {
-	form := url.Values{"payment_method": {method}, "expected_amount": {strconv.Itoa(plan.Minor)}, "expected_payment_method_type": {"card"}, "init_checksum": {p.Checksum}, "return_url": {"https://x.com/" + r.Username + "/gift-premium/success"}, "save_payment_method": {"false"}}
+func confirmationForm(r *Record, p *paymentPage, method string, plan Plan) url.Values {
+	return url.Values{"payment_method": {method}, "expected_amount": {strconv.Itoa(plan.Minor)}, "expected_payment_method_type": {"card"}, "init_checksum": {p.Checksum}, "return_url": {"https://x.com/" + r.Username + "/gift-premium/success"}}
+}
+func (s *stripeClient) confirm(ctx context.Context, r *Record) (*paymentPage, error) {
+	form, e := url.ParseQuery(r.ConfirmParameters)
+	if e != nil {
+		return nil, e
+	}
 	var result paymentPage
-	e := s.call(ctx, "POST", "payment_pages/"+r.SessionID+"/confirm", form, idempotency(r, "confirm"), &result)
+	e = s.call(ctx, "POST", "payment_pages/"+r.SessionID+"/confirm", form, r.ConfirmKey, &result)
 	return &result, e
+}
+
+func safeErrorField(s string) string {
+	if len(s) > 100 {
+		return "[redacted]"
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9_.\[\]-]*$`).MatchString(s) {
+		return "[redacted]"
+	}
+	return s
 }

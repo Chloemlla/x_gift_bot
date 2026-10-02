@@ -66,6 +66,7 @@ func run() error {
 	profile := f.String("profile", "Default", "Chrome directory name")
 	port := f.Int("port", 0, "local proxy port; default automatic (proxy command: 18791)")
 	months := f.Int("months", 6, "Premium gift duration: 3 (300 BDT) or 6 (600 BDT)")
+	inspect := f.Bool("inspect", false, "read the existing Stripe order status without paying")
 	pay := f.Bool("pay", false, "pay only at the exact allowed BDT total")
 	name := f.String("name", "", "secret name for put")
 	f.Usage = func() {
@@ -156,7 +157,7 @@ func run() error {
 		}
 		for n, value := range fields {
 			switch n {
-			case "billing_name", "email", "billing_country", "billing_postal_code", "billing_address_line1", "billing_city", "billing_state":
+			case "billing_name", "email", "billing_country", "billing_postal_code", "billing_address_line1", "billing_address_line2", "billing_city", "billing_state":
 				c[n] = value
 			default:
 				return errors.New("unsupported billing field")
@@ -256,6 +257,9 @@ func run() error {
 	}
 	if command == "check" {
 		return proxy.Check(ctx, *port)
+	}
+	if *inspect {
+		return checkout.Inspect(ctx, v, command, *port, *months)
 	}
 	result, e := checkout.Run(ctx, v, command, *pay, *port, *months)
 	if result != nil {

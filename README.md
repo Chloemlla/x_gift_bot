@@ -2,7 +2,7 @@
 
 Go CLI + Premium 兑换站。网站：`https://xp.example.com`，后台：`/admin`。
 
-**当前付款关闭。** 已验证 X 赠送资格查询、固定套餐报价和 Stripe 结账链接生成；此前一次付款确认返回 HTTP 400，原订单处于 `unknown`，不得自动重试。网站目前可生成、管理兑换码，并核实账号是否允许赠送；符合条件时提示充值尚未开放，兑换码不消耗。不能将当前部署当作已经可成功自动充值的服务。
+**当前付款关闭。** 已验证 X 赠送资格查询、固定套餐报价和 Stripe 结账链接生成；已修复 `save_payment_method=false` 与商户禁用保存卡片的配置冲突。随后 Stripe 返回 `A billing address is required.`，当前还缺卡片真实账单地址；原订单已产生 `requires_payment_method` 的 PaymentIntent，已收款金额为 0，记录保持 `unknown`，不得新建订单或自动重试。网站目前可生成、管理兑换码，并核实账号是否允许赠送；符合条件时提示充值尚未开放，兑换码不消耗。不能将当前部署当作已经可成功自动充值的服务。
 
 ## 构建
 
@@ -22,17 +22,18 @@ go vet ./...
 ./bin/xgift status
 ./bin/xgift import-chrome --profile Default
 ./bin/xgift check
+./bin/xgift username --inspect        # 只读核对已保存订单的 Stripe 状态
 ./bin/xgift proxy --port 18791
 ./bin/xgift username                  # 默认 6 个月，只生成/读取结账链接
 ./bin/xgift username --months 3       # 3 个月，只生成/读取结账链接
 ```
 
-`--pay` 是真实付款入口，当前不要运行。网站的暂停配置只管网站，不会禁用手动执行 CLI 的 `--pay`。
+`--pay` 是真实付款入口。当前等待补充账单资料，旧订单保持锁定；网站的暂停配置只管网站，CLI 自身仍执行配置、订单状态和金额校验。
 
 - 仅允许 3 个月恰好 300 BDT、6 个月恰好 600 BDT。校验 X 报价和 Stripe 最终总额、币种、商品、数量、一次性模式及商户身份，任何不符都停止。
 - 内嵌 sing-box AnyTLS，只监听本机端口，不修改系统代理。代理配置从加密库读取。
 - 固定 X API / Stripe 入口，无网页识别或 ChatGPT Chrome 扩展。
-- 私有 API 可能变化；目前 Stripe 确认请求仍未跑通，不能保证链接或支付长期可用。
+- 私有 API 可能变化；目前 Stripe 仍要求补充卡片账单地址，确认流程尚未完成，不能保证链接或支付长期可用。
 - 按 X 固定用户 ID 保存订单。`creating`、`submitting`、`unknown`、`requires_action` 等不明/待处理状态阻止再次提交。不会为了重试重建订单或改变幂等键。
 - 同一收件人已有记录时，不能用另一枚兑换码或另一套餐重复付款。当前没有自动追加时长、自动退款或人工“强制成功”入口。
 
@@ -81,4 +82,10 @@ ssh example-server 'sudo journalctl -u xgift --since "1 hour ago" --no-pager'
 
 更新时先在服务器构建两个二进制，停止 `xgift`，备份数据及密钥，再替换程序并启动。不要覆盖线上 `site.db` 或用旧的本地 vault 覆盖线上订单。备份必须包含 `site.db`（停服或用 SQLite backup API，不能忽略 WAL）、`vault.db` 及独立密钥；所有备份同样限制权限。
 
-**开启付款前**：解决 Stripe HTTP 400、人工核实已有 `unknown` 订单，完成独立安全复查并取得新的实际付款指令。不要仅为试错打开环境开关。银行验证、风控和 X 赠送限制仍可能阻止自动完成。
+**开启付款前**：补充真实账单地址，继续核实原 PaymentIntent 并完成独立复查。缺少账单国家时，CLI 在建单前拒绝付款，网站付款开关打开时也会拒绝启动。用户已要求继续解决自动付款，当前缺的是实际账单信息。不要仅为试错打开环境开关。银行验证、风控和 X 赠送限制仍可能阻止自动完成。
+
+## 账单信息与错误诊断
+
+`billing` 子命令从标准输入接受并加密保存这些字段：`billing_name`、`email`、`billing_country`（两位大写国家代码）、`billing_address_line1`、`billing_address_line2`、`billing_city`、`billing_state`、`billing_postal_code`。只填写发卡行登记的真实信息，不从代理所在地推断。
+
+确认请求发送前将确切参数、PM、幂等键和时间加密保存，错误原文同样加密保存；终端仅输出脱敏错误和请求编号。`--inspect` 不创建 checkout、不创建付款方式、不提交付款，即使收件人已经不能接收新赠送也能检查原订单。临时修复用的恢复入口未保留在生产 CLI 中，避免成为通用的重试通道。

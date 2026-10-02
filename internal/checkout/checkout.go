@@ -14,6 +14,13 @@ import (
 )
 
 type Record struct {
+	PaymentMethod     string       `json:"payment_method,omitempty"`
+	ConfirmParameters string       `json:"confirm_parameters,omitempty"`
+	ConfirmKey        string       `json:"confirm_key,omitempty"`
+	SubmittedAt       int64        `json:"submitted_at,omitempty"`
+	RecoveryAttempts  int          `json:"recovery_attempts,omitempty"`
+	LastError         *stripeError `json:"last_error,omitempty"`
+
 	Username    string `json:"username"`
 	RecipientID string `json:"recipient_id"`
 	Months      int    `json:"months"`
@@ -96,6 +103,11 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	if r.Status == "creating" {
 		return &r, errors.New("previous checkout creation outcome is unknown; inspect it before creating another")
 	}
+	if pay {
+		if e = CheckPaymentConfiguration(v); e != nil {
+			return &r, e
+		}
+	}
 	if e = x.quote(ctx, user, plan); e != nil {
 		return nil, e
 	}
@@ -152,11 +164,30 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	if e = page.guard(&r, plan, true); e != nil {
 		return &r, e
 	}
-	r.Status = "submitting"
-	if e = save(v, &r); e != nil {
-		return &r, e
+	return submitAndObserve(ctx, v, &r, s, page, method, plan, "submitting")
+}
+
+func submitAndObserve(ctx context.Context, v *vault.Vault, r *Record, s *stripeClient, page *paymentPage, method string, plan Plan, status string) (*Record, error) {
+	r.PaymentMethod = method
+	r.ConfirmParameters = confirmationForm(r, page, method, plan).Encode()
+	r.ConfirmKey = idempotency(r, "confirm")
+	r.SubmittedAt = time.Now().Unix()
+	r.Status = status
+	return confirmAndObserve(ctx, v, r, s, plan)
+}
+func confirmAndObserve(ctx context.Context, v *vault.Vault, r *Record, s *stripeClient, plan Plan) (*Record, error) {
+	r.LastError = nil
+	var e error
+	if e = save(v, r); e != nil {
+		return r, e
 	}
-	_, confirmErr := s.confirm(ctx, &r, page, method, plan)
+	_, confirmErr := s.confirm(ctx, r)
+	if confirmErr != nil {
+		var se *stripeError
+		if errors.As(confirmErr, &se) {
+			r.LastError = se
+		}
+	}
 	// Never issue confirm twice, even if the response is lost or a validation error occurs.
 	for i := 0; i < 6; i++ {
 		if i > 0 {
@@ -166,18 +197,18 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 			case <-time.After(2 * time.Second):
 			}
 		}
-		current, readErr := s.page(ctx, &r, true)
-		if readErr == nil && current.guard(&r, plan, false) == nil {
+		current, readErr := s.page(ctx, r, true)
+		if readErr == nil && current.guard(r, plan, false) == nil {
 			if current.Status == "complete" && current.PaymentStatus == "paid" {
 				r.Status = "succeeded"
-				return &r, save(v, &r)
+				return r, save(v, r)
 			}
 			if current.Intent != nil && current.Intent.Status == "requires_action" {
 				r.Status = "requires_action"
-				if e = save(v, &r); e != nil {
-					return &r, e
+				if e = save(v, r); e != nil {
+					return r, e
 				}
-				return &r, errors.New("bank authentication is required; use this existing checkout")
+				return r, errors.New("bank authentication is required; use this existing checkout")
 			}
 		}
 		if confirmErr != nil {
@@ -185,11 +216,11 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 		}
 	}
 	r.Status = "unknown"
-	if e = save(v, &r); e != nil {
-		return &r, e
+	if e = save(v, r); e != nil {
+		return r, e
 	}
 	if confirmErr != nil {
-		return &r, confirmErr
+		return r, confirmErr
 	}
-	return &r, errors.New("Stripe has not confirmed payment; automatic retry is blocked")
+	return r, errors.New("Stripe has not confirmed payment; automatic retry is blocked")
 }

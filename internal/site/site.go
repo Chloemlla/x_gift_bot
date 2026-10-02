@@ -105,6 +105,11 @@ func Run(ctx context.Context) error {
 	}
 	s.vault = v
 	defer v.Close()
+	if s.payments {
+		if err = checkout.CheckPaymentConfiguration(v); err != nil {
+			return err
+		}
+	}
 	dbpath := filepath.Join(dir, "site.db")
 	f, err := os.OpenFile(dbpath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {

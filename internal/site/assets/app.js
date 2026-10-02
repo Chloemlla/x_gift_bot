@@ -101,12 +101,14 @@ function render(response, data) {
       revoked: "兑换码已停用，请联系提供方。",
     }[status] ||
     "暂时无法确认状态，请稍后查询。";
-  show(text, !response.ok || status === "review");
+  show(text, !response.ok || (status === "review" && !data.rechecking));
   if (status === "succeeded") {
     progress(100, "兑换成功，Premium 已赠送", status);
     scrollToProgress();
   } else if (status === "processing") {
     progress(data.progress || 20, text);
+  } else if (status === "review" && data.rechecking) {
+    progress(Math.max(data.progress || 0, 90), "正在自动核实付款结果，请稍候…");
   } else if (status === "review") {
     progress(
       data.progress || lastProgress,
@@ -123,10 +125,10 @@ async function query() {
   try {
     const { response, data } = await request("/api/status", current);
     const status = render(response, data);
-    if (status === "processing" && attempt++ < 90) {
+    if ((status === "processing" || data.rechecking) && attempt++ < 150) {
       timer = setTimeout(query, 2000);
     } else {
-      if (status === "processing") {
+      if (status === "processing" || data.rechecking) {
         progress(data.progress, "订单仍在处理，可以稍后查询", "interrupted");
         show(
           "等待时间较长，不代表付款失败。请保留兑换码，稍后查询进度，勿重复兑换。",
@@ -148,7 +150,7 @@ form.addEventListener("submit", async (e) => {
   scrollToProgress();
   try {
     const { response, data } = await request("/api/redeem", current);
-    if (render(response, data) === "processing")
+    if (render(response, data) === "processing" || data.rechecking)
       timer = setTimeout(query, 1500);
     else busy(false);
   } catch {

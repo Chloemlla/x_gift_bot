@@ -14,6 +14,8 @@ import (
 )
 
 type Record struct {
+	CreationRetryable bool         `json:"creation_retryable,omitempty"`
+	CreationAttempts  int          `json:"creation_attempts,omitempty"`
 	PreflightSaved    bool         `json:"preflight_saved,omitempty"`
 	PaymentMethod     string       `json:"payment_method,omitempty"`
 	ConfirmParameters string       `json:"confirm_parameters,omitempty"`
@@ -97,9 +99,11 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 			if r.SessionID != "" || r.URL != "" || r.PaymentMethod != "" || r.ConfirmParameters != "" || r.ConfirmKey != "" || r.SubmittedAt != 0 || r.PreflightSaved {
 				return nil, errors.New("creation record contains inconsistent payment evidence")
 			}
-			return &r, errors.New("previous checkout creation outcome is unknown; inspect it before creating another")
+			if !r.CreationRetryable || r.CreationAttempts < 1 || r.CreationAttempts >= maxAttempts {
+				return &r, errors.New("creation retry budget is unavailable or exhausted; automatic recovery blocked")
+			}
 		}
-		if !sessionURL(r.URL, r.SessionID) {
+		if r.Status != "creating" && !sessionURL(r.URL, r.SessionID) {
 			return nil, errors.New("existing checkout URL or session is invalid")
 		}
 	} else if !errors.Is(e, sql.ErrNoRows) {
@@ -121,15 +125,35 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 		return nil, e
 	}
 	if r.SessionID == "" {
-		r = Record{Username: user, RecipientID: recipient, Months: plan.Months, Amount: plan.Minor, Currency: "BDT", ProductID: plan.ProductID, Status: "creating", Created: time.Now().Unix()}
-		// Persist before creating the external session. A crash must not silently create a second session.
-		if e = save(v, &r); e != nil {
-			return nil, e
+		if r.Status == "" {
+			r = Record{Username: user, RecipientID: recipient, Months: plan.Months, Amount: plan.Minor, Currency: "BDT", ProductID: plan.ProductID, Status: "creating", Created: time.Now().Unix()}
 		}
-		progress(ctx, 50, "正在创建专属赠送订单…")
-		r.SessionID, r.URL, e = x.create(ctx, user, recipient, plan)
-		if e != nil {
-			return &r, e
+		for r.CreationAttempts < maxAttempts {
+			if e = ctx.Err(); e != nil {
+				return &r, e
+			}
+			// Reserve each creation attempt durably. A lost response can leave an
+			// unused external session, but only the selected saved session is paid.
+			r.CreationAttempts++
+			r.CreationRetryable = false
+			if e = save(v, &r); e != nil {
+				return &r, e
+			}
+			progress(ctx, 50, "正在创建专属赠送订单…")
+			r.SessionID, r.URL, e = x.create(ctx, user, recipient, plan)
+			if e == nil {
+				break
+			}
+			var retry *temporaryError
+			if errors.As(e, &retry) && r.CreationAttempts < maxAttempts {
+				r.CreationRetryable = true
+				if saveErr := save(v, &r); saveErr != nil {
+					return &r, saveErr
+				}
+			}
+			if stop := waitRetry(ctx, e, r.CreationAttempts); stop != nil {
+				return &r, stop
+			}
 		}
 		r.Status = "created"
 		if e = save(v, &r); e != nil {
@@ -235,7 +259,7 @@ observe:
 				return r, errors.New("bank authentication is required; use this existing checkout")
 			}
 		}
-		if confirmErr != nil || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			break
 		}
 	}

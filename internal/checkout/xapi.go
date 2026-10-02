@@ -96,7 +96,13 @@ func newXClient(v *vault.Vault, port int) (*xClient, error) {
 	return &xClient{http: client, headers: h, vault: v}, nil
 }
 func (c *xClient) close() { c.http.CloseIdleConnections() }
-func (c *xClient) call(ctx context.Context, user, name, id string, variables any, mutation bool, out any) (callErr error) {
+func (c *xClient) call(ctx context.Context, user, name, id string, variables any, mutation bool, out any) error {
+	if mutation {
+		return c.callOnce(ctx, user, name, id, variables, true, out)
+	}
+	return retrySafe(ctx, func() error { return c.callOnce(ctx, user, name, id, variables, false, out) })
+}
+func (c *xClient) callOnce(ctx context.Context, user, name, id string, variables any, mutation bool, out any) (callErr error) {
 	// A fixed-operation audit is encrypted before sending, then completed even on
 	// transport/body failures. Never store request headers or cookies here.
 	var audit struct {
@@ -130,7 +136,7 @@ func (c *xClient) call(ctx context.Context, user, name, id string, variables any
 				audit.Failure = callErr.Error()
 			}
 			if e := persist(); e != nil {
-				callErr = errors.Join(callErr, errors.New("could not preserve X creation outcome"))
+				callErr = errors.New("could not preserve X creation outcome; automatic recovery blocked")
 			}
 		}()
 	}
@@ -157,7 +163,7 @@ func (c *xClient) call(ctx context.Context, user, name, id string, variables any
 	res, e := c.http.Do(req)
 	if e != nil {
 		audit.Phase, audit.Cause = "transport_failed", e.Error()
-		return fmt.Errorf("X %s request failed", name)
+		return temporary(fmt.Errorf("X %s request failed", name))
 	}
 	audit.HTTP, audit.Phase = res.StatusCode, "response_received"
 	defer res.Body.Close()
@@ -171,11 +177,14 @@ func (c *xClient) call(ctx context.Context, user, name, id string, variables any
 	audit.Body = string(raw)
 	if e != nil {
 		audit.Phase, audit.Cause = "response_read_failed", e.Error()
-		return errors.New("X response could not be read")
+		if res.StatusCode >= 400 && res.StatusCode < 500 {
+			return httpFailure(errors.New("X error response could not be read"), res.StatusCode, res.Header.Get("Retry-After"))
+		}
+		return temporary(errors.New("X response could not be read"))
 	}
 	audit.Phase = "response_validation"
 	if res.StatusCode != 200 {
-		return fmt.Errorf("X %s returned HTTP %d; no payment attempted", name, res.StatusCode)
+		return httpFailure(fmt.Errorf("X %s returned HTTP %d; no payment attempted", name, res.StatusCode), res.StatusCode, res.Header.Get("Retry-After"))
 	}
 	var envelope struct {
 		Errors []json.RawMessage `json:"errors"`

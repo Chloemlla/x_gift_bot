@@ -66,19 +66,22 @@ func (s *stripeClient) call(ctx context.Context, method, path string, form url.V
 	}
 	res, e := s.http.Do(req)
 	if e != nil {
-		return errors.New("Stripe transport failed; request outcome may be unknown")
+		return temporary(errors.New("Stripe transport failed; request outcome may be unknown"))
 	}
 	defer res.Body.Close()
 	raw, e := io.ReadAll(io.LimitReader(res.Body, 2<<20))
 	if e != nil {
-		return errors.New("Stripe response could not be read")
+		if res.StatusCode >= 400 && res.StatusCode < 500 {
+			return httpFailure(errors.New("Stripe error response could not be read"), res.StatusCode, res.Header.Get("Retry-After"))
+		}
+		return temporary(errors.New("Stripe response could not be read"))
 	}
 	defer clear(raw)
 	var envelope struct {
 		Error *struct{ Type, Code, Message, Param string } `json:"error"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
-		return errors.New("Stripe returned non-JSON data")
+		return httpFailure(errors.New("Stripe returned non-JSON data"), res.StatusCode, res.Header.Get("Retry-After"))
 	}
 	if envelope.Error != nil {
 		diagnostic, _ := json.Marshal(map[string]any{"http_status": res.StatusCode, "request_id": res.Header.Get("Request-Id"), "idempotent_replayed": res.Header.Get("Idempotent-Replayed"), "path": path, "error": envelope.Error})
@@ -105,10 +108,10 @@ func (s *stripeClient) call(ctx context.Context, method, path string, form url.V
 		if len(msg) > 600 {
 			msg = msg[:600]
 		}
-		return &stripeError{Code: safeErrorField(envelope.Error.Code), Type: safeErrorField(envelope.Error.Type), HTTP: res.StatusCode, Message: msg, Param: safeErrorField(envelope.Error.Param), RequestID: safeErrorField(res.Header.Get("Request-Id")), Replayed: res.Header.Get("Idempotent-Replayed") == "true"}
+		return httpFailure(&stripeError{Code: safeErrorField(envelope.Error.Code), Type: safeErrorField(envelope.Error.Type), HTTP: res.StatusCode, Message: msg, Param: safeErrorField(envelope.Error.Param), RequestID: safeErrorField(res.Header.Get("Request-Id")), Replayed: res.Header.Get("Idempotent-Replayed") == "true"}, res.StatusCode, res.Header.Get("Retry-After"))
 	}
 	if res.StatusCode != 200 {
-		return &stripeError{HTTP: res.StatusCode}
+		return httpFailure(&stripeError{HTTP: res.StatusCode}, res.StatusCode, res.Header.Get("Retry-After"))
 	}
 	return json.Unmarshal(raw, out)
 }
@@ -218,7 +221,7 @@ func (s *stripeClient) page(ctx context.Context, r *Record, init bool) (*payment
 		form.Set("redirect_type", "url")
 	}
 	var page paymentPage
-	e := s.call(ctx, method, path, form, "", &page)
+	e := retrySafe(ctx, func() error { return s.call(ctx, method, path, form, "", &page) })
 	return &page, e
 }
 
@@ -299,7 +302,7 @@ func (s *stripeClient) tokenize(ctx context.Context, r *Record, c card) (string,
 		ID, Type string
 		Live     bool `json:"livemode"`
 	}
-	e := s.call(ctx, "POST", "payment_methods", form, idempotency(r, "method"), &pm)
+	e := retrySafe(ctx, func() error { return s.call(ctx, "POST", "payment_methods", form, idempotency(r, "method"), &pm) })
 	if e != nil {
 		return "", e
 	}

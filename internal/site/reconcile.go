@@ -2,6 +2,7 @@ package site
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"syscall"
@@ -46,4 +47,45 @@ func (s *server) reconcileStatus(ctx context.Context, c *codeRow) {
 		c.Progress = 100
 		c.Message = msg
 	}
+}
+
+// Background reconciliation never creates an order or submits payment. It checks
+// one pending record per tick with a short deadline, yielding to live checkouts.
+func (s *server) reconcileLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	cursor := ""
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		var c codeRow
+		err := s.db.QueryRow("SELECT id,recipient_id,username,months,status,progress,updated FROM codes WHERE status='review' AND recipient_id IS NOT NULL AND id>? AND updated>? ORDER BY id LIMIT 1", cursor, time.Now().Add(-24*time.Hour).Unix()).Scan(&c.ID, &c.RecipientID, &c.Username, &c.Months, &c.Status, &c.Progress, &c.Updated)
+		if err != nil {
+			cursor = ""
+			continue
+		}
+		cursor = c.ID
+		ctx, cancel := context.WithTimeout(s.ctx, 8*time.Second)
+		s.reconcileStatus(ctx, &c)
+		cancel()
+	}
+}
+
+func (s *server) autoChecking(c *codeRow) bool {
+	if c.Status != "review" || c.RecipientID == "" || c.Updated < time.Now().Add(-24*time.Hour).Unix() {
+		return false
+	}
+	raw, err := s.vault.Get("checkout:" + c.RecipientID)
+	if err != nil {
+		return false
+	}
+	defer clear(raw)
+	var r checkout.Record
+	if json.Unmarshal(raw, &r) != nil {
+		return false
+	}
+	return r.RecipientID == c.RecipientID && r.Username == c.Username && r.Months == c.Months && r.SubmittedAt > 0 && (r.Status == "unknown" || r.Status == "submitting")
 }

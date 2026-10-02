@@ -68,6 +68,8 @@ type codeRow struct {
 }
 
 func Run(ctx context.Context) error {
+	ctx, cancelService := context.WithCancel(ctx)
+	defer cancelService()
 	origin := os.Getenv("XGIFT_ORIGIN")
 	u, err := url.Parse(origin)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
@@ -217,10 +219,13 @@ func Run(ctx context.Context) error {
 	done := make(chan error, 1)
 	go func() { done <- h.ListenAndServe() }()
 	log.Printf("xgift-web listening on %s; payments enabled=%t", addr, s.payments)
+	s.jobs.Add(1)
+	go func() { defer s.jobs.Done(); s.reconcileLoop() }()
 	select {
 	case err = <-done:
 	case <-ctx.Done():
 	}
+	cancelService()
 	shutdown, cancel := context.WithTimeout(context.Background(), 55*time.Second)
 	defer cancel()
 	if e := h.Shutdown(shutdown); e != nil {
@@ -387,7 +392,7 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	if c.Status == "review" {
 		s.reconcileStatus(r.Context(), &c)
 	}
-	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message, "progress": c.Progress})
+	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message, "progress": c.Progress, "rechecking": s.autoChecking(&c)})
 }
 func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	code, user, ok := readInput(w, r)
@@ -405,7 +410,7 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	}
 	if c.Status != "active" {
 		if c.Username == user && (c.Status == "processing" || c.Status == "review" || c.Status == "succeeded") {
-			reply(w, 200, map[string]any{"status": c.Status, "message": c.Message, "months": c.Months, "progress": c.Progress})
+			reply(w, 200, map[string]any{"status": c.Status, "message": c.Message, "months": c.Months, "progress": c.Progress, "rechecking": s.autoChecking(&c)})
 			return
 		}
 		message(w, 409, "兑换码已使用或已停用，请联系提供方。")
@@ -479,10 +484,10 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		defer s.jobs.Done()
 		defer func() { <-s.work }()
 		defer release()
-		ctx, cancel := context.WithTimeout(s.ctx, 150*time.Second)
+		ctx, cancel := context.WithTimeout(s.ctx, 240*time.Second)
 		defer cancel()
 		ctx = checkout.WithProgress(ctx, func(percent int, msg string) {
-			if _, err := s.db.Exec("UPDATE codes SET progress=?,message=?,updated=? WHERE id=? AND status='processing'", percent, msg, time.Now().Unix(), c.ID); err != nil {
+			if _, err := s.db.Exec("UPDATE codes SET progress=MAX(progress,?),message=?,updated=? WHERE id=? AND status='processing'", percent, msg, time.Now().Unix(), c.ID); err != nil {
 				log.Printf("order %s progress could not be saved", c.ID)
 			}
 		})
@@ -501,7 +506,7 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		}
 		status, msg := "review", "订单尚未完成，请联系管理员核实处理阶段；请勿重复兑换。"
 		if record != nil && record.SubmittedAt != 0 {
-			msg = "付款结果暂未确认，请点击「查询兑换进度」核实原订单；请勿重复兑换。"
+			msg = "付款结果正在自动核实，请保留本页等待；系统不会重复扣款。"
 		} else if record != nil && record.ConfirmParameters == "" && record.ConfirmKey == "" {
 			if record.Status == "creating" {
 				msg = "创建赠送订单未完成，尚未提交付款。请联系管理员处理，请勿重复兑换。"

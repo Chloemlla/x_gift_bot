@@ -75,9 +75,17 @@ export function FolderPanel({
         </Typography>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        每个批次就是一个文件夹，点击查看其中的兑换码。
+        点击批次文件夹查看兑换码，左右滑动可查看全部批次。
       </Typography>
-      <Stack direction="row" useFlexGap flexWrap="wrap" gap={1}>
+      <Stack
+        direction="row"
+        useFlexGap
+        gap={1}
+        sx={{ height: 80, overflowX: "auto", alignItems: "center", pb: 1 }}
+        role="region"
+        aria-label="批次文件夹，可横向滚动"
+        tabIndex={0}
+      >
         {[
           { id: "", name: "全部兑换码", count: stats?.total ?? 0 },
           ...(stats?.unfiled
@@ -95,6 +103,7 @@ export function FolderPanel({
               bgcolor:
                 filter === folder.id ? "action.selected" : "background.paper",
               maxWidth: "100%",
+              flexShrink: 0,
             }}
           >
             <Button

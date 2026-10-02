@@ -1,3 +1,4 @@
+import colors from "./colors.json";
 import { createTheme } from "@mui/material/styles";
 
 // M3 tonal roles: blue primary, pink secondary, neutral gray surfaces.
@@ -5,52 +6,8 @@ import { createTheme } from "@mui/material/styles";
 export const theme = createTheme({
   cssVariables: { colorSchemeSelector: "data" },
   colorSchemes: {
-    light: {
-      palette: {
-        primary: {
-          main: "#415F91",
-          light: "#D6E3FF",
-          dark: "#284777",
-          contrastText: "#FFFFFF",
-        },
-        secondary: {
-          main: "#875078",
-          light: "#FFD7EF",
-          dark: "#6C395F",
-          contrastText: "#FFFFFF",
-        },
-        background: { default: "#F5F5F7", paper: "#FDFBFF" },
-        text: { primary: "#1B1B1F", secondary: "#45464F" },
-        divider: "#C5C6D0",
-        success: { main: "#326B43", contrastText: "#FFFFFF" },
-        warning: { main: "#805600", contrastText: "#FFFFFF" },
-        error: { main: "#BA1A1A", contrastText: "#FFFFFF" },
-        info: { main: "#415F91", contrastText: "#FFFFFF" },
-      },
-    },
-    dark: {
-      palette: {
-        primary: {
-          main: "#AAC7FF",
-          light: "#D6E3FF",
-          dark: "#7BA4DF",
-          contrastText: "#0A305F",
-        },
-        secondary: {
-          main: "#FAAFE0",
-          light: "#FFD7EF",
-          dark: "#DB94C3",
-          contrastText: "#511F48",
-        },
-        background: { default: "#111318", paper: "#1D2026" },
-        text: { primary: "#E3E2E9", secondary: "#C5C6D0" },
-        divider: "#44464F",
-        success: { main: "#99D5A5", contrastText: "#003917" },
-        warning: { main: "#F3BF61", contrastText: "#432C00" },
-        error: { main: "#FFB4AB", contrastText: "#690005" },
-        info: { main: "#AAC7FF", contrastText: "#0A305F" },
-      },
-    },
+    light: { palette: colors.light },
+    dark: { palette: colors.dark },
   },
   shape: { borderRadius: 12 },
   spacing: 8,

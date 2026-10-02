@@ -1,3 +1,4 @@
+import colors from "./colors.json";
 import { useEffect, useState } from "react";
 import {
   IconButton,
@@ -26,7 +27,10 @@ export function AppearanceMenu() {
       mode === "dark" || (mode === "system" && systemMode === "dark");
     document
       .querySelector('meta[name="theme-color"]')
-      ?.setAttribute("content", dark ? "#111318" : "#F5F5F7");
+      ?.setAttribute(
+        "content",
+        colors[dark ? "dark" : "light"].background.default,
+      );
   }, [mode, systemMode]);
   const current = options.find((option) => option.value === mode) ?? options[0];
   return (

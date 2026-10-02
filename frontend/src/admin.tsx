@@ -1,0 +1,618 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
+  LinearProgress,
+  MenuItem,
+  Paper,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  TextField,
+  Typography,
+} from "@mui/material";
+import AddRounded from "@mui/icons-material/AddRounded";
+import DownloadRounded from "@mui/icons-material/DownloadRounded";
+import RefreshRounded from "@mui/icons-material/RefreshRounded";
+import ConfirmationNumberOutlined from "@mui/icons-material/ConfirmationNumberOutlined";
+import { mount, request, Shell } from "./shared";
+import { AppearanceMenu } from "./AppearanceMenu";
+
+type Code = {
+  id: string;
+  hint: string;
+  batch: string;
+  months: number;
+  status: string;
+  username: string;
+  message: string;
+  created: number;
+};
+type Listing = {
+  codes: Code[];
+  page: number;
+  has_more: boolean;
+  payments_enabled: boolean;
+};
+type Generated = { codes: string[]; batch: string; months: number };
+type Confirmation =
+  { kind: "revoke"; code: Code } | { kind: "replace" | "clear" } | null;
+const statuses: Record<
+  string,
+  { label: string; color: "default" | "primary" | "success" | "warning" }
+> = {
+  active: { label: "可使用", color: "primary" },
+  processing: { label: "处理中", color: "primary" },
+  succeeded: { label: "已完成", color: "success" },
+  review: { label: "待核实", color: "warning" },
+  revoked: { label: "已停用", color: "default" },
+};
+async function api<T>(path: string, body?: unknown): Promise<T> {
+  const { ok, data } = await request<T & { message?: string }>(path, body);
+  if (!ok) throw new Error(data.message || "请求失败，请稍后重试。");
+  return data;
+}
+
+function Admin() {
+  const [listing, setListing] = useState<Listing | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [listError, setListError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [months, setMonths] = useState(6);
+  const [count, setCount] = useState("10");
+  const [batch, setBatch] = useState("");
+  const [generated, setGenerated] = useState<Generated | null>(null);
+  const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(
+    null,
+  );
+  const [confirmation, setConfirmation] = useState<Confirmation>(null);
+  const [batchError, setBatchError] = useState(false);
+  const [countError, setCountError] = useState(false);
+  const [focusTarget, setFocusTarget] = useState<"form" | "list" | null>(null);
+  const listSequence = useRef(0);
+  const mutation = useRef(false);
+  const form = useRef<HTMLFormElement>(null);
+  const generatedPanel = useRef<HTMLDivElement>(null);
+  const refreshButton = useRef<HTMLButtonElement>(null);
+  const refresh = useCallback(async (page: number) => {
+    const sequence = ++listSequence.current;
+    setLoading(true);
+    setListError("");
+    try {
+      const data = await api<Listing>(`/api/admin/codes?page=${page}`);
+      if (sequence === listSequence.current) setListing(data);
+    } catch (error) {
+      if (sequence === listSequence.current)
+        setListError((error as Error).message);
+    } finally {
+      if (sequence === listSequence.current) setLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    void refresh(0);
+  }, [refresh]);
+  useEffect(() => {
+    if (!generated) return;
+    const prevent = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", prevent);
+    return () => window.removeEventListener("beforeunload", prevent);
+  }, [generated]);
+
+  useEffect(() => {
+    if (!focusTarget || confirmation || busy || loading) return;
+    // Restore to a surviving control after the dialog's exit transition.
+    const timer = setTimeout(() => {
+      if (focusTarget === "list") refreshButton.current?.focus();
+      else form.current?.querySelector<HTMLElement>("[role=combobox]")?.focus();
+      setFocusTarget(null);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [focusTarget, confirmation, busy, loading]);
+
+  async function generate() {
+    if (mutation.current) return;
+    mutation.current = true;
+    setBusy(true);
+    setConfirmation(null);
+    setNotice(null);
+    try {
+      const data = await api<Generated>("/api/admin/codes", {
+        months,
+        count: Number(count),
+        batch: batch.trim(),
+      });
+      setGenerated(data);
+      setNotice({
+        text: `已生成 ${data.codes.length} 枚兑换码，请立即下载。刷新或关闭页面后无法恢复明文。`,
+        error: false,
+      });
+      requestAnimationFrame(() =>
+        generatedPanel.current?.scrollIntoView({ block: "nearest" }),
+      );
+      await refresh(0);
+    } catch (error) {
+      setNotice({
+        text: `${(error as Error).message} 若连接中断，请先刷新列表核实批次，不要立即重复生成。`,
+        error: true,
+      });
+    } finally {
+      mutation.current = false;
+      setBusy(false);
+    }
+  }
+  async function confirm() {
+    if (confirmation?.kind === "replace") {
+      await generate();
+      return;
+    }
+    if (confirmation?.kind === "clear") {
+      setFocusTarget("form");
+      setGenerated(null);
+      setConfirmation(null);
+      return;
+    }
+    if (confirmation?.kind !== "revoke" || mutation.current) return;
+    mutation.current = true;
+    setBusy(true);
+    try {
+      await api("/api/admin/revoke", { id: confirmation.code.id });
+      setNotice({ text: "兑换码已停用。", error: false });
+      setFocusTarget("list");
+      setConfirmation(null);
+      await refresh(listing?.page ?? 0);
+    } catch (error) {
+      setNotice({ text: (error as Error).message, error: true });
+      setConfirmation(null);
+    } finally {
+      mutation.current = false;
+      setBusy(false);
+    }
+  }
+  function download() {
+    if (!generated) return;
+    const url = URL.createObjectURL(
+      new Blob([generated.codes.join("\n") + "\n"], {
+        type: "text/plain;charset=utf-8",
+      }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `xgift-${generated.months}mo-${Date.now()}.txt`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  return (
+    <Shell admin>
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        justifyContent="space-between"
+        alignItems={{ xs: "start", sm: "center" }}
+        spacing={2}
+        sx={{ mb: 4 }}
+      >
+        <Box>
+          <Typography
+            variant="h1"
+            sx={{ fontSize: { xs: 30, sm: 36 }, mt: 0.5 }}
+          >
+            兑换码管理
+          </Typography>
+          <Typography color="text.secondary" sx={{ mt: 1 }}>
+            生成兑换码、查看兑换状态和管理批次。
+          </Typography>
+        </Box>
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <Chip
+            variant="outlined"
+            color={listing?.payments_enabled ? "success" : "default"}
+            label={
+              listing
+                ? listing.payments_enabled
+                  ? "充值已开放"
+                  : "充值暂停 · 不会付款"
+                : "正在获取服务状态"
+            }
+          />
+          <AppearanceMenu />
+        </Stack>
+      </Stack>
+      <Paper variant="outlined" sx={{ p: { xs: 2.5, sm: 3 }, mb: 3 }}>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+          <ConfirmationNumberOutlined color="primary" />
+          <Typography variant="h2">生成兑换码</Typography>
+        </Stack>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+          每批最多 500 枚。兑换码明文仅显示一次，生成后请及时下载保存。
+        </Typography>
+        <Box
+          component="form"
+          ref={form}
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            const invalidBatch =
+              new TextEncoder().encode(batch.trim()).length > 120;
+            const invalidCount =
+              !Number.isInteger(Number(count)) ||
+              Number(count) < 1 ||
+              Number(count) > 500;
+            setBatchError(invalidBatch);
+            setCountError(invalidCount);
+            if (
+              invalidBatch ||
+              invalidCount ||
+              !form.current!.reportValidity() ||
+              busy
+            )
+              return;
+            if (generated) setConfirmation({ kind: "replace" });
+            else void generate();
+          }}
+        >
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: {
+                xs: "1fr",
+                sm: "1fr 1fr",
+                md: "1fr 1fr 2fr auto",
+              },
+              gap: 2,
+              alignItems: "start",
+            }}
+          >
+            <TextField
+              select
+              label="套餐时长"
+              value={months}
+              onChange={(event) => setMonths(Number(event.target.value))}
+              disabled={busy}
+              helperText="绑定后不可更改"
+            >
+              <MenuItem value={3}>3 个月 Premium</MenuItem>
+              <MenuItem value={6}>6 个月 Premium</MenuItem>
+            </TextField>
+            <TextField
+              label="生成数量"
+              type="number"
+              required
+              value={count}
+              onChange={(event) => setCount(event.target.value)}
+              disabled={busy}
+              error={countError}
+              helperText={
+                countError ? "请输入 1–500 之间的整数" : "每批 1–500 枚"
+              }
+              slotProps={{ htmlInput: { min: 1, max: 500, step: 1 } }}
+            />
+            <TextField
+              label="批次名称（可选）"
+              placeholder="例如：十月赠礼"
+              value={batch}
+              onChange={(event) => setBatch(event.target.value)}
+              disabled={busy}
+              error={batchError}
+              helperText={
+                batchError
+                  ? "批次名称不能超过 120 字节（约 40 个汉字）"
+                  : "留空时自动生成批次名称"
+              }
+            />
+            <Button
+              type="submit"
+              variant="contained"
+              startIcon={<AddRounded />}
+              disabled={busy}
+              sx={{ mt: { md: 0.75 } }}
+            >
+              {busy ? "正在处理…" : "生成兑换码"}
+            </Button>
+          </Box>
+        </Box>
+      </Paper>
+      {notice && (
+        <Alert
+          severity={notice.error ? "error" : "success"}
+          role="status"
+          sx={{ mb: 3 }}
+        >
+          {notice.text}
+        </Alert>
+      )}
+      {generated && (
+        <Paper
+          ref={generatedPanel}
+          variant="outlined"
+          sx={{ p: 3, mb: 3, borderColor: "primary.main" }}
+        >
+          <Typography variant="h2">请保存本批兑换码</Typography>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ my: 1, overflowWrap: "anywhere" }}
+          >
+            {generated.batch} · {generated.codes.length} 枚 · {generated.months}{" "}
+            个月
+          </Typography>
+          <TextField
+            label="本批兑换码明文"
+            multiline
+            rows={4}
+            value={generated.codes.join("\n")}
+            slotProps={{
+              input: {
+                readOnly: true,
+                sx: { fontFamily: "monospace", fontSize: 13 },
+              },
+            }}
+            sx={{ my: 2 }}
+          />
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
+            <Button
+              variant="contained"
+              startIcon={<DownloadRounded />}
+              onClick={download}
+            >
+              下载 TXT
+            </Button>
+            <Button
+              variant="outlined"
+              disabled={busy}
+              onClick={() => setConfirmation({ kind: "clear" })}
+            >
+              已保存，清除明文
+            </Button>
+          </Stack>
+        </Paper>
+      )}
+      <Paper variant="outlined" sx={{ overflow: "hidden" }}>
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+          sx={{ px: { xs: 2, sm: 3 }, py: 2 }}
+        >
+          <Box>
+            <Typography variant="h2">全部兑换码</Typography>
+            <Typography variant="body2" color="text.secondary">
+              每页最多 100 条 · 按生成时间倒序
+            </Typography>
+          </Box>
+          <Button
+            ref={refreshButton}
+            startIcon={<RefreshRounded />}
+            disabled={loading || busy}
+            onClick={() => void refresh(listing?.page ?? 0)}
+            sx={{ px: 1.5 }}
+          >
+            刷新
+          </Button>
+        </Stack>
+        {loading && <LinearProgress aria-label="正在加载兑换码" />}
+        {listError && (
+          <Alert severity="error" sx={{ m: 2 }}>
+            {listError}
+            {listing && " 以下保留上次加载的数据。"}
+            <Button onClick={() => void refresh(listing?.page ?? 0)}>
+              重新加载
+            </Button>
+          </Alert>
+        )}
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: { xs: "block", md: "none" }, px: 2, pb: 1 }}
+        >
+          左右滑动表格，可查看账号和操作。
+        </Typography>
+        <TableContainer
+          tabIndex={0}
+          role="region"
+          aria-label="兑换码列表，可横向滚动"
+          sx={{ "&:focus-visible": { outlineOffset: -3 } }}
+        >
+          <Table sx={{ minWidth: 750 }} aria-label="兑换码列表">
+            <TableHead sx={{ bgcolor: "background.default" }}>
+              <TableRow>
+                {[
+                  "兑换码 / 批次",
+                  "套餐",
+                  "状态",
+                  "接收账号",
+                  "生成时间",
+                  "操作",
+                ].map((label) => (
+                  <TableCell
+                    key={label}
+                    sx={{ fontWeight: 600, whiteSpace: "nowrap" }}
+                  >
+                    {label}
+                  </TableCell>
+                ))}
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {listing?.codes.map((code) => (
+                <TableRow key={code.id} hover>
+                  <TableCell sx={{ maxWidth: 260 }}>
+                    <Typography
+                      variant="body2"
+                      sx={{ fontFamily: "monospace", fontWeight: 600 }}
+                    >
+                      …{code.hint}
+                    </Typography>
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ overflowWrap: "anywhere" }}
+                    >
+                      {code.batch}
+                    </Typography>
+                  </TableCell>
+                  <TableCell sx={{ whiteSpace: "nowrap" }}>
+                    {code.months} 个月
+                  </TableCell>
+                  <TableCell sx={{ minWidth: 100, maxWidth: 240 }}>
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      color={statuses[code.status]?.color ?? "default"}
+                      label={statuses[code.status]?.label ?? code.status}
+                    />
+                    {code.message && (
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        component="p"
+                        sx={{ mt: 1, overflowWrap: "anywhere" }}
+                      >
+                        {code.message}
+                      </Typography>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {code.username ? `@${code.username}` : "—"}
+                  </TableCell>
+                  <TableCell>
+                    <Typography variant="body2" sx={{ whiteSpace: "nowrap" }}>
+                      {new Date(code.created * 1000).toLocaleDateString(
+                        "zh-CN",
+                      )}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {new Date(code.created * 1000).toLocaleTimeString(
+                        "zh-CN",
+                      )}
+                    </Typography>
+                  </TableCell>
+                  <TableCell>
+                    {code.status === "active" ? (
+                      <Button
+                        color="error"
+                        size="small"
+                        disabled={busy || loading || !!listError}
+                        onClick={() =>
+                          setConfirmation({ kind: "revoke", code })
+                        }
+                        aria-label={`停用尾号 ${code.hint} 的兑换码`}
+                        sx={{ px: 1.5 }}
+                      >
+                        停用
+                      </Button>
+                    ) : (
+                      "—"
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {!loading && !listError && !listing?.codes.length && (
+                <TableRow>
+                  <TableCell colSpan={6} align="center" sx={{ py: 7 }}>
+                    <ConfirmationNumberOutlined
+                      sx={{ fontSize: 40, color: "text.secondary", mb: 1 }}
+                    />
+                    <Typography fontWeight={600}>还没有兑换码</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      在上方生成第一批，开始送出 Premium。
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+          sx={{ p: 2, borderTop: 1, borderColor: "divider" }}
+        >
+          <Typography variant="body2" color="text.secondary">
+            第 {(listing?.page ?? 0) + 1} 页
+          </Typography>
+          <Stack direction="row" spacing={1}>
+            <Button
+              disabled={loading || busy || !listing?.page}
+              onClick={() => void refresh((listing?.page ?? 0) - 1)}
+              sx={{ px: 1.5 }}
+            >
+              上一页
+            </Button>
+            <Button
+              disabled={loading || busy || !listing?.has_more}
+              onClick={() => void refresh((listing?.page ?? 0) + 1)}
+              sx={{ px: 1.5 }}
+            >
+              下一页
+            </Button>
+          </Stack>
+        </Stack>
+      </Paper>
+      <Dialog
+        disableRestoreFocus={focusTarget !== null}
+        open={!!confirmation}
+        onClose={() => {
+          if (!busy) setConfirmation(null);
+        }}
+        aria-labelledby="admin-dialog-title"
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle id="admin-dialog-title">
+          {confirmation?.kind === "revoke"
+            ? "停用这枚兑换码？"
+            : confirmation?.kind === "replace"
+              ? "上一批兑换码已保存？"
+              : "确认清除兑换码明文？"}
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {confirmation?.kind === "revoke"
+              ? `尾号 ${confirmation.code.hint} 的兑换码将无法使用。此操作不可撤销。`
+              : confirmation?.kind === "replace"
+                ? "生成下一批会替换当前显示的明文。请确认已下载并妥善保存上一批兑换码。"
+                : "清除后无法再次查看完整兑换码。请确认已下载并妥善保存本批兑换码。"}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            onClick={() => setConfirmation(null)}
+            disabled={busy}
+            autoFocus
+          >
+            取消
+          </Button>
+          <Button
+            variant="contained"
+            color={confirmation?.kind === "revoke" ? "error" : "primary"}
+            disabled={busy}
+            onClick={() => void confirm()}
+          >
+            {busy
+              ? "正在处理…"
+              : confirmation?.kind === "revoke"
+                ? "确认停用"
+                : "已保存，继续"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Shell>
+  );
+}
+
+mount(<Admin />);

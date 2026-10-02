@@ -15,3 +15,5 @@ __pycache__/
 
 .playwright-cli/
 .cloudflare/
+node_modules/
+.artifacts/

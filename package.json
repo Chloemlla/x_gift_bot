@@ -1,0 +1,31 @@
+{
+  "name": "xgift-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && node frontend/scripts/build.mjs",
+    "check": "tsc --noEmit",
+    "preview": "node frontend/scripts/preview.mjs",
+    "audit:ui": "node frontend/scripts/lighthouse.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@emotion/cache": "^11.14.0",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^7.3.11",
+    "@mui/material": "^7.3.11",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "chrome-launcher": "^1.2.2",
+    "esbuild": "^0.28.2",
+    "lighthouse": "^13.5.0",
+    "typescript": "^7.0.2"
+  }
+}

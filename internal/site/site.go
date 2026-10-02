@@ -1,6 +1,7 @@
 package site
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -32,6 +33,9 @@ import (
 
 //go:embed assets/*
 var assets embed.FS
+
+type nonceContextKey struct{}
+
 var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{1,15}$`)
 var codePattern = regexp.MustCompile(`^XG-[A-F0-9]{48}$`)
 
@@ -191,7 +195,7 @@ func Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.asset("index.html", "text/html; charset=utf-8"))
 	mux.HandleFunc("GET /favicon.svg", s.asset("favicon.svg", "image/svg+xml"))
-	mux.HandleFunc("GET /style.css", s.asset("style.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /appearance.js", s.asset("appearance.js", "application/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /app.js", s.asset("app.js", "application/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if s.db.PingContext(r.Context()) != nil {
@@ -280,12 +284,54 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	}
 	return true
 }
+
+// An explicit gzip;q=0 takes precedence over a wildcard.
+func acceptsGzip(header string) bool {
+	wildcard := false
+	for _, entry := range strings.Split(header, ",") {
+		parts := strings.Split(strings.TrimSpace(entry), ";")
+		name := strings.ToLower(strings.TrimSpace(parts[0]))
+		quality := 1.0
+		for _, parameter := range parts[1:] {
+			key, value, found := strings.Cut(strings.TrimSpace(parameter), "=")
+			if found && strings.EqualFold(key, "q") {
+				parsed, err := strconv.ParseFloat(value, 64)
+				if err != nil || parsed < 0 || parsed > 1 {
+					quality = 0
+				} else {
+					quality = parsed
+				}
+			}
+		}
+		if name == "gzip" {
+			return quality > 0
+		}
+		if name == "*" {
+			wildcard = quality > 0
+		}
+	}
+	return wildcard
+}
+
 func (s *server) asset(name, kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		b, err := assets.ReadFile("assets/" + name)
 		if err != nil {
 			http.NotFound(w, r)
 			return
+		}
+		if strings.HasPrefix(kind, "text/html") {
+			nonce, _ := r.Context().Value(nonceContextKey{}).(string)
+			b = bytes.ReplaceAll(b, []byte("__XGIFT_NONCE__"), []byte(nonce))
+		}
+		if strings.HasSuffix(name, ".js") {
+			w.Header().Set("Vary", "Accept-Encoding")
+			if acceptsGzip(r.Header.Get("Accept-Encoding")) {
+				if compressed, err := assets.ReadFile("assets/" + name + ".gz"); err == nil {
+					b = compressed
+					w.Header().Set("Content-Encoding", "gzip")
+				}
+			}
 		}
 		w.Header().Set("Content-Type", kind)
 		w.Write(b)
@@ -316,7 +362,10 @@ func (s *server) allow(key string, max int) bool {
 func (s *server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		nonce := token(16)
+		r = r.WithContext(context.WithValue(r.Context(), nonceContextKey{}, nonce))
+		// Emotion style elements use a fresh nonce. MUI also sets dynamic style attributes.
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'nonce-"+nonce+"'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")

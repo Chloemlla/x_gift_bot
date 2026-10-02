@@ -3,135 +3,39 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <meta name="color-scheme" content="light" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#F5F5F7" />
+    <meta name="csp-nonce" content="__XGIFT_NONCE__" />
+    <meta
+      name="description"
+      content="使用兑换码，为你的 X 账号兑换 Premium。无需密码，兑换进度随时可查。"
+    />
+    <style nonce="__XGIFT_NONCE__">
+      :root {
+        background: #f5f5f7;
+        color-scheme: light;
+      }
+      :root[data-dark] {
+        background: #111318;
+        color-scheme: dark;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-light]) {
+          background: #111318;
+          color-scheme: dark;
+        }
+      }
+    </style>
+    <script src="/appearance.js"></script>
     <title>XGift · Premium 兑换</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="stylesheet" href="/style.css" />
-    <script src="/app.js" defer></script>
+    <script type="module" src="/app.js"></script>
   </head>
   <body>
-    <main class="landing">
-      <section class="intro">
-        <div class="pill"><span class="dot"></span> PREMIUM GIFT</div>
-        <h1>让你的 X，<br />多一点<span class="accent">可能。</span></h1>
-        <p class="lede">
-          一枚兑换码，一份 Premium。<br />输入你的用户名，接收属于你的赠礼。
-        </p>
-        <div class="benefits">
-          <div>
-            <span class="benefit-icon">✓</span
-            ><span>只需用户名<small>无需提供 X 密码</small></span>
-          </div>
-          <div>
-            <span class="benefit-icon">↗</span
-            ><span>进度随时可查<small>保留兑换码即可查询</small></span>
-          </div>
-        </div>
-        <div class="art" aria-hidden="true">
-          <span class="art-star">✦</span><span class="art-word">PREMIUM</span
-          ><span class="art-tag">A GIFT FOR YOU ↗</span>
-        </div>
-      </section>
-      <section class="card redeem-card">
-        <div class="card-top">
-          <span class="step">01 / REDEEM</span><span class="tiny-star">✦</span>
-        </div>
-        <h2>兑换你的 Premium</h2>
-        <p class="muted">套餐时长以兑换码为准。</p>
-        <ol class="quick-guide">
-          <li>粘贴兑换码，填写 @ 后的用户名。</li>
-          <li>核对账号后提交，等待下方进度完成。</li>
-          <li>成功后打开 X；保留兑换码可随时查询。</li>
-        </ol>
-        <div id="service-notice" class="result" role="status" hidden></div>
-        <form id="redeem-form">
-          <label for="code">兑换码</label
-          ><textarea
-            id="code"
-            name="code"
-            rows="2"
-            placeholder="粘贴 XG- 开头的完整兑换码"
-            maxlength="80"
-            required
-            spellcheck="false"
-            autocomplete="off"
-          ></textarea
-          ><label for="username">X 用户名 <span>不是显示名称</span></label>
-          <div class="username-input">
-            <span>@</span
-            ><input
-              id="username"
-              name="username"
-              placeholder="your_username"
-              maxlength="16"
-              pattern="@?[A-Za-z0-9_]{1,15}"
-              autocomplete="off"
-              spellcheck="false"
-              required
-            />
-          </div>
-          <p class="field-help">请核对用户名，赠送成功后无法更换账号。</p>
-          <button id="redeem-button" type="submit">
-            兑换 Premium <span>↗</span></button
-          ><button id="status-button" class="secondary" type="button">
-            查询兑换进度
-          </button>
-        </form>
-        <section
-          id="progress-panel"
-          class="progress-panel"
-          aria-label="兑换进度"
-          hidden
-        >
-          <div class="progress-heading">
-            <span id="progress-title">正在准备兑换</span
-            ><strong id="progress-percent">0%</strong>
-          </div>
-          <div
-            id="progress-track"
-            class="progress-track"
-            role="progressbar"
-            aria-label="兑换阶段进度"
-            aria-valuemin="0"
-            aria-valuemax="100"
-            aria-valuenow="0"
-          >
-            <div id="progress-fill" class="progress-fill"></div>
-          </div>
-          <ol class="progress-steps">
-            <li data-threshold="40">核对账号</li>
-            <li data-threshold="70">核验订单</li>
-            <li data-threshold="100">付款处理</li>
-            <li data-threshold="100">兑换完成</li>
-          </ol>
-          <p id="progress-help" class="field-help">
-            百分比表示已完成的流程阶段，不是预计耗时。请勿重复提交。
-          </p>
-        </section>
-        <div
-          id="result"
-          class="result"
-          role="status"
-          aria-live="polite"
-          hidden
-        ></div>
-        <a
-          id="open-x"
-          class="open-x"
-          href="https://x.com/"
-          target="_blank"
-          rel="noopener noreferrer"
-          hidden
-          >打开 X 查看 Premium ↗</a
-        >
-        <div class="card-note">
-          <span>ⓘ</span>
-          <p>
-            我们会先检查账号能否接收赠送。若 X
-            暂不允许赠送，会在这里告诉你，兑换码不会因此被使用。
-          </p>
-        </div>
-      </section>
-    </main>
+    <div id="root"></div>
+    <noscript
+      >请启用 JavaScript
+      使用兑换和进度查询。若已提交兑换，请保留兑换码，不要重复提交。</noscript
+    >
   </body>
 </html>

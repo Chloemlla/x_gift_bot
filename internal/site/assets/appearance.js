@@ -1,0 +1,1 @@
+(()=>{let t="system";try{t=localStorage.getItem("xgift-mode")||t}catch{}let e=t==="dark"||t!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches;document.querySelector('meta[name="theme-color"]')?.setAttribute("content",e?"#111318":"#F5F5F7"),document.documentElement.setAttribute(e?"data-dark":"data-light","")})();

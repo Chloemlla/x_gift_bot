@@ -6,15 +6,47 @@ Go CLI + Premium 兑换站。网站：`https://xp.example.com`，后台：`/admi
 
 ## 构建
 
-需要 Go 1.27.1、CGO 与 C 编译器：
+需要 Go 1.27.1、CGO 与 C 编译器。修改前端时还需要 Node.js 22+ 与 npm：
 
 ```sh
+npm ci
+npm run build
 go build -o bin/xgift ./cmd/xgift
 go build -o bin/xgift-web ./cmd/xgift-web
 go vet ./...
 ```
 
-按要求未保留测试文件，不运行测试。静态页面嵌入 Go 二进制，无 Node 运行依赖、外部字体或浏览器自动化依赖。
+前端使用 React 19 + TypeScript + MUI 7 / Emotion，采用 M3 风格的蓝色主色、粉色辅助色与中性灰表面、8px 间距体系、响应式布局和 MUI 交互组件。浅色与深色主题默认跟随系统，可通过标题旁的外观菜单手动选择；仅外观偏好保存至 localStorage，兑换码不持久化。源码在 `frontend/src/`，`npm run build` 先执行严格类型检查，再将两个入口打包至 `internal/site/assets/app.js` 和 `admin.js`，并生成主题初始化脚本 `appearance.js` 及各脚本的 `.gz` 文件；构建产物随项目保存，请勿手工修改。静态页面继续嵌入 Go 二进制，生产运行无需 Node、外部 CDN 或外部字体。仅修改 Go 时可以直接使用已提交的前端产物构建。
+
+`npm run check` 执行 TypeScript 检查。按项目原有约定未新增测试文件；前端通过隔离的本地模拟预览进行浏览器验收，不调用生产付款接口。
+
+```sh
+npm run preview                 # http://127.0.0.1:4173 和 /admin
+PREVIEW_PAUSED=true PREVIEW_PORT=4174 npm run preview
+```
+
+预览仅监听回环地址，所有兑换码、账号与接口响应都是内存示例，不连接 Go 服务、生产数据库、X 或 Stripe。修改前端后重新执行 `npm run build` 并刷新页面。输入 `XG-` 加 48 位 A 可演示成功流程；最后一位改为 B 演示待核实、C 演示资格拒绝、D 演示停用、F 演示持续处理中。其余输入先遵循与生产相同的格式校验。管理页可演示生成、下载、清除、分页和停用；重启预览会清空示例数据。预览不验证真实后台 Basic Auth 或第三方付款链路。
+
+两个项目级技能已安装到 `.agents/skills/`：
+
+- `frontend-design`：来自 [PracticalSwan/agent-skills](https://github.com/PracticalSwan/agent-skills/tree/main/frontend-design)。
+- `mui`：来自 [softaworks/agent-toolkit](https://github.com/softaworks/agent-toolkit/tree/main/skills/mui)，包含 README、SKILL.md 和配套资源。
+
+MUI 动态样式通过每响应随机 CSP nonce 传给 Emotion；仅样式属性允许内联，以支持进度与组件布局。脚本仍仅允许同源，后台页面、脚本与 API 保留 Basic Auth。兑换码仅保存在页面内存，刷新后清除；结果不确定时前端限制为查询，只有后端确认成功才显示 100%。
+
+## Lighthouse 验收
+
+先执行 `npm run build`，再在另一个终端启动 `npm run preview`。审计需要本机安装 Chrome：
+
+```sh
+npm run audit:ui                                  # 兑换页，连续 3 轮
+npm run audit:ui -- --dark --runs 1                # 系统深色模式
+npm run audit:ui -- --url http://127.0.0.1:4173/admin --runs 1
+```
+
+每一轮独立创建空的临时 Chrome profile，禁用扩展，不复用缓存或登录状态，结束后自动删除。保留 Lighthouse 默认移动设备、模拟网络与 CPU 限速，检查 Performance、Accessibility、Best Practices、SEO 四项；任一项低于 97 分时命令以非零状态退出。HTML、JSON 与汇总报告保存在忽略提交的 `.artifacts/lighthouse/`。
+
+2026-10-02 使用 Lighthouse 13.5.0，本地移动端兑换页优化前为 **83 / 100 / 92 / 100**；修复后连续三轮均为 **99 / 100 / 100 / 100**。深色兑换页同为 **99 / 100 / 100 / 100**；后台浅色与深色均为 **98 / 100 / 100 / 100**。兑换页 FCP 约 1.65 秒，LCP 约 1.95 秒，CLS 为 0。主要修复是让本地预览和 Go 静态资源均支持 gzip，以及移除 MUI 主题切换时不带 nonce 的临时样式注入。脚本原始大小约 494 KiB，压缩后约 154 KiB；生产 Caddy 原有压缩继续保留。订单、API、后台响应仍禁止缓存，不为性能分数缓存敏感内容。这些是本地实验室结果，不代表线上实测 Core Web Vitals。
 
 ## CLI
 
@@ -56,7 +88,7 @@ go vet ./...
 
 `sqlite/password-path` 保存密码文件位置，默认密码文件在 `/tmp/xgift-password-*`。请将原密码安全保存，`/tmp` 清理后不能恢复。也可通过 `XGIFT_PASSWORD_FILE` 或 CLI `--password-file` 指定持久路径。目录权限 `0700`，秘密文件 `0600`。
 
-`.private/`、`sqlite/`、数据库、日志、构建产物和环境秘密均不提交 Git。服务器密钥与本地密钥独立。本地 `.private/export/admin-password` 保存本次生成的后台密码，勿提交或分享。
+`.private/`、`sqlite/`、数据库、日志、Go 二进制和环境秘密均不提交 Git（嵌入的前端构建产物除外）。服务器密钥与本地密钥独立。本地 `.private/export/admin-password` 保存本次生成的后台密码，勿提交或分享。
 
 ## 服务器部署
 
@@ -80,7 +112,9 @@ ssh example-server 'sudo systemctl status xgift --no-pager'
 ssh example-server 'sudo journalctl -u xgift --since "1 hour ago" --no-pager'
 ```
 
-更新时先在服务器构建两个二进制，停止 `xgift`，备份数据及密钥，再替换程序并启动。不要覆盖线上 `site.db` 或用旧的本地 vault 覆盖线上订单。备份必须包含 `site.db`（停服或用 SQLite backup API，不能忽略 WAL）、`vault.db` 及独立密钥；所有备份同样限制权限。
+更新前先执行 `npm ci && npm run build` 生成最新前端产物，再在服务器构建两个二进制，停止 `xgift`，备份数据及密钥，再替换程序并启动。不要覆盖线上 `site.db` 或用旧的本地 vault 覆盖线上订单。备份必须包含 `site.db`（停服或用 SQLite backup API，不能忽略 WAL）、`vault.db` 及独立密钥；所有备份同样限制权限。
+
+2026-10-02 18:56（UTC+8）已部署 React / MUI 蓝粉灰主题版本。服务器构建目录为 `/home/operator/xgift-releases/release-20261002-fSYHZH`，停服备份位于 `/var/backups/xgift/20261002T105631Z`（目录 `0700`，状态与密钥归档 `0600`），保留旧的两个二进制。已验证服务运行、公网健康检查、后台认证、静态资源哈希、gzip 和 CSP nonce。此次升级保留线上数据库、密钥和充值配置，未提交测试付款。
 
 **本次验证边界**：用户已自行完成一笔 6 个月充值。修复通过构建、静态检查、独立代码复查、桌面/手机页面预览及该笔订单只读对账；开发核验不提交付款。付款状态不明会锁定为待核实，不自动重试。
 

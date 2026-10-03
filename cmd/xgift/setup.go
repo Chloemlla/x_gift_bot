@@ -31,10 +31,10 @@ const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 // X's public gifting product identifiers as discovered from x.com checkout.
 // They are merchant-side identifiers published by X, not operator secrets.
 const (
-	defaultXMerchant   = "acct_EXAMPLE"
+	defaultXMerchant   = "acct_1Ika5JA3KZ32dPo1"
 	defaultXCurrency   = "bdt"
-	defaultXProduct3Mo = "prod_EXAMPLE3MO"
-	defaultXProduct6Mo = "prod_EXAMPLE6MO"
+	defaultXProduct3Mo = "prod_TJXJtpzqCpI36N"
+	defaultXProduct6Mo = "prod_TJXKKNJwZJIhCM"
 )
 
 var stripeKeyPattern = regexp.MustCompile(`^pk_live_[A-Za-z0-9]+$`)

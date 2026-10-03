@@ -106,7 +106,7 @@ Stripe publishable key（pk_live_...）: pk_live_EXAMPLE…（不回显）
 `--pay` 是真实付款入口。网站已开放用户自行测试，使用有效兑换码点击充值会触发真实付款；网站开关只管网站，CLI 自身仍执行配置、订单状态和金额校验。
 
 - 仅允许 3 个月恰好 300 BDT、6 个月恰好 600 BDT。校验 X 报价和 Stripe 最终总额、币种、商品、数量、一次性模式及商户身份，任何不符都停止。
-- 内嵌 sing-box，只监听本机端口，不修改系统代理。代理配置从加密库读取，为完整 sing-box 配置对象，支持任意 sing-box outbound 类型：direct、socks、http、shadowsocks、vmess、vless、trojan、anytls、shadowtls、snell、ssh、tor、block、dns、selector/urltest。hysteria/hysteria2/tuic 与 wireguard/tailscale 需要对应构建标签（如 `go build -tags with_quic`），默认构建未启用。最小配置示例：
+- 内嵌 sing-box，只监听本机端口，不修改系统代理。代理配置从加密库读取，为完整 sing-box 配置对象，支持任意 sing-box outbound 类型：direct、socks、http、shadowsocks、vmess、vless、trojan、anytls、shadowtls、snell、ssh、tor、block、selector/urltest，并可携带 route 与 dns 配置。为安全起见，配置中的 `services`、`endpoints`、`experimental` 段会被忽略（防止打开非本机监听或修改主机网络）。hysteria/hysteria2/tuic 与 wireguard/tailscale 需要对应构建标签（如 `go build -tags with_quic`），默认构建未启用。最小配置示例：
 
 ```json
 {"outbounds":[{"type":"direct","tag":"direct"}]}

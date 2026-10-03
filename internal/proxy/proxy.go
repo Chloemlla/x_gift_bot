@@ -25,6 +25,12 @@ func Start(ctx context.Context, config []byte, port int) (*box.Box, error) {
 	if !ok || len(outbounds) == 0 {
 		return nil, fmt.Errorf("proxy configuration must contain at least one outbound")
 	}
+	// Only traffic forwarding is allowed: drop every section that could
+	// open listeners or alter the host (API services, TUN endpoints,
+	// clash/v2ray/debug controllers). Outbounds, route and dns pass through.
+	delete(raw, "services")
+	delete(raw, "endpoints")
+	delete(raw, "experimental")
 	raw["log"] = map[string]any{"disabled": true}
 	raw["inbounds"] = []any{map[string]any{"type": "mixed", "listen": "127.0.0.1", "listen_port": port}}
 	data, err := stdjson.Marshal(raw)

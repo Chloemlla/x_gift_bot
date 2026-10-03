@@ -61,9 +61,10 @@ npm run audit:ui -- --url http://127.0.0.1:4173/admin --runs 1
 3. 支付卡：卡号（Luhn 校验）、有效期、CVC、持卡人姓名、账单邮箱、两位账单国家代码，以及可选的邮编、地址行、城市、州/省（留空则不写入该键）。只填写发卡行登记的真实信息。
 4. 代理：直连、AnyTLS 引导填写或粘贴 sing-box outbound JSON（单个对象或含 `outbounds` 数组的完整配置，可含 `route` / `dns`）。保存前在本机临时端口实际启动内嵌 sing-box 验证配置有效，可选做连通性测试，失败仅警告并保留配置。
 5. Stripe 公钥：`pk_live_` 开头的 X 结账商户公钥，原始字节保存，不是用户的 secret key。
-6. 站点配置（可选）：站点 Origin、监听地址、支付开关。生成随机后台密码写入 `<数据目录>/admin-password`（0600，终端仅显示一次），并写出与 `deploy/site.env.example` 相同键的 `<数据目录>/site.env`（0600），其中 `XGIFT_DATA_DIR`、`XGIFT_PASSWORD_FILE`、`XGIFT_ADMIN_PASSWORD_FILE` 指向本次实际路径。生产部署按部署章节表格移至 `/etc/xgift/` 并保持仅属主可读。
+6. 商品目录：默认写入 X Premium 目录（3 个月 300 BDT、6 个月 600 BDT 及对应的 Stripe 商户与商品 ID，均为 X 结账页公开标识）；选择自定义时逐项输入商户、币种和每个套餐的时长、金额（按主要货币单位输入，自动换算为最小单位保存）与 Stripe 商品 ID。也可以用 `put --name catalog` 直接写入 JSON。
+7. 站点配置（可选）：站点 Origin、监听地址、支付开关。生成随机后台密码写入 `<数据目录>/admin-password`（0600，终端仅显示一次），并写出与 `deploy/site.env.example` 相同键的 `<数据目录>/site.env`（0600），其中 `XGIFT_DATA_DIR`、`XGIFT_PASSWORD_FILE`、`XGIFT_ADMIN_PASSWORD_FILE` 指向本次实际路径。生产部署按部署章节表格移至 `/etc/xgift/` 并保持仅属主可读。
 
-向导共写入五条保管库记录：`cookies`（X 登录 Cookie）、`api-auth`（Authorization 与 User-Agent）、`card`（支付卡）、`proxy`（sing-box 配置）、`stripe-key`（Stripe 公钥）。脚本化或非交互环境仍可使用 `init`（标准输入读入整个 JSON 对象）和 `put` 逐条写入。
+向导共写入六条保管库记录：`cookies`（X 登录 Cookie）、`api-auth`（Authorization 与 User-Agent）、`card`（支付卡）、`proxy`（sing-box 配置）、`stripe-key`（Stripe 公钥）、`catalog`（商户与套餐目录）。脚本化或非交互环境仍可使用 `init`（标准输入读入整个 JSON 对象）和 `put` 逐条写入。
 
 示例会话（值为虚构）：
 
@@ -86,8 +87,9 @@ CVC（3-4 位）: 123（不回显）
 代理配置有效。
 是否进行连通性测试（通过代理访问 https://x.com）？ [y/N]: ↵
 Stripe publishable key（pk_live_...）: pk_live_EXAMPLE…（不回显）
+使用 X Premium 默认目录？ [Y/n]: ↵
 是否生成站点配置文件？ [y/N]: n
-配置完成。已写入记录：cookies、api-auth、card、proxy、stripe-key
+配置完成。已写入记录：cookies、api-auth、card、proxy、stripe-key、catalog
 ```
 
 ## CLI
@@ -105,7 +107,7 @@ Stripe publishable key（pk_live_...）: pk_live_EXAMPLE…（不回显）
 
 `--pay` 是真实付款入口。网站已开放用户自行测试，使用有效兑换码点击充值会触发真实付款；网站开关只管网站，CLI 自身仍执行配置、订单状态和金额校验。
 
-- 仅允许 3 个月恰好 300 BDT、6 个月恰好 600 BDT。校验 X 报价和 Stripe 最终总额、币种、商品、数量、一次性模式及商户身份，任何不符都停止。
+- 可购买套餐由加密保管库的 `catalog` 记录定义（向导默认写入 X Premium 目录：3 个月恰好 300 BDT、6 个月恰好 600 BDT）。校验 X 报价和 Stripe 最终总额、币种、商品、数量、一次性模式及商户身份，任何不符都停止；`catalog` 缺失或非法时结账与 `status` 明确报错，站点仍正常启动。
 - 内嵌 sing-box，只监听本机端口，不修改系统代理。代理配置从加密库读取，为完整 sing-box 配置对象，支持任意 sing-box outbound 类型：direct、socks、http、shadowsocks、vmess、vless、trojan、anytls、shadowtls、snell、ssh、tor、block、selector/urltest，并可携带 route 与 dns 配置。为安全起见，配置中的 `services`、`endpoints`、`experimental` 段会被忽略（防止打开非本机监听或修改主机网络）。hysteria/hysteria2/tuic 与 wireguard/tailscale 需要对应构建标签（如 `go build -tags with_quic`），默认构建未启用。最小配置示例：
 
 ```json
@@ -171,7 +173,7 @@ ssh example-server 'sudo journalctl -u xgift --since "1 hour ago" --no-pager'
 
 更新前先执行 `npm ci && npm run build` 生成最新前端产物，再在服务器构建两个二进制，停止 `xgift`，备份数据及密钥，再替换程序并启动。不要覆盖线上 `site.db` 或用旧的本地 vault 覆盖线上订单。备份必须包含 `site.db`（停服或用 SQLite backup API，不能忽略 WAL）、`vault.db` 及独立密钥；所有备份同样限制权限。
 
-2026-10-02 18:56（UTC+8）已部署 React / MUI 蓝粉灰主题版本。服务器构建目录为 `/home/operator/xgift-releases/release-20261002-fSYHZH`，停服备份位于 `/var/backups/xgift/20261002T105631Z`（目录 `0700`，状态与密钥归档 `0600`），保留旧的两个二进制。已验证服务运行、公网健康检查、后台认证、静态资源哈希、gzip 和 CSP nonce。此次升级保留线上数据库、密钥和充值配置，未提交测试付款。
+2026-10-02 18:56（UTC+8）已部署 React / MUI 蓝粉灰主题版本。服务器构建目录为 `/home/<operator>/xgift-releases/release-20261002-fSYHZH`，停服备份位于 `/var/backups/xgift/20261002T105631Z`（目录 `0700`，状态与密钥归档 `0600`），保留旧的两个二进制。已验证服务运行、公网健康检查、后台认证、静态资源哈希、gzip 和 CSP nonce。此次升级保留线上数据库、密钥和充值配置，未提交测试付款。
 
 **本次验证边界**：用户已自行完成一笔 6 个月充值。修复通过构建、静态检查、独立代码复查、桌面/手机页面预览及该笔订单只读对账；开发核验不提交付款。付款状态不明会锁定为待核实，不自动重试。
 
@@ -203,20 +205,20 @@ X 建单请求在发送前建立加密审计，记录固定操作与接收人/�
 - 整个兑换任务最长 240 秒，重试时进度不回退。后台每 30 秒最多检查一条最近 24 小时的待核实记录，单次 8 秒超时，服从同一订单锁；浏览器关闭也继续只读核实，成功自动回写原兑换码。未提交付款的失败不会被后台查询任务自动转成新扣款。
 - 持续故障、业务限制、银行验证和无法可信核实的付款结果仍可能需要人工处理。不能把这些情况伪装成功，也不能保证第三方永不报错。
 
-2026-10-02 19:15（UTC+8）已部署文件夹管理、点击复制、中性灰背景和主题切换位置修复。发布目录为 `/home/operator/xgift-releases/release-20261002-folders-c8Thh2`，备份位于 `/var/backups/xgift/20261002T111551Z`，权限与上述备份一致。增量迁移后原有 24 枚兑换码全部归入未分类，状态数量保持为可使用 16、已停用 3、已完成 5，处理中及待核实均为 0。已验证迁移与后台统计、认证、资源一致性、gzip、CSP、公网健康及实际背景颜色；线上连续切换外观时卡片坐标不变。未提交测试付款。
+2026-10-02 19:15（UTC+8）已部署文件夹管理、点击复制、中性灰背景和主题切换位置修复。发布目录为 `/home/<operator>/xgift-releases/release-20261002-folders-c8Thh2`，备份位于 `/var/backups/xgift/20261002T111551Z`，权限与上述备份一致。增量迁移后原有 24 枚兑换码全部归入未分类，状态数量保持为可使用 16、已停用 3、已完成 5，处理中及待核实均为 0。已验证迁移与后台统计、认证、资源一致性、gzip、CSP、公网健康及实际背景颜色；线上连续切换外观时卡片坐标不变。未提交测试付款。
 
-2026-10-02 后续修正（19:30 UTC+8 已部署）：批次与文件夹合并为同一概念，并支持列表点击复制加密保存的新码。隔离 SQLite/vault 验证覆盖迁移重复执行、同名批次合并、改名/移动同步、重新打开 vault 后复制、历史码不可恢复、分页和权限检查。浏览器验证覆盖刷新后整行复制、键盘复制，以及停用/勾选不误复制。批次导航固定高度并支持横向滚动，避免异步加载导致内容跳动；后台 Lighthouse 深色连续两轮 98，CLS 约 0.0007，浅色 98，其余三项均为 100；SSH 恢复后已部署至 `/home/operator/xgift-releases/release-20261002-batches-WtRlXw`，切换前备份位于 `/var/backups/xgift/20261002T113011Z`。原有 24 枚兑换码已按原批次归入 5 个文件夹，状态保持可使用 16、已停用 3、已完成 5；批次名称与分类一致性、后台认证、静态资源一致性、gzip、CSP 及公网健康检查均通过，充值配置保持开启。未生成生产测试兑换码或提交付款。
+2026-10-02 后续修正（19:30 UTC+8 已部署）：批次与文件夹合并为同一概念，并支持列表点击复制加密保存的新码。隔离 SQLite/vault 验证覆盖迁移重复执行、同名批次合并、改名/移动同步、重新打开 vault 后复制、历史码不可恢复、分页和权限检查。浏览器验证覆盖刷新后整行复制、键盘复制，以及停用/勾选不误复制。批次导航固定高度并支持横向滚动，避免异步加载导致内容跳动；后台 Lighthouse 深色连续两轮 98，CLS 约 0.0007，浅色 98，其余三项均为 100；SSH 恢复后已部署至 `/home/<operator>/xgift-releases/release-20261002-batches-WtRlXw`，切换前备份位于 `/var/backups/xgift/20261002T113011Z`。原有 24 枚兑换码已按原批次归入 5 个文件夹，状态保持可使用 16、已停用 3、已完成 5；批次名称与分类一致性、后台认证、静态资源一致性、gzip、CSP 及公网健康检查均通过，充值配置保持开启。未生成生产测试兑换码或提交付款。
 
 2026-10-02 19:33（UTC+8）按用户提供的 20 枚兑换码白名单完成生产清理：逐一摘要匹配后保留这 20 条，删除其余 4 条测试兑换码及无内容批次。保留记录的批次、状态、接收账号和时间等元数据均未改变，当前可使用 16、已完成 4。完整兑换码补存至现有加密 vault，逐条通过后台复制接口核验 20/20 与输入一致；未将明文写入 Git 或操作日志，已删除本地临时输入。备份位于 `/var/backups/xgift/20261002T113306Z-retain20`，公网健康检查正常，充值保持开启。
 
-2026-10-02 19:47（UTC+8）已部署 Stripe checkout 路径兼容修复：严格接受 `/f/pay/<同一正式环境 session>`，保留原 `/g/pay/`、`/c/pay/` 及域名、协议、身份限制。建单错误区分状态、session ID、URL 校验原因。新增 15 项链接兼容与安全边界回归用例，`go test ./...` 与 checkout 静态检查通过。发布目录 `/home/operator/xgift-releases/release-20261002-checkout-path`；部署备份 `/var/backups/xgift/20261002T114734Z-checkout-path`；二进制哈希、服务与内外网健康检查通过。
+2026-10-02 19:47（UTC+8）已部署 Stripe checkout 路径兼容修复：严格接受 `/f/pay/<同一正式环境 session>`，保留原 `/g/pay/`、`/c/pay/` 及域名、协议、身份限制。建单错误区分状态、session ID、URL 校验原因。新增 15 项链接兼容与安全边界回归用例，`go test ./...` 与 checkout 静态检查通过。发布目录 `/home/<operator>/xgift-releases/release-20261002-checkout-path`；部署备份 `/var/backups/xgift/20261002T114734Z-checkout-path`；二进制哈希、服务与内外网健康检查通过。
 
 同次处理 `user-c` 的 6 个月订单：原 X 建单返回 HTTP 200 / Unpaid，但 `/f/pay/` 链接被旧校验拒绝。用户授权再次尝试付款后，核对加密审计中的账号、商品、回调和原 session，并以 Stripe 实时 guard 确认 open / unpaid、600 BDT、PaymentIntent 明确为 null，随后恢复同一 session 至 created。正常付款流程被 X 当前明确的 `premium_gifting_eligible=false` 拦住，未提交付款；复核原 Stripe session 仍未付款。网站保持 review 并更新资格提示，未强制成功或绕过资格检查。恢复证据和资格响应保存在加密 vault；一次性工具已删除。恢复前备份 `/var/backups/xgift/20261002T114518Z-user-c-recovery`。X 资格变化原因尚不明确，不能据此推断账号已经充值。
 
-2026-10-02 19:50（UTC+8）按用户要求将 checkout 路径统一为 `/[A-Za-z]/pay/<同一正式环境 session>`，接受任意单个大小写英文字母，不再逐个维护路径白名单；保留 HTTPS、精确域名、无凭据、无查询参数及 session 一致性校验。回归验证覆盖全部 52 个字母及多字母、数字、符号、非 ASCII、错误操作等拒绝场景。测试、checkout 静态检查、线上二进制一致性与内外网健康检查通过。发布目录 `/home/operator/xgift-releases/release-20261002-checkout-letter`，备份 `/var/backups/xgift/20261002T115034Z-checkout-letter`。本次仅更新程序，未提交付款。
+2026-10-02 19:50（UTC+8）按用户要求将 checkout 路径统一为 `/[A-Za-z]/pay/<同一正式环境 session>`，接受任意单个大小写英文字母，不再逐个维护路径白名单；保留 HTTPS、精确域名、无凭据、无查询参数及 session 一致性校验。回归验证覆盖全部 52 个字母及多字母、数字、符号、非 ASCII、错误操作等拒绝场景。测试、checkout 静态检查、线上二进制一致性与内外网健康检查通过。发布目录 `/home/<operator>/xgift-releases/release-20261002-checkout-letter`，备份 `/var/backups/xgift/20261002T115034Z-checkout-letter`。本次仅更新程序，未提交付款。
 
-2026-10-02 20:03（UTC+8）已部署待核实订单主动恢复：同一码、同一绑定账号再次提交时，以订单锁和条件更新切换到 processing；未提交付款的原订单重新完整核验并复用有效 session，已提交订单仅只读对账。前端待核实状态提供「重新检查并继续兑换」及付款说明，查询仍不付款。新增恢复状态、身份/金额、提交证据、锁冲突、暂停、处理中和只读查询测试；本地与服务器竞态测试通过，Go 静态检查及前端构建通过，隔离浏览器验证首次失败→主动恢复→模拟成功和手机布局。生产服务、二进制及公网前端哈希核验通过。发布目录 `/home/operator/xgift-releases/release-20261002-resume-review`；备份 `/var/backups/xgift/20261002T120324Z-resume-review`。本次未提交真实付款，user-c 原码仍为 review，等待用户主动重新提交。
+2026-10-02 20:03（UTC+8）已部署待核实订单主动恢复：同一码、同一绑定账号再次提交时，以订单锁和条件更新切换到 processing；未提交付款的原订单重新完整核验并复用有效 session，已提交订单仅只读对账。前端待核实状态提供「重新检查并继续兑换」及付款说明，查询仍不付款。新增恢复状态、身份/金额、提交证据、锁冲突、暂停、处理中和只读查询测试；本地与服务器竞态测试通过，Go 静态检查及前端构建通过，隔离浏览器验证首次失败→主动恢复→模拟成功和手机布局。生产服务、二进制及公网前端哈希核验通过。发布目录 `/home/<operator>/xgift-releases/release-20261002-resume-review`；备份 `/var/backups/xgift/20261002T120324Z-resume-review`。本次未提交真实付款，user-c 原码仍为 review，等待用户主动重新提交。
 
-2026-10-02 22:38（UTC+8）复查 user-d 的 22:30 失败：建单前 PremiumGiftingQuery 返回 403，旧策略未重试；稍后只读查询恢复，用户授权重新提交后于 22:34:53 完成 6 个月付款，原码 succeeded / 100%。已部署只读 X 查询 403 的有限重试、加密失败诊断及明确恢复提示；不扩大 X 建单和 Stripe 确认重试。模拟测试覆盖 403→成功、持续 403 三次后停止、401/建单403不重试、长 Retry-After 停止、业务资格拒绝不重试和失败诊断留存；本地/服务器竞态测试、静态检查、服务与内外网健康检查通过，未提交测试付款。发布目录 `/home/operator/xgift-releases/release-20261002-query-recovery`，备份 `/var/backups/xgift/20261002T143845Z-query-recovery`。
+2026-10-02 22:38（UTC+8）复查 user-d 的 22:30 失败：建单前 PremiumGiftingQuery 返回 403，旧策略未重试；稍后只读查询恢复，用户授权重新提交后于 22:34:53 完成 6 个月付款，原码 succeeded / 100%。已部署只读 X 查询 403 的有限重试、加密失败诊断及明确恢复提示；不扩大 X 建单和 Stripe 确认重试。模拟测试覆盖 403→成功、持续 403 三次后停止、401/建单403不重试、长 Retry-After 停止、业务资格拒绝不重试和失败诊断留存；本地/服务器竞态测试、静态检查、服务与内外网健康检查通过，未提交测试付款。发布目录 `/home/<operator>/xgift-releases/release-20261002-query-recovery`，备份 `/var/backups/xgift/20261002T143845Z-query-recovery`。
 
-2026-10-03 12:11（UTC+8）已部署管理页统计面板、轮询超时继续查询、首次配置向导与通用代理 outbound。新增 `GET /api/admin/stats`（各状态计数、兑换率/成功率、套餐分布、30 天活动序列、待审核阶段分布，只读事务，空表返回全零），后台首页新增可折叠统计板块（汇总卡片与纯 SVG 图表，无新增前端依赖，明暗主题与无障碍文本齐备）；后台分页显示总条数与总页数；兑换页 5 分钟轮询超时后可通过「继续查询」恢复，只查询不重复兑换。新增 `xgift setup` 交互式首次配置向导：引导写入 X 凭据、支付卡（Luhn 与有效期校验）、代理（direct / AnyTLS 引导 / 粘贴 sing-box JSON 并实际启动验证）与 Stripe 公钥，自动生成持久路径的 0600 保管库密码，可选生成 site.env 与随机后台密码；中途失败打印明确修复指引。`put` 新增 `api-auth` / `stripe-key` 修复入口，`status` 同步校验全部五条记录。代理由 anytls 单一注册改为 sing-box include 全量注册，支持任意核心 outbound 及 route/dns 段，并忽略 `services` / `endpoints` / `experimental` 段以保持仅本机监听；已验证 direct 配置可经本机 mixed 入口出网，粘贴含 clash_api 等配置不会开放外部监听。发布目录 `/home/operator/xgift-releases/release-20261003-setup-wizard`，备份 `/var/backups/xgift/20261003T041119Z-setup-wizard`。部署前以新二进制对线上保管库只读 `status` 预检五条记录全部通过；部署后二进制哈希、内外网健康、后台认证、统计接口（90 枚：可使用 60、已完成 29、待核实 1）、gzip 与 CSP nonce 核验通过，充值保持开启。未生成生产兑换码或提交付款。
+2026-10-03 12:11（UTC+8）已部署管理页统计面板、轮询超时继续查询、首次配置向导与通用代理 outbound。新增 `GET /api/admin/stats`（各状态计数、兑换率/成功率、套餐分布、30 天活动序列、待审核阶段分布，只读事务，空表返回全零），后台首页新增可折叠统计板块（汇总卡片与纯 SVG 图表，无新增前端依赖，明暗主题与无障碍文本齐备）；后台分页显示总条数与总页数；兑换页 5 分钟轮询超时后可通过「继续查询」恢复，只查询不重复兑换。新增 `xgift setup` 交互式首次配置向导：引导写入 X 凭据、支付卡（Luhn 与有效期校验）、代理（direct / AnyTLS 引导 / 粘贴 sing-box JSON 并实际启动验证）与 Stripe 公钥，自动生成持久路径的 0600 保管库密码，可选生成 site.env 与随机后台密码；中途失败打印明确修复指引。`put` 新增 `api-auth` / `stripe-key` 修复入口，`status` 同步校验全部五条记录。代理由 anytls 单一注册改为 sing-box include 全量注册，支持任意核心 outbound 及 route/dns 段，并忽略 `services` / `endpoints` / `experimental` 段以保持仅本机监听；已验证 direct 配置可经本机 mixed 入口出网，粘贴含 clash_api 等配置不会开放外部监听。发布目录 `/home/<operator>/xgift-releases/release-20261003-setup-wizard`，备份 `/var/backups/xgift/20261003T041119Z-setup-wizard`。部署前以新二进制对线上保管库只读 `status` 预检五条记录全部通过；部署后二进制哈希、内外网健康、后台认证、统计接口（90 枚：可使用 60、已完成 29、待核实 1）、gzip 与 CSP nonce 核验通过，充值保持开启。未生成生产兑换码或提交付款。

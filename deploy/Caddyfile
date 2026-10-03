@@ -1,3 +1,5 @@
+# Template: copy to your real vhost name (e.g. /etc/caddy/conf.d/<your-domain>.caddy)
+# and replace xp.example.com with your site domain throughout.
 # Official source lists checked on 2026-10-02:
 # https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6
 # Match the immediate TCP peer; forwarded headers never grant access.

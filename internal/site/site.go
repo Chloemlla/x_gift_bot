@@ -217,6 +217,7 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("GET /admin", s.admin(s.asset("admin.html", "text/html; charset=utf-8")))
 	mux.HandleFunc("GET /admin.js", s.admin(s.asset("admin.js", "application/javascript; charset=utf-8")))
 	mux.HandleFunc("GET /api/admin/codes", s.admin(s.list))
+	mux.HandleFunc("GET /api/admin/stats", s.admin(s.stats))
 	mux.HandleFunc("POST /api/admin/codes", s.admin(s.generate))
 	mux.HandleFunc("POST /api/admin/revoke", s.admin(s.revoke))
 	mux.HandleFunc("POST /api/admin/folders", s.admin(s.createFolder))

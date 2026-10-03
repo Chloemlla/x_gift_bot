@@ -38,6 +38,7 @@ import { AppearanceMenu } from "./AppearanceMenu";
 import { CopyableCodes } from "./CopyableCodes";
 import { adminApi as api, type AdminStats, type Folder } from "./adminApi";
 import { FolderPanel } from "./FolderPanel";
+import { StatsPanel } from "./StatsPanel";
 
 type Code = {
   copyable: boolean;
@@ -99,6 +100,7 @@ function Admin() {
   const [batchError, setBatchError] = useState(false);
   const [countError, setCountError] = useState(false);
   const [focusTarget, setFocusTarget] = useState<"form" | "list" | null>(null);
+  const [statsSignal, setStatsSignal] = useState(0);
   const listSequence = useRef(0);
   const mutation = useRef(false);
   const form = useRef<HTMLFormElement>(null);
@@ -117,6 +119,8 @@ function Admin() {
           setListing(data);
           filterRef.current = data.folder;
           setSelectedIDs([]);
+          // The panel fetches on mount; only nudge it for later refreshes.
+          if (sequence > 1) setStatsSignal((value) => value + 1);
         }
       } catch (error) {
         if (sequence === listSequence.current)
@@ -298,6 +302,7 @@ function Admin() {
           <AppearanceMenu />
         </Stack>
       </Stack>
+      <StatsPanel refreshSignal={statsSignal} />
       <FolderPanel
         folders={listing?.folders ?? []}
         stats={listing?.stats}
@@ -749,7 +754,9 @@ function Admin() {
           sx={{ p: 2, borderTop: 1, borderColor: "divider" }}
         >
           <Typography variant="body2" color="text.secondary">
-            第 {(listing?.page ?? 0) + 1} 页
+            {listing?.folder
+              ? `第 ${listing.page + 1} 页`
+              : `共 ${listing?.stats.total ?? 0} 条 · 第 ${(listing?.page ?? 0) + 1} / ${Math.max(1, Math.ceil((listing?.stats.total ?? 0) / 100))} 页`}
           </Typography>
           <Stack direction="row" spacing={1}>
             <Button

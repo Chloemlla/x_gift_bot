@@ -14,3 +14,13 @@ export type AdminStats = {
   revoked: number;
   unfiled: number;
 };
+export type AdminStatsDetail = {
+  codes: AdminStats & { redeemed: number };
+  rates: { redeemed: number; success: number };
+  months: { months: number; total: number; succeeded: number }[];
+  daily: { date: string; created: number; redeemed: number; succeeded: number }[];
+  review_stages: { progress: number; count: number }[];
+};
+export function stats() {
+  return adminApi<AdminStatsDetail>("/api/admin/stats");
+}

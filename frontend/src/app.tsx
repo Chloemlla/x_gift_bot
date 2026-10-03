@@ -54,6 +54,7 @@ function App() {
   >("info");
   const [progress, setProgress] = useState<number | null>(null);
   const [locked, setLocked] = useState(false);
+  const [exhausted, setExhausted] = useState(false);
   const [validation, setValidation] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const controller = useRef<AbortController | null>(null);
@@ -164,6 +165,7 @@ function App() {
               "等待时间较长，不代表付款失败。请保留兑换码，稍后查询进度，勿重复兑换。",
           });
           setSeverity("warning");
+          setExhausted(true);
         }
         finish();
       }
@@ -195,6 +197,7 @@ function App() {
     attempt.current = 0;
     inFlight.current = true;
     setBusy(true);
+    setExhausted(false);
     setSeverity("info");
     setProgress(5);
     scroll();
@@ -227,6 +230,7 @@ function App() {
     else setUsername(value);
     setResult(null);
     setProgress(null);
+    setExhausted(false);
     // A lost response stays query-only until the server returns a known state.
   }
 
@@ -430,6 +434,26 @@ function App() {
             >
               {result.message}
             </Alert>
+          )}
+          {exhausted && result && !busy && (
+            <Button
+              variant="outlined"
+              fullWidth
+              startIcon={<HistoryRounded />}
+              sx={{ mt: 2 }}
+              onClick={() => {
+                // Resume status polling only; never re-submits the redemption.
+                if (valid() && start()) {
+                  setResult({
+                    status: result.status,
+                    message: "正在继续查询原订单，不会再次扣款…",
+                  });
+                  void query();
+                }
+              }}
+            >
+              继续查询
+            </Button>
           )}
           {result?.status === "succeeded" && (
             <Button

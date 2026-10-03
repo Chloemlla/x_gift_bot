@@ -114,6 +114,47 @@ createServer(async (req, res) => {
       return;
     }
     if (req.method !== "POST") {
+      if (req.method === "GET" && url.pathname === "/api/admin/stats") {
+        const daily = [];
+        for (let offset = 29; offset >= 0; offset--) {
+          const day = new Date();
+          day.setDate(day.getDate() - offset);
+          const date = [
+            day.getFullYear(),
+            String(day.getMonth() + 1).padStart(2, "0"),
+            String(day.getDate()).padStart(2, "0"),
+          ].join("-");
+          // Deterministic synthetic series with some zero days.
+          const created = offset % 4 === 0 ? 0 : ((offset * 7) % 9) + 1;
+          const redeemed = Math.max(0, created - (offset % 3));
+          const succeeded = Math.max(0, redeemed - (offset % 2));
+          daily.push({ date, created, redeemed, succeeded });
+        }
+        json(200, {
+          codes: {
+            total: 240,
+            active: 62,
+            processing: 8,
+            review: 3,
+            succeeded: 150,
+            revoked: 17,
+            redeemed: 161,
+            unfiled: 12,
+          },
+          rates: { redeemed: 161 / 240, success: 150 / 161 },
+          months: [
+            { months: 3, total: 90, succeeded: 52 },
+            { months: 6, total: 150, succeeded: 98 },
+          ],
+          daily,
+          review_stages: [
+            { progress: 20, count: 1 },
+            { progress: 50, count: 1 },
+            { progress: 90, count: 1 },
+          ],
+        });
+        return;
+      }
       json(404, { message: "预览路由不存在" });
       return;
     }

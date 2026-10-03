@@ -98,7 +98,7 @@ export function FolderPanel({
         {[
           { id: "", name: "全部兑换码", count: stats?.total ?? 0 },
           ...(stats?.unfiled
-            ? [{ id: "unfiled", name: "未命名批次", count: stats.unfiled }]
+            ? [{ id: "unfiled", name: "未分类", count: stats.unfiled }]
             : []),
           ...folders,
         ].map((folder) => (

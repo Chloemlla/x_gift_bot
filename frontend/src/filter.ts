@@ -20,6 +20,12 @@ type Token =
   | { kind: "string"; text: string };
 
 function tokenize(src: string): Token[] {
+  // 中文输入法容错：全角括号、冒号、引号统一归一为半角。
+  src = src
+    .replace(/（/g, "(")
+    .replace(/）/g, ")")
+    .replace(/：/g, ":")
+    .replace(/[＂“”]/g, '"');
   const tokens: Token[] = [];
   let index = 0;
   while (index < src.length) {
@@ -68,8 +74,17 @@ type Node =
   | { type: "folder"; value: string }
   | { type: "status"; value: string };
 
-export function parseFilter(src: string): (code: CodeRow) => boolean {
+// 调色板模式使用的扁平词元，按表达式中的出现顺序记录。
+export type ExpressionToken =
+  | { kind: "condition"; field: "folder" | "status"; value: string }
+  | { kind: "and" }
+  | { kind: "or" }
+  | { kind: "lparen" }
+  | { kind: "rparen" };
+
+function parse(src: string): { root: Node; flat: ExpressionToken[] } {
   const tokens = tokenize(src);
+  const flat: ExpressionToken[] = [];
   let position = 0;
   const peek = () => tokens[position];
   const next = () => tokens[position++];
@@ -81,6 +96,7 @@ export function parseFilter(src: string): (code: CodeRow) => boolean {
     let left = parseAnd();
     while (peek()?.kind === "or") {
       next();
+      flat.push({ kind: "or" });
       left = { type: "or", left, right: parseAnd() };
     }
     return left;
@@ -89,6 +105,7 @@ export function parseFilter(src: string): (code: CodeRow) => boolean {
     let left = parseFactor();
     while (peek()?.kind === "and") {
       next();
+      flat.push({ kind: "and" });
       left = { type: "and", left, right: parseFactor() };
     }
     return left;
@@ -104,9 +121,11 @@ export function parseFilter(src: string): (code: CodeRow) => boolean {
       throw new Error("括号不匹配：右括号前缺少条件。");
     if (token.kind === "lparen") {
       next();
+      flat.push({ kind: "lparen" });
       const inner = parseExpr();
       if (peek()?.kind !== "rparen") throw new Error("括号不匹配：缺少右括号。");
       next();
+      flat.push({ kind: "rparen" });
       return inner;
     }
     return parseCondition();
@@ -131,10 +150,12 @@ export function parseFilter(src: string): (code: CodeRow) => boolean {
         throw new Error(
           `不支持的状态值「${value.text}」，可用：${STATUSES.join("、")}。`,
         );
+      flat.push({ kind: "condition", field: "status", value: status });
       return { type: "status", value: status };
     }
     if (!value.text)
-      throw new Error("「folder:」后缺少批次名；未分类请使用 folder:- 。");
+      throw new Error("「folder:」后缺少批次名；未分类请使用 folder:-。");
+    flat.push({ kind: "condition", field: "folder", value: value.text });
     return { type: "folder", value: value.text };
   }
 
@@ -142,13 +163,27 @@ export function parseFilter(src: string): (code: CodeRow) => boolean {
   if (position < tokens.length) {
     const rest = tokens[position];
     if (rest.kind === "rparen") throw new Error("括号不匹配：多余的右括号。");
-    if (rest.kind === "word" || rest.kind === "string")
-      throw new Error(
-        `「${rest.text}」前缺少逻辑运算符（and / or）。`,
-      );
+    if (rest.kind === "lparen")
+      throw new Error("「（」前缺少逻辑运算符（and / or）。");
+    if (rest.kind === "word" || rest.kind === "string") {
+      // 尽量引用完整条件（field:value）而不仅是字段名。
+      let text = rest.text;
+      const colon = tokens[position + 1];
+      const val = tokens[position + 2];
+      if (
+        colon?.kind === "colon" &&
+        (val?.kind === "word" || val?.kind === "string")
+      )
+        text += `:${val.text}`;
+      throw new Error(`「${text}」前缺少逻辑运算符（and / or）。`);
+    }
     throw new Error("表达式意外的结尾：存在无法解析的内容。");
   }
+  return { root, flat };
+}
 
+export function parseFilter(src: string): (code: CodeRow) => boolean {
+  const { root } = parse(src);
   function evaluate(node: Node, code: CodeRow): boolean {
     switch (node.type) {
       case "or":
@@ -164,6 +199,11 @@ export function parseFilter(src: string): (code: CodeRow) => boolean {
     }
   }
   return (code: CodeRow) => evaluate(root, code);
+}
+
+// 将文本表达式解析为调色板词元；语法错误时抛出与 parseFilter 相同的错误。
+export function parseExpressionTokens(src: string): ExpressionToken[] {
+  return parse(src).flat;
 }
 
 export const FILTER_HINT =

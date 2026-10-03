@@ -102,6 +102,10 @@ function Admin() {
   } | null>(null);
   const [allCodes, setAllCodes] = useState<Code[] | null>(null);
   const [filterPage, setFilterPage] = useState(0);
+  // 每次成功应用筛选递增，驱动 FilterBar 的屏幕阅读器播报。
+  const [applySeq, setApplySeq] = useState(0);
+  // 从批次文件夹退出筛选时给 FilterBar 的定制播报文案。
+  const [clearNotice, setClearNotice] = useState({ seq: 0, text: "" });
   const [generated, setGenerated] = useState<Generated | null>(null);
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(
     null,
@@ -172,6 +176,7 @@ function Admin() {
       }
       setAllCodes(codes);
       setActiveFilter({ source, match });
+      setApplySeq((value) => value + 1);
       setFilterPage(0);
       setSelectedIDs([]);
     } catch (error) {
@@ -384,7 +389,21 @@ function Admin() {
         onSelect={(folder) => {
           // Clicking a folder chip while the expression filter is active
           // exits filter mode and returns to normal folder filtering.
-          if (activeFilter) clearFilter(false);
+          if (activeFilter) {
+            clearFilter(false);
+            // 定制播报：此时列表展示的是该批次而非完整列表。
+            const name =
+              folder === "unfiled"
+                ? "未分类"
+                : folder
+                  ? (listing?.folders.find((f) => f.id === folder)?.name ?? "")
+                  : "";
+            if (name)
+              setClearNotice((notice) => ({
+                seq: notice.seq + 1,
+                text: `筛选已清除，已显示批次：${name}`,
+              }));
+          }
           void refresh(0, folder);
         }}
         onBusyChange={(value) => {
@@ -420,6 +439,10 @@ function Admin() {
         error={filterError}
         disabled={busy || loading}
         folders={listing?.folders ?? []}
+        appliedSource={activeFilter?.source ?? ""}
+        resultCount={activeFilter ? filterTotal : undefined}
+        applySeq={applySeq}
+        clearNotice={clearNotice}
       />
       <Paper variant="outlined" sx={{ p: { xs: 2.5, sm: 3 }, mb: 3 }}>
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
@@ -569,7 +592,7 @@ function Admin() {
               {matched
                 ? "表达式筛选结果"
                 : listing?.folder === "unfiled"
-                  ? "未命名批次"
+                  ? "未分类"
                   : (listing?.folders.find(
                       (folder) => folder.id === listing.folder,
                     )?.name ?? "全部兑换码")}
@@ -951,7 +974,7 @@ function Admin() {
             onChange={(event) => setMoveTarget(event.target.value)}
             sx={{ mt: 1 }}
           >
-            <MenuItem value="">未命名批次</MenuItem>
+            <MenuItem value="">未分类</MenuItem>
             {(listing?.folders ?? []).map((folder) => (
               <MenuItem
                 value={folder.id}

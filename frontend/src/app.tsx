@@ -6,6 +6,7 @@ import {
   Alert,
   Box,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -25,6 +26,7 @@ import {
 import ArrowForwardRounded from "@mui/icons-material/ArrowForwardRounded";
 import ArrowOutwardRounded from "@mui/icons-material/ArrowOutwardRounded";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
+import FactCheckRounded from "@mui/icons-material/FactCheckRounded";
 import ShieldOutlined from "@mui/icons-material/ShieldOutlined";
 import HistoryRounded from "@mui/icons-material/HistoryRounded";
 import { mount, request, Shell } from "./shared";
@@ -56,6 +58,11 @@ function App() {
   const [locked, setLocked] = useState(false);
   const [exhausted, setExhausted] = useState(false);
   const [validation, setValidation] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<{
+    severity: "success" | "warning" | "info";
+    message: string;
+  } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const controller = useRef<AbortController | null>(null);
   const inFlight = useRef(false);
@@ -227,11 +234,45 @@ function App() {
   }
   function edit(field: "code" | "username", value: string) {
     if (field === "code") setCode(value);
-    else setUsername(value);
+    else {
+      setUsername(value);
+      setCheckResult(null);
+    }
     setResult(null);
     setProgress(null);
     setExhausted(false);
     // A lost response stays query-only until the server returns a known state.
+  }
+  // Advisory only: the result never blocks or alters the redemption flow.
+  async function runCheck() {
+    if (checking || busy || !userValid) return;
+    setChecking(true);
+    setCheckResult(null);
+    try {
+      const { ok, data } = await request<{
+        eligible?: boolean;
+        message?: string;
+      }>("/api/check", { username: cleanUser }, AbortSignal.timeout(45000));
+      if (ok && typeof data.eligible === "boolean") {
+        setCheckResult(
+          data.eligible
+            ? { severity: "success", message: "该账号当前可以接收赠送。" }
+            : {
+                severity: "warning",
+                message: `该账号当前无法接收赠送：${data.message || "原因未知。"}`,
+              },
+        );
+      } else {
+        setCheckResult({
+          severity: "info",
+          message: data.message || "暂时无法检测，请稍后再试。",
+        });
+      }
+    } catch {
+      setCheckResult({ severity: "info", message: "暂时无法检测，请稍后再试。" });
+    } finally {
+      setChecking(false);
+    }
   }
 
   return (
@@ -323,6 +364,33 @@ function App() {
                 },
               }}
             />
+            <Box>
+              <Button
+                variant="text"
+                size="small"
+                disabled={!userValid || busy || checking}
+                onClick={() => void runCheck()}
+                startIcon={
+                  checking ? (
+                    <CircularProgress size={16} aria-hidden="true" />
+                  ) : (
+                    <FactCheckRounded />
+                  )
+                }
+              >
+                {checking ? "正在检测…" : "检测可否接收赠送"}
+              </Button>
+              {checkResult && (
+                <Alert
+                  severity={checkResult.severity}
+                  role="status"
+                  aria-live="polite"
+                  sx={{ mt: 1 }}
+                >
+                  {checkResult.message}
+                </Alert>
+              )}
+            </Box>
             <Button
               type="submit"
               variant="contained"
@@ -488,7 +556,7 @@ function App() {
           ],
           [
             "账号暂时无法接收赠送怎么办？",
-            "X 会根据账号情况决定是否允许接收 Premium 赠送。首次建单前资格未通过，兑换码不会使用；已有待核实订单时，请使用原兑换码和账号重新检查，符合条件且尚未付款时会继续兑换。",
+            "X 会根据账号情况决定是否允许接收 Premium 赠送。兑换前可先点击用户名旁的「检测可否接收赠送」确认当前资格。首次建单前资格未通过，兑换码不会使用；已有待核实订单时，请使用原兑换码和账号重新检查，符合条件且尚未付款时会继续兑换。",
           ],
           [
             "等待较久或关闭页面后，如何查询？",

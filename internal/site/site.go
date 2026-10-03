@@ -214,6 +214,7 @@ func Run(ctx context.Context) error {
 	})
 	mux.HandleFunc("POST /api/redeem", s.redeem)
 	mux.HandleFunc("POST /api/status", s.status)
+	mux.HandleFunc("POST /api/check", s.check)
 	mux.HandleFunc("GET /admin", s.admin(s.asset("admin.html", "text/html; charset=utf-8")))
 	mux.HandleFunc("GET /admin.js", s.admin(s.asset("admin.js", "application/javascript; charset=utf-8")))
 	mux.HandleFunc("GET /api/admin/codes", s.admin(s.list))
@@ -399,6 +400,9 @@ func (s *server) middleware(next http.Handler) http.Handler {
 			if r.URL.Path == "/api/redeem" {
 				max = 8
 				bucket = "redeem:"
+			} else if r.URL.Path == "/api/check" {
+				max = 8
+				bucket = "check:"
 			}
 			if !s.allow(bucket+ip, max) {
 				w.Header().Set("Retry-After", "60")
@@ -456,6 +460,47 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 		s.reconcileStatus(r.Context(), &c)
 	}
 	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message, "progress": c.Progress, "rechecking": s.autoChecking(&c)})
+}
+// eligibilityCheck is the read-only X pre-check; tests substitute a fake.
+var eligibilityCheck = checkout.Eligibility
+
+// check is a read-only eligibility probe: no code lookup, no checkout, no writes.
+// It stays available while payments are paused and shares the single X worker
+// slot with redemptions, but never queues behind one.
+func (s *server) check(w http.ResponseWriter, r *http.Request) {
+	var q struct {
+		Username string `json:"username"`
+	}
+	if !decode(w, r, &q) {
+		return
+	}
+	q.Username = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(q.Username), "@"))
+	if !usernamePattern.MatchString(q.Username) {
+		message(w, 400, "请填写正确的 X 用户名（不是显示名称）。")
+		return
+	}
+	select {
+	case s.work <- struct{}{}:
+		defer func() { <-s.work }()
+	default:
+		message(w, 503, "正在处理其他请求，请稍后重试检测。")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+	defer cancel()
+	_, e := eligibilityCheck(ctx, s.vault, q.Username, s.port)
+	if e != nil {
+		switch {
+		case errors.Is(e, checkout.ErrNotEligible):
+			reply(w, 200, map[string]any{"eligible": false, "message": "X 当前不允许向这个账号赠送 Premium。"})
+		case errors.Is(e, checkout.ErrUserNotFound):
+			reply(w, 200, map[string]any{"eligible": false, "message": "未能找到这个 X 账号，请检查用户名。"})
+		default:
+			message(w, 503, "暂时无法向 X 核实赠送资格，请稍后重试检测。")
+		}
+		return
+	}
+	reply(w, 200, map[string]any{"eligible": true, "message": "该账号当前可以接收赠送。"})
 }
 func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	code, user, ok := readInput(w, r)

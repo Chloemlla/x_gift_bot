@@ -322,6 +322,25 @@ createServer(async (req, res) => {
       json(200, { message: "兑换码已停用。" });
       return;
     }
+    if (url.pathname === "/api/check") {
+      if (!/^[a-z0-9_]{1,15}$/.test(body.username || "")) {
+        json(400, { message: "请填写正确的 X 用户名（不是显示名称）。" });
+        return;
+      }
+      if (body.username === "blocked_user") {
+        json(200, {
+          eligible: false,
+          message: "示例：X 当前不允许向这个账号赠送 Premium。",
+        });
+        return;
+      }
+      if (body.username === "busy_user") {
+        json(503, { message: "暂时无法向 X 核实赠送资格，请稍后重试检测。" });
+        return;
+      }
+      json(200, { eligible: true, message: "该账号当前可以接收赠送。" });
+      return;
+    }
     if (url.pathname === "/api/redeem" || url.pathname === "/api/status") {
       if (
         !/^XG-[A-F0-9]{48}$/.test(body.code) ||

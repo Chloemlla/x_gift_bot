@@ -71,7 +71,7 @@ func run() error {
 	pay := f.Bool("pay", false, "pay only at the exact allowed BDT total")
 	name := f.String("name", "", "secret name for put")
 	f.Usage = func() {
-		fmt.Fprintln(f.Output(), "Usage: xgift <init|status|billing|import-chrome|put|proxy|check|username> [flags]\ninit reads a JSON object from stdin; put reads one JSON value from stdin.")
+		fmt.Fprintln(f.Output(), "Usage: xgift <setup|init|status|billing|import-chrome|put|proxy|check|username> [flags]\nsetup is the interactive first-time wizard; init reads a JSON object from stdin; put reads one JSON value from stdin.")
 		f.PrintDefaults()
 	}
 	if err := f.Parse(rest); err != nil {
@@ -86,6 +86,9 @@ func run() error {
 	}
 	if *port != 0 && (*port < 1024 || *port > 65535) {
 		return errors.New("port must be 1024..65535")
+	}
+	if command == "setup" {
+		return runSetup(context.Background(), *db, *key)
 	}
 	if command == "init" {
 		input, err := io.ReadAll(io.LimitReader(os.Stdin, 1024*1024))
@@ -178,7 +181,7 @@ func run() error {
 		for _, n := range []string{"cookies", "card", "proxy"} {
 			b, e := v.Get(n)
 			if e != nil {
-				return e
+				return fmt.Errorf("record %s is missing; run setup or put --name %s", n, n)
 			}
 			if !json.Valid(b) {
 				return fmt.Errorf("invalid %s JSON", n)
@@ -186,6 +189,27 @@ func run() error {
 			clear(b)
 			fmt.Printf("%s: encrypted record verified\n", n)
 		}
+		raw, e := v.Get("api-auth")
+		if e != nil {
+			return errors.New("record api-auth is missing; run setup")
+		}
+		var auth struct{ Authorization string }
+		if e = json.Unmarshal(raw, &auth); e != nil || !strings.HasPrefix(auth.Authorization, "Bearer ") {
+			clear(raw)
+			return errors.New("invalid api-auth record; run setup to rewrite it")
+		}
+		clear(raw)
+		fmt.Println("api-auth: encrypted record verified")
+		key, e := v.Get("stripe-key")
+		if e != nil {
+			return errors.New("record stripe-key is missing; run setup")
+		}
+		if !stripeKeyPattern.Match(key) {
+			clear(key)
+			return errors.New("invalid stripe-key record; run setup to rewrite it")
+		}
+		clear(key)
+		fmt.Println("stripe-key: encrypted record verified")
 		return nil
 	case "import-chrome":
 		b, e := chrome.Extract(*profile)
@@ -251,7 +275,7 @@ func run() error {
 		return err
 	}
 	defer instance.Close()
-	fmt.Fprintf(os.Stderr, "Embedded sing-box AnyTLS listening on 127.0.0.1:%d\n", *port)
+	fmt.Fprintf(os.Stderr, "Embedded sing-box proxy listening on 127.0.0.1:%d\n", *port)
 	if command == "proxy" {
 		<-ctx.Done()
 		return nil

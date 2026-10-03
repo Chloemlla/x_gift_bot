@@ -78,6 +78,12 @@ func ProbePaymentOutbounds(ctx context.Context, v *vault.Vault, report func(Paym
 				result.EgressIP = ip
 			}
 		}()
+		// Public egress observations group nodes that share the same exit IP.
+		if result.EgressIP != "" {
+			if err = v.Put("payment-egress:"+outboundID(node), []byte(result.EgressIP)); err != nil {
+				return err
+			}
+		}
 		report(result)
 	}
 	return nil

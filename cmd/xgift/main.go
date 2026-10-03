@@ -171,7 +171,7 @@ func run() error {
 			return errors.New("another checkout is running")
 		}
 		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-		if e = checkout.ResetPaymentPause(v); e != nil {
+		if e = checkout.ResetManualPaymentPause(v); e != nil {
 			return e
 		}
 		fmt.Println("Automatic payment pause cleared; payment spacing remains enforced.")

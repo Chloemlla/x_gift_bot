@@ -113,7 +113,13 @@ func (s *server) recoveryStatus(w http.ResponseWriter, r *http.Request) {
 		message(w, 503, "付款节点池配置无效，请检查配置。")
 		return
 	}
-	reply(w, 200, map[string]any{"batch": recoveryView(q), "network": network})
+	// Queue counts describe current orders, independently of the saved last task.
+	var review, processing int
+	if err = s.db.QueryRow("SELECT COUNT(CASE WHEN status='review' THEN 1 END),COUNT(CASE WHEN status='processing' THEN 1 END) FROM codes").Scan(&review, &processing); err != nil {
+		message(w, 503, "无法读取当前订单状态。")
+		return
+	}
+	reply(w, 200, map[string]any{"batch": recoveryView(q), "network": network, "summary": map[string]int{"review": review, "processing": processing}})
 }
 func (s *server) recoveryCandidate(id string) (recoveryItem, error) {
 	item := recoveryItem{ID: id, State: "skipped"}

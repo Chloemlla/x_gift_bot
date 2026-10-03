@@ -80,7 +80,7 @@ func TestDeclinePersistsDetailsAndStopsPolling(t *testing.T) {
 	}
 }
 
-func TestPaymentCircuitIsDurableAndDeduplicatesOutcomes(t *testing.T) {
+func TestOrdinaryDeclinesDoNotPauseGloballyAndExplicitPauseIsDurable(t *testing.T) {
 	v := controlFixture(t)
 	r := &Record{SessionID: "cs_live_First", Status: "declined", LastError: &stripeError{HTTP: 402, Type: "card_error", Code: "card_declined"}}
 	if err := savePaymentControl(v, paymentControl{LastSession: r.SessionID, LastSubmittedAt: time.Now().UnixNano()}); err != nil {
@@ -105,8 +105,14 @@ func TestPaymentCircuitIsDurableAndDeduplicatesOutcomes(t *testing.T) {
 	if err = paymentOutcome(v, r); err != nil {
 		t.Fatal(err)
 	}
-	if paused, err := PaymentPaused(v); err != nil || !paused {
-		t.Fatalf("circuit did not pause: %v %v", paused, err)
+	state, err = readPaymentControl(v)
+	if err != nil || state.Paused || state.ConsecutiveDeclines != 2 {
+		t.Fatalf("ordinary declines should be recorded without global pause: %+v %v", state, err)
+	}
+	state.Paused = true
+	state.Reason = "operator_pause"
+	if err = savePaymentControl(v, state); err != nil {
+		t.Fatal(err)
 	}
 	if err = reservePaymentSlot(context.Background(), v, &Record{SessionID: "cs_live_Third"}); !errors.Is(err, ErrPaymentPaused) {
 		t.Fatalf("paused payment admitted: %v", err)

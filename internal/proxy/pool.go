@@ -34,11 +34,20 @@ func ParseOutboundPool(raw []byte) ([]stdjson.RawMessage, error) {
 			Type, Tag, Server, Detour string
 			Port                      uint16 `json:"server_port"`
 		}
-		if stdjson.Unmarshal(node, &meta) != nil || meta.Tag == "" || len(meta.Tag) > 256 || seen[meta.Tag] || meta.Server == "" || meta.Port == 0 || meta.Detour != "" {
+		if stdjson.Unmarshal(node, &meta) != nil || meta.Tag == "" || len(meta.Tag) > 256 || seen[meta.Tag] || meta.Detour != "" {
 			return nil, fmt.Errorf("outbound %d requires a unique tag, server and server_port, with no detour", i+1)
 		}
+		if meta.Type == "direct" {
+			var fields map[string]stdjson.RawMessage
+			stdjson.Unmarshal(node, &fields)
+			if len(fields) != 2 {
+				return nil, fmt.Errorf("direct outbound %d accepts only type and tag", i+1)
+			}
+		} else if meta.Server == "" || meta.Port == 0 {
+			return nil, fmt.Errorf("outbound %d requires server and server_port", i+1)
+		}
 		switch meta.Type {
-		case "http", "socks", "shadowsocks", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic", "anytls":
+		case "direct", "http", "socks", "shadowsocks", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic", "anytls":
 		default:
 			return nil, fmt.Errorf("outbound %d is not a supported independent proxy node", i+1)
 		}
@@ -53,6 +62,14 @@ func ParseOutboundPool(raw []byte) ([]stdjson.RawMessage, error) {
 // OpenOutbound starts a private loopback proxy with exactly one possible exit.
 // No fallback or failover is configured. close must be called after client use.
 func OpenOutbound(ctx context.Context, node stdjson.RawMessage) (*http.Client, func(), error) {
+	var meta struct{ Type string }
+	if stdjson.Unmarshal(node, &meta) != nil {
+		return nil, nil, errors.New("invalid outbound")
+	}
+	if meta.Type == "direct" {
+		client := &http.Client{Transport: &http.Transport{Proxy: nil, TLSHandshakeTimeout: 15 * time.Second}, Timeout: 35 * time.Second}
+		return client, func() { client.CloseIdleConnections() }, nil
+	}
 	raw, err := stdjson.Marshal(map[string]any{"outbounds": []stdjson.RawMessage{node}})
 	if err != nil {
 		return nil, nil, errors.New("cannot encode payment outbound")

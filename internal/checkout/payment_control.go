@@ -138,12 +138,11 @@ func paymentOutcome(v *vault.Vault, r *Record) error {
 	} else if IsPaymentDeclined(r) {
 		state.ConsecutiveDeclines++
 		state.Outcome = "declined"
-		if state.ConsecutiveDeclines >= 2 || r.LastError != nil && r.LastError.AdviceCode == "do_not_try_again" {
+		// Ordinary card declines stay local to the failed order. Only an explicit
+		// provider instruction pauses this card globally.
+		if r.LastError != nil && r.LastError.AdviceCode == "do_not_try_again" {
 			state.Paused = true
-			state.Reason = "consecutive_card_declines"
-			if r.LastError != nil && r.LastError.AdviceCode == "do_not_try_again" {
-				state.Reason = "do_not_try_again"
-			}
+			state.Reason = "do_not_try_again"
 		}
 	} else {
 		return nil

@@ -25,8 +25,10 @@ type paymentRoute struct {
 }
 
 type PaymentNetwork struct {
-	Mode  string `json:"mode"`
-	Nodes int    `json:"nodes"`
+	Mode      string `json:"mode"`
+	Nodes     int    `json:"nodes"`
+	Available int    `json:"available"`
+	Cooling   int    `json:"cooling"`
 }
 
 func PaymentNetworkStatus(v *vault.Vault) (PaymentNetwork, error) {
@@ -46,7 +48,11 @@ func PaymentNetworkStatus(v *vault.Vault) (PaymentNetwork, error) {
 	if len(nodes) > 0 {
 		mode = "pool"
 	}
-	return PaymentNetwork{Mode: mode, Nodes: len(nodes)}, nil
+	available, err := availablePaymentNodes(v, nodes)
+	if err != nil {
+		return PaymentNetwork{}, err
+	}
+	return PaymentNetwork{Mode: mode, Nodes: len(nodes), Available: len(available), Cooling: len(nodes) - len(available)}, nil
 }
 
 func outboundID(raw json.RawMessage) string {
@@ -84,11 +90,15 @@ func PaymentNodeLabel(v *vault.Vault, recipient string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if routeGroup(r.Outbound) == "direct" {
+		return "direct", nil
+	}
 	return "node-" + r.NodeID[:12], nil
 }
 
-// A customer's bound order retains one encrypted outbound snapshot across link
-// replacement, retries, restarts and pool edits. No payment outcome selects a node.
+// A customer's bound order retains its encrypted outbound snapshot across link
+// replacement, restarts and pool edits unless a transport failure cooled the node.
+// A card decline never selects another node.
 func selectPaymentRoute(v *vault.Vault, recipient string) (*paymentRoute, error) {
 	if !regexp.MustCompile(`^[0-9]{1,32}$`).MatchString(recipient) {
 		return nil, errors.New("payment route requires a bound recipient")
@@ -97,6 +107,13 @@ func selectPaymentRoute(v *vault.Vault, recipient string) (*paymentRoute, error)
 	defer paymentRouteMu.Unlock()
 	route, err := readPaymentRoute(v, recipient)
 	if err == nil {
+		until, e := nodeCoolingUntil(v, route.Outbound)
+		if e != nil {
+			return nil, e
+		}
+		if until > time.Now().Unix() {
+			return rotateCoolingRouteLocked(v, route)
+		}
 		return route, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -114,17 +131,44 @@ func selectPaymentRoute(v *vault.Vault, recipient string) (*paymentRoute, error)
 	if err != nil || len(nodes) == 0 {
 		return nil, err
 	}
+	node, err := chooseAvailablePaymentNode(v, nodes)
+	if err != nil {
+		return nil, err
+	}
+	route = &paymentRoute{Recipient: recipient, NodeID: outboundID(node), Outbound: node, SelectedAt: time.Now().Unix()}
+	b, err := json.Marshal(route)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(b)
+	inserted, err := v.PutIfAbsent("stripe-route:"+recipient, b)
+	if err != nil {
+		return nil, err
+	}
+	if !inserted {
+		return readPaymentRoute(v, recipient)
+	}
+	if err = v.Put("stripe-route:last-node", []byte(route.NodeID)); err != nil {
+		return nil, err
+	}
+	return route, nil
+}
+
+func chooseAvailablePaymentNode(v *vault.Vault, nodes []json.RawMessage) (json.RawMessage, error) {
+	nodes, err := availablePaymentNodes(v, nodes)
+	if err != nil {
+		return nil, err
+	}
+	if len(nodes) == 0 {
+		return nil, ErrPaymentNodesCooling
+	}
 	last, err := v.Get("stripe-route:last-node")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
 	defer clear(last)
 	choices := make([]json.RawMessage, 0, len(nodes))
-	serverOf := func(node json.RawMessage) string {
-		var m struct{ Server string }
-		json.Unmarshal(node, &m)
-		return m.Server
-	}
+	serverOf := routeGroup
 	lastServer := ""
 	for _, node := range nodes {
 		if outboundID(node) == string(last) {
@@ -151,22 +195,58 @@ func selectPaymentRoute(v *vault.Vault, recipient string) (*paymentRoute, error)
 	if err != nil {
 		return nil, errors.New("cannot choose payment node")
 	}
-	node := choices[index.Int64()]
-	route = &paymentRoute{Recipient: recipient, NodeID: outboundID(node), Outbound: node, SelectedAt: time.Now().Unix()}
-	b, err := json.Marshal(route)
+	return choices[index.Int64()], nil
+}
+
+// Only a durable transport-failure cooldown permits an automatic route change.
+func rotateCoolingRouteLocked(v *vault.Vault, old *paymentRoute) (*paymentRoute, error) {
+	until, err := nodeCoolingUntil(v, old.Outbound)
+	if err != nil {
+		return nil, err
+	}
+	if until <= time.Now().Unix() {
+		return nil, errors.New("payment node is not cooling; refusing automatic switch")
+	}
+	expected, err := v.Get("stripe-route:" + old.Recipient)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(expected)
+	var current paymentRoute
+	if json.Unmarshal(expected, &current) != nil || current.NodeID != old.NodeID {
+		return nil, errors.New("payment route changed during retry")
+	}
+	raw, err := v.Get("payment-outbounds")
+	if err != nil {
+		return nil, err
+	}
+	defer clear(raw)
+	nodes, err := proxy.ParseOutboundPool(raw)
+	if err != nil {
+		return nil, err
+	}
+	node, err := chooseAvailablePaymentNode(v, nodes)
+	if err != nil {
+		return nil, err
+	}
+	next := &paymentRoute{Recipient: old.Recipient, NodeID: outboundID(node), Outbound: node, SelectedAt: time.Now().Unix()}
+	b, err := json.Marshal(next)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(b)
-	inserted, err := v.PutIfAbsent("stripe-route:"+recipient, b)
-	if err != nil {
+	archive := "stripe-route-history:" + old.Recipient + ":" + time.Now().Format("20060102T150405.000000000")
+	if err = v.ReplaceArchived("stripe-route:"+old.Recipient, archive, expected, expected, b); err != nil {
 		return nil, err
 	}
-	if !inserted {
-		return readPaymentRoute(v, recipient)
-	}
-	if err = v.Put("stripe-route:last-node", []byte(route.NodeID)); err != nil {
+	if err = v.Put("stripe-route:last-node", []byte(next.NodeID)); err != nil {
 		return nil, err
 	}
-	return route, nil
+	return next, nil
+}
+
+func rotateCoolingRoute(v *vault.Vault, old *paymentRoute) (*paymentRoute, error) {
+	paymentRouteMu.Lock()
+	defer paymentRouteMu.Unlock()
+	return rotateCoolingRouteLocked(v, old)
 }

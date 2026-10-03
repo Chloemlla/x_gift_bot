@@ -24,6 +24,8 @@ type stripeClient struct {
 	key        string
 	vault      *vault.Vault
 	closeRoute func()
+	route      *paymentRoute
+	openRoute  func(context.Context, json.RawMessage) (*http.Client, func(), error)
 }
 type stripeError struct {
 	Code, Type                            string
@@ -75,22 +77,73 @@ func newStripe(ctx context.Context, v *vault.Vault, recipient string) (*stripeCl
 	closeRoute := func() { client.CloseIdleConnections() }
 	if route != nil {
 		client, closeRoute, e = proxy.OpenOutbound(ctx, route.Outbound)
-		clear(route.Outbound)
 		if e != nil {
+			clear(route.Outbound)
 			return nil, e
 		}
 	}
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("unexpected Stripe API redirect") }
-	return &stripeClient{http: client, key: string(key), vault: v, closeRoute: closeRoute}, nil
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errStripeRedirect }
+	return &stripeClient{http: client, key: string(key), vault: v, closeRoute: closeRoute, route: route, openRoute: proxy.OpenOutbound}, nil
 }
 func (s *stripeClient) close() {
 	if s.closeRoute != nil {
-		s.closeRoute()
+		close := s.closeRoute
+		s.closeRoute = nil
+		close()
 	} else {
 		s.http.CloseIdleConnections()
 	}
+	if s.route != nil {
+		clear(s.route.Outbound)
+		s.route = nil
+	}
+}
+
+type stripeTransportFailure struct{}
+
+var errStripeRedirect = errors.New("unexpected Stripe API redirect")
+
+func (*stripeTransportFailure) Error() string {
+	return "Stripe transport failed; request outcome may be unknown"
+}
+
+func safeStripeNetworkRetry(method, path string) bool {
+	if method == http.MethodGet {
+		return true
+	}
+	parts := strings.Split(path, "/")
+	return method == http.MethodPost && len(parts) == 3 && parts[0] == "payment_pages" && sessionPattern.MatchString(parts[1]) && parts[2] == "init"
 }
 func (s *stripeClient) call(ctx context.Context, method, path string, form url.Values, idempotency string, out any) error {
+	for attempt := 0; attempt < 3; attempt++ {
+		err := s.callOnce(ctx, method, path, form, idempotency, out)
+		var failure *stripeTransportFailure
+		if !errors.As(err, &failure) || s.route == nil || ctx.Err() != nil {
+			return err
+		}
+		if e := coolPaymentNode(s.vault, s.route.Outbound); e != nil {
+			return errors.New("network failure; could not persist payment node cooldown")
+		}
+		// A failed confirmation/tokenization is never replayed on another exit.
+		if !safeStripeNetworkRetry(method, path) || attempt == 2 {
+			return err
+		}
+		next, e := rotateCoolingRoute(s.vault, s.route)
+		if e != nil {
+			return e
+		}
+		s.close()
+		s.route = next
+		client, close, e := s.openRoute(ctx, next.Outbound)
+		if e != nil {
+			return e
+		}
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return errStripeRedirect }
+		s.http, s.closeRoute = client, close
+	}
+	return errors.New("Stripe network retry limit reached")
+}
+func (s *stripeClient) callOnce(ctx context.Context, method, path string, form url.Values, idempotency string, out any) error {
 	form.Set("key", s.key)
 	target := "https://api.stripe.com/v1/" + path
 	var input io.Reader
@@ -109,15 +162,18 @@ func (s *stripeClient) call(ctx context.Context, method, path string, form url.V
 	}
 	res, e := s.http.Do(req)
 	if e != nil {
-		return temporary(errors.New("Stripe transport failed; request outcome may be unknown"))
+		if errors.Is(e, errStripeRedirect) {
+			return e
+		}
+		return temporary(&stripeTransportFailure{})
 	}
 	defer res.Body.Close()
 	raw, e := io.ReadAll(io.LimitReader(res.Body, 2<<20))
 	if e != nil {
-		if res.StatusCode >= 400 && res.StatusCode < 500 {
+		if res.StatusCode >= 400 {
 			return httpFailure(errors.New("Stripe error response could not be read"), res.StatusCode, res.Header.Get("Retry-After"))
 		}
-		return temporary(errors.New("Stripe response could not be read"))
+		return temporary(&stripeTransportFailure{})
 	}
 	defer clear(raw)
 	var envelope struct {

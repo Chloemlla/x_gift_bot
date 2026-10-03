@@ -33,6 +33,48 @@ func recoveryRequest(s *server, path, body string) *httptest.ResponseRecorder {
 	}
 	return w
 }
+
+func TestRecoveryStatusSeparatesHistoryFromCurrentOrders(t *testing.T) {
+	s := recoveryFixture(t, "created")
+	q := &recoveryBatch{ID: "historical-task", State: "completed", Created: 123, Items: []recoveryItem{{ID: "old", State: "succeeded"}}}
+	if err := s.saveRecovery(q); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.vault.Get("admin-recovery:latest")
+	checkoutBefore, _ := s.vault.Get("checkout:1234")
+	read := func(wantReview, wantProcessing int) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		s.recoveryStatus(w, httptest.NewRequest("GET", "/api/admin/recovery", nil))
+		var result struct {
+			Batch   recoveryBatch                    `json:"batch"`
+			Summary struct{ Review, Processing int } `json:"summary"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		if result.Batch.State != "completed" || len(result.Batch.Items) != 1 || result.Batch.Items[0].State != "succeeded" {
+			t.Fatal("historical result was replaced by current queue")
+		}
+		if result.Summary.Review != wantReview || result.Summary.Processing != wantProcessing {
+			t.Fatal("queue summary did not reflect current database")
+		}
+	}
+	read(1, 0)
+	if _, err := s.db.Exec("UPDATE codes SET status='processing'"); err != nil {
+		t.Fatal(err)
+	}
+	read(0, 1)
+	if _, err := s.db.Exec("UPDATE codes SET status='succeeded'"); err != nil {
+		t.Fatal(err)
+	}
+	read(0, 0)
+	after, _ := s.vault.Get("admin-recovery:latest")
+	checkoutAfter, _ := s.vault.Get("checkout:1234")
+	if string(before) != string(after) || string(checkoutBefore) != string(checkoutAfter) || len(s.work) != 0 {
+		t.Fatal("status lookup mutated history or payment state")
+	}
+}
 func TestRecoveryPreviewDoesNotPayOrExposeSecrets(t *testing.T) {
 	s := recoveryFixture(t, "created")
 	before, _ := s.vault.Get("checkout:1234")

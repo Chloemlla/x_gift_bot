@@ -255,6 +255,8 @@ func ManualRecoveryErrorMessage(err error) string {
 	}
 	text := err.Error()
 	switch {
+	case errors.Is(err, ErrPaymentNodesCooling):
+		return "付款节点暂不可用，已停止自动尝试；请查看冷却状态并核实原订单结果。"
 	case errors.Is(err, ErrVerifyUnpaid):
 		return replacementMessage(err)
 	case errors.Is(err, ErrPaymentPaused):

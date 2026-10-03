@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -20,11 +23,12 @@ import {
   TableRow,
   Typography,
 } from "@mui/material";
+import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import { adminApi } from "./adminApi";
 import type { RecoverySelection } from "./CustomerPanel";
 
 type Item = {
-	  payment_node?: string;
+  payment_node?: string;
   hint: string;
   checkout_url?: string;
   needs_unpaid_verification?: boolean;
@@ -41,13 +45,15 @@ type Batch = {
   id: string;
   state: string;
   created: number;
+  updated?: number;
   last4: string;
   paused: boolean;
   message: string;
   items: Item[];
 };
-type Network = { mode: "pool" | "direct"; nodes: number };
-type Response = { batch: Batch | null; network?: Network };
+type Network = { mode: "pool" | "direct"; nodes: number; available?: number; cooling?: number };
+type QueueSummary = { review: number; processing: number };
+type Response = { batch: Batch | null; network?: Network; summary?: QueueSummary };
 const labels: Record<string, string> = {
   preview: "待确认",
   pending: "待处理",
@@ -56,7 +62,7 @@ const labels: Record<string, string> = {
   stopped: "已停止",
   completed: "批次已结束",
   interrupted: "服务重启后暂停",
-  succeeded: "已完成",
+  succeeded: "已确认成功",
   declined: "付款被拒",
   requires_action: "需银行验证",
   skipped: "已跳过",
@@ -64,6 +70,34 @@ const labels: Record<string, string> = {
   link_ready: "链接已就绪 · 未付款",
   needs_verification: "需核对原扣款",
 };
+function resultSummary(items: Item[]) {
+  const count = (states: string[]) => items.filter((i) => states.includes(i.state)).length;
+  const parts: [string, number][] = [
+    ["成功", count(["succeeded"])],
+    ["链接就绪", count(["link_ready"])],
+    ["跳过", count(["skipped"])],
+    ["待核实", count(["declined", "requires_action", "blocked", "needs_verification"])],
+    ["未处理", count(["pending"])],
+    ["处理中", count(["running"])],
+  ];
+  return [`共 ${items.length} 笔`, ...parts.filter(([, n]) => n > 0).map(([label, n]) => `${label} ${n} 笔`)].join(" · ");
+}
+function taskTime(seconds?: number) {
+  return seconds ? new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false }) : "时间未记录";
+}
+function BatchDetails({ batch }: { batch: Batch }) {
+  return <>
+    <Stack direction="row" flexWrap="wrap" gap={1} alignItems="center">
+      <Chip size="small" label={labels[batch.state] || batch.state} />
+      <Typography variant="body2">{batch.mode === "links" ? "仅生成链接" : `付款卡尾号 ${batch.last4}`} · {resultSummary(batch.items)}</Typography>
+    </Stack>
+    <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+      创建于 {taskTime(batch.created)} · 更新于 {taskTime(batch.updated || batch.created)}
+    </Typography>
+    <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>{batch.message}</Typography>
+    {batch.items.length > 0 && <Orders items={batch.items} />}
+  </>;
+}
 function totals(items: Item[]) {
   const values: Record<string, number> = {};
   for (const item of items)
@@ -91,7 +125,9 @@ function Orders({ items }: { items: Item[] }) {
             >
               @{item.username} · 卡密尾号 {item.hint}
             </Typography>
-            {item.payment_node && <Typography variant="caption">付款节点 {item.payment_node}</Typography>}
+            {item.payment_node && (
+              <Typography variant="caption">付款节点 {item.payment_node}</Typography>
+            )}
             <Typography variant="body2">
               {item.months} 个月 · {item.currency}{" "}
               {(item.amount / 100).toFixed(2)}
@@ -137,8 +173,8 @@ function Orders({ items }: { items: Item[] }) {
                 <TableCell sx={{ verticalAlign: "top", minWidth: 140 }}>
                   <Typography variant="body2">@{item.username}</Typography>
                   <Typography variant="caption" display="block">
-                  卡密尾号 {item.hint}
-                  {item.payment_node && ` · 付款节点 ${item.payment_node}`}
+                    卡密尾号 {item.hint}
+                    {item.payment_node && ` · 付款节点 ${item.payment_node}`}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
                     {item.months} 个月
@@ -185,6 +221,8 @@ export function RecoveryPanel({
 }) {
   const [batch, setBatch] = useState<Batch | null>(null);
   const [network, setNetwork] = useState<Network | null>(null);
+  const [summary, setSummary] = useState<QueueSummary | null>(null);
+  const [statusError, setStatusError] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [open, setOpen] = useState(false);
@@ -207,9 +245,14 @@ export function RecoveryPanel({
         if (!disposed && !mutating.current && seq === sequence.current) {
           setBatch(data.batch);
           setNetwork(data.network || null);
+          setSummary(data.summary || null);
+          setStatusError("");
         }
       } catch (e) {
-        if (!disposed && !mutating.current) setError((e as Error).message);
+        if (!disposed && !mutating.current && seq === sequence.current) {
+          setStatusError((e as Error).message);
+          setSummary(null);
+        }
       } finally {
         if (!disposed) timer = setTimeout(poll, 5000);
       }
@@ -280,7 +323,7 @@ export function RecoveryPanel({
           <Typography color="text.secondary" variant="body2" sx={{ mt: 1 }}>
             X 生成链接走配置代理。
             {network?.mode === "pool"
-              ? `Stripe 节点池已启用（${network.nodes} 个节点）：新订单随机选节点，同一订单固定；失败不自动换节点。`
+              ? `Stripe 节点池：${network.nodes} 个出口，可用 ${network.available ?? network.nodes} 个，冷却 ${network.cooling ?? 0} 个。连接故障冷却 6 小时，安全查询最多尝试 3 个出口；付款提交失败不自动重扣。`
               : network?.mode === "direct"
                 ? "新订单的 Stripe 请求走服务器直连；已有节点绑定的订单保留原节点。"
                 : "正在读取 Stripe 付款网络配置。"}
@@ -324,21 +367,39 @@ export function RecoveryPanel({
           {error}
         </Alert>
       )}
-      {batch && (
+      {statusError && <Alert severity="error" sx={{ mt: 2 }}>当前状态读取失败：{statusError}</Alert>}
+      <Box sx={{ mt: 2 }} aria-live="polite">
+        <Typography variant="body2" fontWeight={600}>
+          {statusError ? "当前状态暂不可用" : active ? "当前有补单任务运行中" : summary ? "当前没有运行中的补单任务" : "正在读取当前状态…"}
+        </Typography>
+        {summary && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+          当前订单：待核实 {summary.review} 笔 · 充值处理中 {summary.processing} 笔
+        </Typography>}
+      </Box>
+      {batch && active && (
         <Box sx={{ mt: 2 }}>
-          <Stack direction="row" flexWrap="wrap" gap={1} alignItems="center">
-            <Chip size="small" label={labels[batch.state] || batch.state} />
-            <Typography variant="body2">
-              卡尾号 {batch.last4} · 已完成{" "}
-              {batch.items.filter((i) => i.state === "succeeded").length} /{" "}
-              {batch.items.length} 笔 · 待处理 {pending} 笔
-            </Typography>
-          </Stack>
-          <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>
-            {batch.message}
-          </Typography>
-          {batch.items.length > 0 && <Orders items={batch.items} />}
+          <BatchDetails batch={batch} />
         </Box>
+      )}
+      {batch && !active && (
+        <Accordion key={`${batch.id}-${batch.state}`} disableGutters elevation={0} sx={{ mt: 2, border: 1, borderColor: "divider", "&::before": { display: "none" } }}>
+          <AccordionSummary expandIcon={<ExpandMoreRounded />} aria-controls="recovery-history-content" id="recovery-history-heading">
+            <Box>
+              <Typography variant="body2" fontWeight={600}>
+                {batch.state === "preview" ? "上次预览（未启动）" : "上次补单记录（历史）"}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                {taskTime(batch.updated || batch.created)} · {resultSummary(batch.items)}
+              </Typography>
+            </Box>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+              以下为这次任务保存的处理结果。当前订单数量显示在上方；刷新页面不会重新执行此任务。
+            </Typography>
+            <BatchDetails batch={batch} />
+          </AccordionDetails>
+        </Accordion>
       )}
       <Dialog
         open={open}
@@ -380,7 +441,7 @@ export function RecoveryPanel({
           <Alert severity="warning" sx={{ mb: 2 }}>
             {linksOnly
               ? "这一步只准备付款链接，不付款。有效链接会复用；旧链接失效时，核验并保留旧记录后生成新链接。"
-              : "确认后会尝试真实付款。旧链接失效时可先生成新链接；已付款只同步结果，不符合条件的订单跳过。结果不明、需银行验证或连续两笔拒付时暂停。"}
+              : "确认后会尝试真实付款。旧链接失效时可先生成新链接；已付款只同步结果，不符合条件的订单跳过。普通拒付只标记该单失败；结果不明、需银行验证或支付方明确禁止重试时停止任务。"}
           </Alert>
           {batch && <Orders items={batch.items} />}
           {batch?.paused && !linksOnly && (

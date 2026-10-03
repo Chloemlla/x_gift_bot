@@ -10,30 +10,20 @@ import (
 	"time"
 
 	box "github.com/sagernet/sing-box"
-	"github.com/sagernet/sing-box/adapter/certificate"
-	"github.com/sagernet/sing-box/adapter/endpoint"
-	"github.com/sagernet/sing-box/adapter/inbound"
-	"github.com/sagernet/sing-box/adapter/outbound"
-	boxservice "github.com/sagernet/sing-box/adapter/service"
-	"github.com/sagernet/sing-box/dns"
-	"github.com/sagernet/sing-box/dns/transport/local"
+	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-box/protocol/anytls"
-	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing/common/json"
 )
 
 func Start(ctx context.Context, config []byte, port int) (*box.Box, error) {
-	in := inbound.NewRegistry()
-	mixed.RegisterInbound(in)
-	out := outbound.NewRegistry()
-	anytls.RegisterOutbound(out)
-	d := dns.NewTransportRegistry()
-	local.RegisterTransport(d)
-	ctx = box.Context(ctx, in, out, endpoint.NewRegistry(), d, boxservice.NewRegistry(), certificate.NewRegistry())
+	ctx = include.Context(ctx)
 	var raw map[string]any
 	if err := stdjson.Unmarshal(config, &raw); err != nil {
 		return nil, fmt.Errorf("invalid proxy configuration")
+	}
+	outbounds, ok := raw["outbounds"].([]any)
+	if !ok || len(outbounds) == 0 {
+		return nil, fmt.Errorf("proxy configuration must contain at least one outbound")
 	}
 	raw["log"] = map[string]any{"disabled": true}
 	raw["inbounds"] = []any{map[string]any{"type": "mixed", "listen": "127.0.0.1", "listen_port": port}}

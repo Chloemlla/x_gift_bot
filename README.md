@@ -4,6 +4,18 @@ Go CLI + Premium 兑换站。网站：`https://xp.example.com`，后台：`/admi
 
 **已部署；用户已成功完成一次 6 个月自动充值。** 账单国家按用户指定配置为 `BD`，姓名和邮箱已加密保存，不强制街道或邮编；已移除导致 Stripe 拒绝的 `save_payment_method=false` 参数。旧 checkout 已失效，其关联 PaymentIntent 自动取消，但公开查询缺少完整收款字段，归档检查因此拒绝解锁。`user-a` 的旧订单仍锁定，不能用该账号再次充值；可用其他符合赠送条件的账号测试。早期日志中的 0 是缺失字段的默认值，不能作为未收款证明。用户已自行完成另一账号的 6 个月充值，并反馈到账；随后通过 Stripe 专用结果接口确认成功。已修复成功付款被误判为待核实的问题，历史成功订单同步为成功 / 100%。本次修复未提交任何付款。
 
+## 截图
+
+以下截图来自本地模拟预览（`npm run preview`，全部为内存示例数据，不连接真实服务）：
+
+| 兑换页 | 管理页（统计概览） |
+|---|---|
+| ![兑换页](docs/screenshots/redeem-light.png) | ![管理页 · 浅色](docs/screenshots/admin-light.png) |
+
+管理页深色模式：
+
+![管理页 · 深色](docs/screenshots/admin-dark.png)
+
 ## 构建
 
 需要 Go 1.27.1、CGO 与 C 编译器。修改前端时还需要 Node.js 22+ 与 npm：

@@ -52,9 +52,48 @@ npm run audit:ui -- --url http://127.0.0.1:4173/admin --runs 1
 
 加入文件夹管理、单击复制和中性灰主题后，再用独立干净 profile 各复测一轮：兑换页浅色 **98 / 100 / 100 / 100**、深色 **99 / 100 / 100 / 100**；后台浅色与深色均为 **98 / 100 / 100 / 100**。兑换页 CLS 为 0，后台约 0.0024，四项均达到 97 分门槛。
 
+## 首次配置（引导向导）
+
+`xgift setup` 是交互式首次配置向导，逐行读取标准输入，终端下密码类输入不回显，管道输入也可完整驱动，便于脚本化和测试。保管库或密码文件已存在时拒绝运行，更新凭据仍使用 `put` / `billing` / `import-chrome`。向导依次询问并写入：
+
+1. 密码文件路径（默认 `<数据目录>/vault-password`，权限 0600，内容为 32 字节随机密钥的 base64）。生成后写入 `<数据目录>/password-path` 并创建加密保管库。
+2. X 凭据：`auth_token` 与 `ct0`（必填）；Authorization 请求头（留空使用 X 网页版默认 Bearer）；User-Agent（留空使用当前 macOS 版 Chrome 字符串）。macOS 之后可用 `import-chrome` 刷新 Cookie。
+3. 支付卡：卡号（Luhn 校验）、有效期、CVC、持卡人姓名、账单邮箱、两位账单国家代码，以及可选的邮编、地址行、城市、州/省（留空则不写入该键）。只填写发卡行登记的真实信息。
+4. 代理：直连、AnyTLS 引导填写或粘贴 sing-box outbound JSON（单个对象或含 `outbounds` 数组的完整配置，可含 `route` / `dns`）。保存前在本机临时端口实际启动内嵌 sing-box 验证配置有效，可选做连通性测试，失败仅警告并保留配置。
+5. Stripe 公钥：`pk_live_` 开头的 X 结账商户公钥，原始字节保存，不是用户的 secret key。
+6. 站点配置（可选）：站点 Origin、监听地址、支付开关。生成随机后台密码写入 `<数据目录>/admin-password`（0600，终端仅显示一次），并写出与 `deploy/site.env.example` 相同键的 `<数据目录>/site.env`（0600），其中 `XGIFT_DATA_DIR`、`XGIFT_PASSWORD_FILE`、`XGIFT_ADMIN_PASSWORD_FILE` 指向本次实际路径。生产部署按部署章节表格移至 `/etc/xgift/` 并保持仅属主可读。
+
+向导共写入五条保管库记录：`cookies`（X 登录 Cookie）、`api-auth`（Authorization 与 User-Agent）、`card`（支付卡）、`proxy`（sing-box 配置）、`stripe-key`（Stripe 公钥）。脚本化或非交互环境仍可使用 `init`（标准输入读入整个 JSON 对象）和 `put` 逐条写入。
+
+示例会话（值为虚构）：
+
+```text
+$ ./bin/xgift --db sqlite/vault.db setup
+密码文件保存路径 [sqlite/vault-password]: ↵
+auth_token: 3f7c…（不回显）
+ct0: 9a2e…（不回显）
+Authorization 请求头（留空使用 X 网页版默认 Bearer）: ↵
+User-Agent（留空使用当前 macOS 版 Chrome）: ↵
+卡号（仅数字，可含空格或连字符）: 4242 4242 4242 4242（不回显）
+有效期月份（01-12）: 12
+有效期年份（4 位）: 2030
+CVC（3-4 位）: 123（不回显）
+持卡人姓名: Test User
+账单邮箱: test@example.com
+账单国家（两位代码，如 BD）: BD
+…（可选地址字段均可留空跳过）
+请选择 [1]: 1
+代理配置有效。
+是否进行连通性测试（通过代理访问 https://x.com）？ [y/N]: ↵
+Stripe publishable key（pk_live_...）: pk_live_EXAMPLE…（不回显）
+是否生成站点配置文件？ [y/N]: n
+配置完成。已写入记录：cookies、api-auth、card、proxy、stripe-key
+```
+
 ## CLI
 
 ```sh
+./bin/xgift setup                     # 交互式首次配置向导
 ./bin/xgift status
 ./bin/xgift import-chrome --profile Default
 ./bin/xgift check
@@ -67,7 +106,15 @@ npm run audit:ui -- --url http://127.0.0.1:4173/admin --runs 1
 `--pay` 是真实付款入口。网站已开放用户自行测试，使用有效兑换码点击充值会触发真实付款；网站开关只管网站，CLI 自身仍执行配置、订单状态和金额校验。
 
 - 仅允许 3 个月恰好 300 BDT、6 个月恰好 600 BDT。校验 X 报价和 Stripe 最终总额、币种、商品、数量、一次性模式及商户身份，任何不符都停止。
-- 内嵌 sing-box AnyTLS，只监听本机端口，不修改系统代理。代理配置从加密库读取。
+- 内嵌 sing-box，只监听本机端口，不修改系统代理。代理配置从加密库读取，为完整 sing-box 配置对象，支持任意 sing-box outbound 类型：direct、socks、http、shadowsocks、vmess、vless、trojan、anytls、shadowtls、snell、ssh、tor、block、dns、selector/urltest。hysteria/hysteria2/tuic 与 wireguard/tailscale 需要对应构建标签（如 `go build -tags with_quic`），默认构建未启用。最小配置示例：
+
+```json
+{"outbounds":[{"type":"direct","tag":"direct"}]}
+```
+
+```json
+{"outbounds":[{"type":"anytls","tag":"proxy","server":"example.com","server_port":443,"password":"...","tls":{"enabled":true,"server_name":"example.com","insecure":false}}]}
+```
 - 固定 X API / Stripe 入口，无网页识别或 ChatGPT Chrome 扩展。
 - 私有 API 可能变化；6 个月已有用户实付成功记录，3 个月尚未实付验证；银行验证或 Stripe/X 风控仍可能阻止自动完成。
 - 按 X 固定用户 ID 保存订单。`submitting`、`unknown`、`requires_action` 阻止再次付款确认。建单阶段仅有明确临时错误恢复许可、剩余次数且无付款证据时允许有限恢复；取得有效 session 后固定复用，付款方式沿用原幂等键。
@@ -94,7 +141,7 @@ npm run audit:ui -- --url http://127.0.0.1:4173/admin --runs 1
 
 `sqlite/vault.db` 的敏感记录采用 AES-256-GCM 加密，密钥通过 scrypt 派生；SQLite 结构和记录名称不是密文，不是 SQLCipher 全库加密。Cookie、卡、代理与订单记录分别加密。仅读取 Chrome 的 X `auth_token` / `ct0`。
 
-`sqlite/password-path` 保存密码文件位置，默认密码文件在 `/tmp/xgift-password-*`。请将原密码安全保存，`/tmp` 清理后不能恢复。也可通过 `XGIFT_PASSWORD_FILE` 或 CLI `--password-file` 指定持久路径。目录权限 `0700`，秘密文件 `0600`。
+`sqlite/password-path` 保存密码文件位置。`setup` 向导默认把密码文件写到持久路径 `<数据目录>/vault-password`（0600）；`init` 不带 `--password-file` 时的旧默认仍是 `/tmp/xgift-password-*`，`/tmp` 清理后不能恢复。无论哪种方式都请将密码文件安全备份。也可通过 `XGIFT_PASSWORD_FILE` 或 CLI `--password-file` 指定持久路径。目录权限 `0700`，秘密文件 `0600`。
 
 `.private/`、`sqlite/`、数据库、日志、Go 二进制和环境秘密均不提交 Git（嵌入的前端构建产物除外）。服务器密钥与本地密钥独立。本地 `.private/export/admin-password` 保存本次生成的后台密码，勿提交或分享。
 

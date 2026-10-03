@@ -21,6 +21,7 @@ type Plan struct {
 
 var ErrNotEligible = errors.New("recipient cannot receive Premium gifts")
 var ErrUserNotFound = errors.New("recipient was not found")
+var ErrXReadFailure = errors.New("X account or price query failed")
 
 // Eligibility is read-only: it neither creates a checkout nor submits a payment.
 func Eligibility(ctx context.Context, v *vault.Vault, user string, port int) (string, error) {
@@ -106,18 +107,39 @@ func (c *xClient) callOnce(ctx context.Context, user, name, id string, variables
 	// A fixed-operation audit is encrypted before sending, then completed even on
 	// transport/body failures. Never store request headers or cookies here.
 	var audit struct {
-		Operation  string `json:"operation"`
-		Variables  any    `json:"variables"`
-		StartedAt  int64  `json:"started_at"`
-		FinishedAt int64  `json:"finished_at,omitempty"`
-		Phase      string `json:"phase"`
-		HTTP       int    `json:"http_status,omitempty"`
-		Body       string `json:"body,omitempty"`
-		Cause      string `json:"cause,omitempty"`
-		Failure    string `json:"failure,omitempty"`
+		Operation   string `json:"operation"`
+		Variables   any    `json:"variables"`
+		StartedAt   int64  `json:"started_at"`
+		FinishedAt  int64  `json:"finished_at,omitempty"`
+		Phase       string `json:"phase"`
+		HTTP        int    `json:"http_status,omitempty"`
+		Body        string `json:"body,omitempty"`
+		Cause       string `json:"cause,omitempty"`
+		Failure     string `json:"failure,omitempty"`
+		ContentType string `json:"content_type,omitempty"`
+		RequestID   string `json:"request_id,omitempty"`
+		EdgeID      string `json:"edge_id,omitempty"`
+	}
+	audit.Operation, audit.Variables, audit.StartedAt, audit.Phase = name, variables, time.Now().Unix(), "request_pending"
+	if !mutation {
+		defer func() {
+			if callErr == nil {
+				return
+			}
+			audit.FinishedAt, audit.Failure = time.Now().Unix(), callErr.Error()
+			if len(audit.Body) > 32<<10 {
+				audit.Body = audit.Body[:32<<10]
+			}
+			b, err := json.Marshal(audit)
+			defer clear(b)
+			if err != nil || c.vault.Put(fmt.Sprintf("x-read-failure:%s:%s:%d", user, name, time.Now().UnixNano()), b) != nil {
+				callErr = fmt.Errorf("%w: could not preserve failure details", ErrXReadFailure)
+				return
+			}
+			callErr = fmt.Errorf("%w: %w", ErrXReadFailure, callErr)
+		}()
 	}
 	if mutation {
-		audit.Operation, audit.Variables, audit.StartedAt, audit.Phase = name, variables, time.Now().Unix(), "request_pending"
 		key := fmt.Sprintf("x-create-attempt:%s:%d", user, time.Now().UnixNano())
 		persist := func() error {
 			b, e := json.Marshal(audit)
@@ -166,6 +188,7 @@ func (c *xClient) callOnce(ctx context.Context, user, name, id string, variables
 		return temporary(fmt.Errorf("X %s request failed", name))
 	}
 	audit.HTTP, audit.Phase = res.StatusCode, "response_received"
+	audit.ContentType, audit.RequestID, audit.EdgeID = res.Header.Get("Content-Type"), res.Header.Get("X-Request-ID"), res.Header.Get("CF-Ray")
 	defer res.Body.Close()
 	raw, e := io.ReadAll(io.LimitReader(res.Body, (2<<20)+1))
 	defer clear(raw)
@@ -178,13 +201,13 @@ func (c *xClient) callOnce(ctx context.Context, user, name, id string, variables
 	if e != nil {
 		audit.Phase, audit.Cause = "response_read_failed", e.Error()
 		if res.StatusCode >= 400 && res.StatusCode < 500 {
-			return httpFailure(errors.New("X error response could not be read"), res.StatusCode, res.Header.Get("Retry-After"))
+			return xHTTPFailure(errors.New("X error response could not be read"), res.StatusCode, res.Header.Get("Retry-After"), mutation)
 		}
 		return temporary(errors.New("X response could not be read"))
 	}
 	audit.Phase = "response_validation"
 	if res.StatusCode != 200 {
-		return httpFailure(fmt.Errorf("X %s returned HTTP %d; no payment attempted", name, res.StatusCode), res.StatusCode, res.Header.Get("Retry-After"))
+		return xHTTPFailure(fmt.Errorf("X %s returned HTTP %d; no payment attempted", name, res.StatusCode), res.StatusCode, res.Header.Get("Retry-After"), mutation)
 	}
 	var envelope struct {
 		Errors []json.RawMessage `json:"errors"`
@@ -201,6 +224,17 @@ func (c *xClient) callOnce(ctx context.Context, user, name, id string, variables
 	audit.Phase = "response_decoded"
 	return nil
 }
+
+// A 403 on a read-only X query can be transient. Retry within the existing
+// bounded budget and Retry-After rules, without changing credentials or proxy.
+// Never apply this exception to checkout creation or Stripe confirmation.
+func xHTTPFailure(err error, status int, retryAfter string, mutation bool) error {
+	if status == http.StatusForbidden && !mutation {
+		return httpFailure(err, http.StatusTooManyRequests, retryAfter)
+	}
+	return httpFailure(err, status, retryAfter)
+}
+
 func (c *xClient) recipient(ctx context.Context, user string) (string, error) {
 	return c.identity(ctx, user, true)
 }

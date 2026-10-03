@@ -37,10 +37,11 @@ type Record struct {
 }
 
 var sessionPattern = regexp.MustCompile(`^cs_live_[A-Za-z0-9]+$`)
+var sessionPathPattern = regexp.MustCompile(`^/[A-Za-z]/pay/`)
 
 func sessionURL(link, id string) bool {
 	u, e := url.Parse(link)
-	return e == nil && sessionPattern.MatchString(id) && u.Scheme == "https" && u.Host == "checkout.stripe.com" && u.User == nil && u.RawQuery == "" && (u.Path == "/g/pay/"+id || u.Path == "/c/pay/"+id)
+	return e == nil && sessionPattern.MatchString(id) && u.Scheme == "https" && u.Host == "checkout.stripe.com" && u.User == nil && u.RawQuery == "" && sessionPathPattern.MatchString(u.Path) && u.Path[2:] == "/pay/"+id
 }
 func save(v *vault.Vault, r *Record) error {
 	b, e := json.Marshal(r)

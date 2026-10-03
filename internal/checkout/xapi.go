@@ -274,8 +274,14 @@ func (c *xClient) create(ctx context.Context, user, recipient string, p Plan) (s
 		return "", "", e
 	}
 	s := r.Data.Gift
-	if s.Status != "Unpaid" || !sessionURL(s.URL, s.ID) {
-		return "", "", errors.New("X did not return an unpaid matching Stripe checkout")
+	if s.Status != "Unpaid" {
+		return "", "", errors.New("X checkout status is not Unpaid; payment was not submitted")
+	}
+	if !sessionPattern.MatchString(s.ID) {
+		return "", "", errors.New("X checkout session ID is missing or not a live session; payment was not submitted")
+	}
+	if !sessionURL(s.URL, s.ID) {
+		return "", "", errors.New("X checkout URL is unsupported or does not match its session; payment was not submitted")
 	}
 	return s.ID, s.URL, nil
 }

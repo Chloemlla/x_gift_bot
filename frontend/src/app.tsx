@@ -124,7 +124,7 @@ function App() {
             : "info",
     );
     if (["processing", "review", "succeeded"].includes(data.status ?? "")) {
-      setLocked(true);
+      setLocked(data.status !== "review");
       setProgress((previous) =>
         data.status === "succeeded"
           ? 100
@@ -227,7 +227,7 @@ function App() {
     else setUsername(value);
     setResult(null);
     setProgress(null);
-    // An uncertain submission stays query-only until the server confirms an unused code.
+    // A lost response stays query-only until the server returns a known state.
   }
 
   return (
@@ -332,7 +332,9 @@ function App() {
                   ? "请查询原订单进度"
                   : service === "paused"
                     ? "核实赠送资格"
-                    : "兑换 Premium"}
+                    : result?.status === "review"
+                      ? "重新检查并继续兑换"
+                      : "兑换 Premium"}
             </Button>
             <Button
               variant="outlined"
@@ -447,7 +449,7 @@ function App() {
           <ShieldOutlined color="action" fontSize="small" />
           <Typography variant="caption" color="text.secondary">
             我们会先核实账号能否接收赠送。如果 X
-            暂不允许赠送，兑换码不会因此被使用。
+            在首次建单前不允许赠送，兑换码不会使用。已有订单会保留原账号绑定。
           </Typography>
         </Stack>
       </Paper>
@@ -462,7 +464,7 @@ function App() {
           ],
           [
             "账号暂时无法接收赠送怎么办？",
-            "X 会根据账号情况决定是否允许接收 Premium 赠送。资格核实未通过时，兑换码不会使用，可换一个符合条件的账号。",
+            "X 会根据账号情况决定是否允许接收 Premium 赠送。首次建单前资格未通过，兑换码不会使用；已有待核实订单时，请使用原兑换码和账号重新检查，符合条件且尚未付款时会继续兑换。",
           ],
           [
             "等待较久或关闭页面后，如何查询？",
@@ -505,14 +507,18 @@ function App() {
         <DialogTitle id="redeem-dialog-title">
           {service === "paused"
             ? "核实这个账号的赠送资格？"
-            : "确认接收 Premium 的账号"}
+            : result?.status === "review"
+              ? "重新检查并继续这笔兑换？"
+              : "确认接收 Premium 的账号"}
         </DialogTitle>
         <DialogContent>
           <DialogContentText>
             接收账号为 <strong>@{cleanUser}</strong>。
             {service === "paused"
               ? "服务暂停期间只核实资格，兑换码不会使用。"
-              : "提交后将开始兑换，具体时长以兑换码为准。赠送成功后无法更换账号。"}
+              : result?.status === "review"
+                ? "将重新核对账号资格和原订单；符合条件且尚未付款时继续付款，已提交过付款的订单只核实结果。"
+                : "提交后将开始兑换，具体时长以兑换码为准。赠送成功后无法更换账号。"}
           </DialogContentText>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>

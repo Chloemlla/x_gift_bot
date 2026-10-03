@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 const port = Number(process.env.PREVIEW_PORT || 4173);
 const paused = process.env.PREVIEW_PAUSED === "true";
 const states = new Map();
+const attempts = new Map();
 let folders = [{ id: "a".repeat(32), name: "本地预览 · 示例批次" }];
 const plaintext = new Map();
 const now = Math.floor(Date.now() / 1000);
@@ -303,12 +304,22 @@ createServer(async (req, res) => {
         return;
       }
       const key = body.code + ":" + body.username;
-      if (req.url === "/api/redeem") states.set(key, Date.now());
+      if (req.url === "/api/redeem") {
+        states.set(key, Date.now());
+        attempts.set(key, (attempts.get(key) || 0) + 1);
+      }
       if (!states.has(key)) {
         json(200, { status: "active", progress: 0, months: 6 });
         return;
       }
       const elapsed = Date.now() - states.get(key);
+      if (ending === "E" && attempts.get(key) === 1 && elapsed > 3000) {
+        json(200, {
+          status: "review", progress: 50, months: 6,
+          message: "本地模拟：原订单尚未付款，可重新检查并继续兑换。",
+        });
+        return;
+      }
       if (ending === "B" && elapsed > 3000) {
         json(200, {
           status: "review",

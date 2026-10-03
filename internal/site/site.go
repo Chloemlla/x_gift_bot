@@ -470,7 +470,8 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		message(w, 503, "服务暂时不可用，兑换码未使用。")
 		return
 	}
-	if c.Status != "active" {
+	resuming := c.Status == "review" && c.Username == user && c.RecipientID != ""
+	if c.Status != "active" && !resuming {
 		if c.Username == user && (c.Status == "processing" || c.Status == "review" || c.Status == "succeeded") {
 			reply(w, 200, map[string]any{"status": c.Status, "message": c.Message, "months": c.Months, "progress": c.Progress, "rechecking": s.autoChecking(&c)})
 			return
@@ -481,7 +482,7 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	select {
 	case s.work <- struct{}{}:
 	default:
-		message(w, 503, "正在处理其他请求，请稍后重试。兑换码未使用。")
+		message(w, 503, "正在处理其他请求，请稍后重试。")
 		return
 	}
 	handedOff := false
@@ -490,48 +491,62 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 			<-s.work
 		}
 	}()
-	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
-	defer cancel()
-	recipient, e := checkout.Eligibility(ctx, s.vault, user, s.port)
-	if e != nil {
-		switch {
-		case errors.Is(e, checkout.ErrNotEligible):
-			message(w, 422, "X 当前不允许向这个账号赠送 Premium。兑换码未使用，可换一个符合条件的账号。")
-		case errors.Is(e, checkout.ErrUserNotFound):
-			message(w, 422, "未能找到这个 X 账号，请检查用户名。兑换码未使用。")
-		default:
-			message(w, 503, "暂时无法向 X 核实赠送资格，请稍后重试。兑换码未使用。")
+	recipient := c.RecipientID
+	if !resuming {
+		ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+		defer cancel()
+		recipient, e = checkout.Eligibility(ctx, s.vault, user, s.port)
+		if e != nil {
+			switch {
+			case errors.Is(e, checkout.ErrNotEligible):
+				message(w, 422, "X 当前不允许向这个账号赠送 Premium。兑换码未使用，可换一个符合条件的账号。")
+			case errors.Is(e, checkout.ErrUserNotFound):
+				message(w, 422, "未能找到这个 X 账号，请检查用户名。兑换码未使用。")
+			default:
+				message(w, 503, "暂时无法向 X 核实赠送资格，请稍后重试。兑换码未使用。")
+			}
+			return
 		}
-		return
 	}
 	if !s.payments {
-		reply(w, 503, map[string]any{"status": "paused", "eligible": true, "months": c.Months, "message": "这个账号可以接收赠送，但充值服务暂未开放。兑换码未使用，请稍后再来。"})
+		if resuming {
+			reply(w, 503, map[string]any{"status": "review", "months": c.Months, "progress": c.Progress, "message": "充值服务暂未开放，原订单已保留，请稍后重新检查并继续兑换。"})
+		} else {
+			reply(w, 503, map[string]any{"status": "paused", "eligible": true, "months": c.Months, "message": "这个账号可以接收赠送，但充值服务暂未开放。兑换码未使用，请稍后再来。"})
+		}
 		return
 	}
 	// The same lock is used by the CLI. Keep it until the final database write.
 	lock, e := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if e != nil {
-		message(w, 503, "订单服务暂时不可用，兑换码未使用。")
+		message(w, 503, "订单服务暂时不可用，请稍后重试。")
 		return
 	}
 	if e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); e != nil {
 		lock.Close()
-		message(w, 503, "订单处理中，请稍后重试。兑换码未使用。")
+		message(w, 503, "订单处理中，请稍后重试。")
 		return
 	}
 	release := func() { syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); lock.Close() }
-	// A prior CLI order must not be counted as fulfillment of a new redemption code.
-	for _, key := range []string{"checkout:" + recipient, "checkout:" + user} {
-		if _, e = s.vault.Get(key); !errors.Is(e, sql.ErrNoRows) {
-			release()
-			message(w, 409, "这个账号已有订单记录，需要管理员核实后处理。兑换码未使用。")
-			return
+	if !resuming {
+		// A prior CLI order must not fulfill a newly presented redemption code.
+		for _, key := range []string{"checkout:" + recipient, "checkout:" + user} {
+			if _, e = s.vault.Get(key); !errors.Is(e, sql.ErrNoRows) {
+				release()
+				message(w, 409, "这个账号已有订单记录，需要管理员核实后处理。兑换码未使用。")
+				return
+			}
 		}
 	}
-	result, e := s.db.Exec("UPDATE codes SET status='processing',progress=20,username=?,recipient_id=?,message=?,updated=? WHERE id=? AND status='active'", user, recipient, "正在处理，请不要重复提交。", time.Now().Unix(), c.ID)
+	var result sql.Result
+	if resuming {
+		result, e = s.db.Exec("UPDATE codes SET status='processing',progress=20,message=?,updated=? WHERE id=? AND status='review' AND username=? AND recipient_id=? AND months=?", "正在重新检查原订单，请稍候。", time.Now().Unix(), c.ID, user, recipient, c.Months)
+	} else {
+		result, e = s.db.Exec("UPDATE codes SET status='processing',progress=20,username=?,recipient_id=?,message=?,updated=? WHERE id=? AND status='active'", user, recipient, "正在处理，请不要重复提交。", time.Now().Unix(), c.ID)
+	}
 	if e != nil {
 		release()
-		message(w, 409, "无法创建订单；该账号可能已有兑换记录。兑换码未使用。")
+		message(w, 409, "无法开始处理订单，请刷新后查询兑换状态。")
 		return
 	}
 	n, e := result.RowsAffected()
@@ -553,7 +568,13 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 				log.Printf("order %s progress could not be saved", c.ID)
 			}
 		})
-		record, err := checkout.RunForRecipient(ctx, s.vault, user, recipient, true, s.port, c.Months)
+		var record *checkout.Record
+		var err error
+		if resuming {
+			record, err = checkout.ResumeForRecipient(ctx, s.vault, user, recipient, s.port, c.Months)
+		} else {
+			record, err = checkout.RunForRecipient(ctx, s.vault, user, recipient, true, s.port, c.Months)
+		}
 		if err != nil {
 			stage := "before_order"
 			if record != nil {
@@ -573,8 +594,15 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 			if record.Status == "creating" {
 				msg = "创建赠送订单未完成，尚未提交付款。请联系管理员处理，请勿重复兑换。"
 			} else if record.Status == "created" {
-				msg = "订单已创建，但付款准备未完成，尚未提交付款。请联系管理员处理。"
+				msg = "订单已创建，尚未提交付款。可以重新检查并继续兑换。"
 			}
+		}
+		if errors.Is(err, checkout.ErrXReadFailure) {
+			msg = "暂时无法向 X 核实账号或套餐，本次未提交付款。请稍后点击「重新检查并继续兑换」。"
+		} else if errors.Is(err, checkout.ErrNotEligible) {
+			msg = "X 当前不允许该账号接收 Premium 赠送，本次未提交付款。账号符合条件后，可重新检查并继续兑换。"
+		} else if errors.Is(err, checkout.ErrUserNotFound) {
+			msg = "未找到绑定的 X 账号，本次未提交付款。请核对原账号后重新检查。"
 		}
 		if err == nil && record != nil && record.Status == "succeeded" && record.RecipientID == recipient && record.Months == c.Months && record.Amount == c.Months*10000 && record.Currency == "BDT" {
 			status, msg = "succeeded", fmt.Sprintf("已为 @%s 完成 %d 个月 Premium 赠送。", user, c.Months)

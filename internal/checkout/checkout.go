@@ -116,6 +116,9 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	if r.Status != "" && r.Status != "created" && r.Status != "creating" {
 		return &r, fmt.Errorf("existing checkout status is %s; no payment will be resubmitted", r.Status)
 	}
+	if !unsubmitted(&r) {
+		return &r, errors.New("order contains payment evidence; refusing another submission")
+	}
 	if pay {
 		if e = CheckPaymentConfiguration(v); e != nil {
 			return &r, e

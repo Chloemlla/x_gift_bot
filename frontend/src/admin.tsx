@@ -38,6 +38,8 @@ import { AppearanceMenu } from "./AppearanceMenu";
 import { CopyableCodes } from "./CopyableCodes";
 import { adminApi as api, type AdminStats, type Folder } from "./adminApi";
 import { FolderPanel } from "./FolderPanel";
+import { FilterBar } from "./FilterBar";
+import { parseFilter } from "./filter";
 import { StatsPanel } from "./StatsPanel";
 
 type Code = {
@@ -92,6 +94,14 @@ function Admin() {
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveTarget, setMoveTarget] = useState("");
   const filterRef = useRef("");
+  const [expression, setExpression] = useState("");
+  const [filterError, setFilterError] = useState("");
+  const [activeFilter, setActiveFilter] = useState<{
+    source: string;
+    match: (code: Code) => boolean;
+  } | null>(null);
+  const [allCodes, setAllCodes] = useState<Code[] | null>(null);
+  const [filterPage, setFilterPage] = useState(0);
   const [generated, setGenerated] = useState<Generated | null>(null);
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(
     null,
@@ -134,6 +144,58 @@ function Admin() {
   useEffect(() => {
     void refresh(0);
   }, [refresh]);
+
+  // Filter mode: parse the expression, fetch every page client-side, then
+  // evaluate the predicate locally. Shares listSequence with refresh() so
+  // overlapping loads from either mode cancel each other.
+  const applyFilter = useCallback(async (source: string) => {
+    let match: (code: Code) => boolean;
+    try {
+      match = parseFilter(source);
+    } catch (error) {
+      setFilterError((error as Error).message);
+      return;
+    }
+    setFilterError("");
+    const sequence = ++listSequence.current;
+    setLoading(true);
+    setListError("");
+    try {
+      const codes: Code[] = [];
+      let page = 0;
+      for (;;) {
+        const data = await api<Listing>(`/api/admin/codes?page=${page}`);
+        if (sequence !== listSequence.current) return;
+        codes.push(...data.codes);
+        if (!data.has_more) break;
+        page++;
+      }
+      setAllCodes(codes);
+      setActiveFilter({ source, match });
+      setFilterPage(0);
+      setSelectedIDs([]);
+    } catch (error) {
+      if (sequence === listSequence.current)
+        setListError((error as Error).message);
+    } finally {
+      if (sequence === listSequence.current) setLoading(false);
+    }
+  }, []);
+
+  function clearFilter(reload = true) {
+    setActiveFilter(null);
+    setAllCodes(null);
+    setExpression("");
+    setFilterError("");
+    setFilterPage(0);
+    setSelectedIDs([]);
+    if (reload) void refresh(0);
+  }
+
+  function reloadCurrent() {
+    if (activeFilter) void applyFilter(activeFilter.source);
+    else void refresh(listing?.page ?? 0);
+  }
 
   useEffect(() => {
     if (!focusTarget || confirmation || busy || loading) return;
@@ -196,7 +258,8 @@ function Admin() {
       requestAnimationFrame(() =>
         generatedPanel.current?.scrollIntoView({ block: "nearest" }),
       );
-      await refresh(0, data.folder || "unfiled");
+      if (activeFilter) reloadCurrent();
+      else await refresh(0, data.folder || "unfiled");
     } catch (error) {
       setNotice({
         text: `${(error as Error).message} 若连接中断，请先刷新列表核实批次，不要立即重复生成。`,
@@ -216,7 +279,7 @@ function Admin() {
       setNotice({ text: "兑换码已停用。", error: false });
       setFocusTarget("list");
       setConfirmation(null);
-      await refresh(listing?.page ?? 0);
+      reloadCurrent();
     } catch (error) {
       setNotice({ text: (error as Error).message, error: true });
       setConfirmation(null);
@@ -241,7 +304,7 @@ function Admin() {
       });
       setMoveOpen(false);
       setFocusTarget("list");
-      await refresh(0);
+      reloadCurrent();
     } catch (e) {
       setMoveOpen(false);
       setNotice({
@@ -266,6 +329,15 @@ function Admin() {
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
+
+  const matched =
+    activeFilter && allCodes ? allCodes.filter(activeFilter.match) : null;
+  const filterTotal = matched?.length ?? 0;
+  const filterPages = Math.max(1, Math.ceil(filterTotal / 100));
+  const safeFilterPage = Math.min(filterPage, filterPages - 1);
+  const visibleCodes = matched
+    ? matched.slice(safeFilterPage * 100, safeFilterPage * 100 + 100)
+    : (listing?.codes ?? []);
 
   return (
     <Shell admin>
@@ -308,7 +380,11 @@ function Admin() {
         stats={listing?.stats}
         filter={listing?.folder ?? ""}
         disabled={busy || loading}
+        muted={!!activeFilter}
         onSelect={(folder) => {
+          // Clicking a folder chip while the expression filter is active
+          // exits filter mode and returns to normal folder filtering.
+          if (activeFilter) clearFilter(false);
           void refresh(0, folder);
         }}
         onBusyChange={(value) => {
@@ -317,8 +393,33 @@ function Admin() {
         }}
         onChanged={async (deleted) => {
           if (deleted === filterRef.current) filterRef.current = "";
-          await refresh(0);
+          if (activeFilter) reloadCurrent();
+          else await refresh(0);
         }}
+      />
+      {activeFilter && (
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          sx={{ mt: -1.5, mb: 3 }}
+        >
+          表达式筛选生效中，点击批次文件夹可清除筛选并查看该批次。
+        </Typography>
+      )}
+      <FilterBar
+        value={expression}
+        onChange={(value) => {
+          setExpression(value);
+          if (filterError) setFilterError("");
+        }}
+        onApply={() => {
+          if (expression.trim()) void applyFilter(expression.trim());
+        }}
+        onClear={() => clearFilter()}
+        applied={!!activeFilter}
+        error={filterError}
+        disabled={busy || loading}
+        folders={listing?.folders ?? []}
       />
       <Paper variant="outlined" sx={{ p: { xs: 2.5, sm: 3 }, mb: 3 }}>
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
@@ -465,11 +566,13 @@ function Admin() {
         >
           <Box>
             <Typography variant="h2">
-              {listing?.folder === "unfiled"
-                ? "未命名批次"
-                : (listing?.folders.find(
-                    (folder) => folder.id === listing.folder,
-                  )?.name ?? "全部兑换码")}
+              {matched
+                ? "表达式筛选结果"
+                : listing?.folder === "unfiled"
+                  ? "未命名批次"
+                  : (listing?.folders.find(
+                      (folder) => folder.id === listing.folder,
+                    )?.name ?? "全部兑换码")}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               点击条目复制兑换码 · 每页最多 100 条
@@ -481,7 +584,7 @@ function Admin() {
                 ref={refreshButton}
                 aria-label="刷新列表"
                 disabled={loading || busy}
-                onClick={() => void refresh(listing?.page ?? 0)}
+                onClick={() => reloadCurrent()}
                 sx={{
                   border: 1,
                   borderColor: "divider",
@@ -498,10 +601,8 @@ function Admin() {
         {listError && (
           <Alert severity="error" sx={{ m: 2 }}>
             {listError}
-            {listing && " 以下保留上次加载的数据。"}
-            <Button onClick={() => void refresh(listing?.page ?? 0)}>
-              重新加载
-            </Button>
+            {(listing || allCodes) && " 以下保留上次加载的数据。"}
+            <Button onClick={() => reloadCurrent()}>重新加载</Button>
           </Alert>
         )}
         <Typography
@@ -551,20 +652,20 @@ function Admin() {
                       input: { "aria-label": "选择本页全部兑换码" },
                     }}
                     disabled={
-                      busy || loading || !!listError || !listing?.codes.length
+                      busy || loading || !!listError || !visibleCodes.length
                     }
                     checked={
-                      !!listing?.codes.length &&
-                      selectedIDs.length === listing.codes.length
+                      !!visibleCodes.length &&
+                      selectedIDs.length === visibleCodes.length
                     }
                     indeterminate={
                       selectedIDs.length > 0 &&
-                      selectedIDs.length < (listing?.codes.length ?? 0)
+                      selectedIDs.length < visibleCodes.length
                     }
                     onChange={(event) =>
                       setSelectedIDs(
                         event.target.checked
-                          ? (listing?.codes.map((code) => code.id) ?? [])
+                          ? visibleCodes.map((code) => code.id)
                           : [],
                       )
                     }
@@ -588,7 +689,7 @@ function Admin() {
               </TableRow>
             </TableHead>
             <TableBody>
-              {listing?.codes.map((code) => (
+              {visibleCodes.map((code) => (
                 <TableRow
                   key={code.id}
                   hover
@@ -731,16 +832,31 @@ function Admin() {
                   </TableCell>
                 </TableRow>
               ))}
-              {!loading && !listError && !listing?.codes.length && (
+              {!loading && !listError && !visibleCodes.length && (
                 <TableRow>
                   <TableCell colSpan={7} align="center" sx={{ py: 7 }}>
                     <ConfirmationNumberOutlined
                       sx={{ fontSize: 40, color: "text.secondary", mb: 1 }}
                     />
-                    <Typography fontWeight={600}>当前分类没有兑换码</Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      可在上方生成兑换码，或从其他分类移动到这里。
-                    </Typography>
+                    {matched ? (
+                      <>
+                        <Typography fontWeight={600}>
+                          没有符合筛选条件的兑换码
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          请调整筛选表达式，或清除筛选查看全部兑换码。
+                        </Typography>
+                      </>
+                    ) : (
+                      <>
+                        <Typography fontWeight={600}>
+                          当前分类没有兑换码
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          可在上方生成兑换码，或从其他分类移动到这里。
+                        </Typography>
+                      </>
+                    )}
                   </TableCell>
                 </TableRow>
               )}
@@ -748,32 +864,69 @@ function Admin() {
           </Table>
         </TableContainer>
         <Stack
-          direction="row"
+          direction={{ xs: "column", sm: "row" }}
           justifyContent="space-between"
-          alignItems="center"
+          alignItems={{ xs: "start", sm: "center" }}
+          spacing={1}
           sx={{ p: 2, borderTop: 1, borderColor: "divider" }}
         >
-          <Typography variant="body2" color="text.secondary">
-            {listing?.folder
-              ? `第 ${listing.page + 1} 页`
-              : `共 ${listing?.stats.total ?? 0} 条 · 第 ${(listing?.page ?? 0) + 1} / ${Math.max(1, Math.ceil((listing?.stats.total ?? 0) / 100))} 页`}
-          </Typography>
-          <Stack direction="row" spacing={1}>
-            <Button
-              disabled={loading || busy || !listing?.page}
-              onClick={() => void refresh((listing?.page ?? 0) - 1)}
-              sx={{ px: 1.5 }}
-            >
-              上一页
-            </Button>
-            <Button
-              disabled={loading || busy || !listing?.has_more}
-              onClick={() => void refresh((listing?.page ?? 0) + 1)}
-              sx={{ px: 1.5 }}
-            >
-              下一页
-            </Button>
-          </Stack>
+          {matched ? (
+            <>
+              <Stack direction="row" spacing={1.5} alignItems="center">
+                <Typography variant="body2" color="text.secondary">
+                  {`筛选 ${filterTotal} / 共 ${allCodes?.length ?? 0} 条 · 第 ${safeFilterPage + 1} / ${filterPages} 页`}
+                </Typography>
+                <Button
+                  variant="outlined"
+                  disabled={loading || busy}
+                  onClick={() => clearFilter()}
+                  sx={{ px: 1.5, minHeight: 36 }}
+                >
+                  清除筛选
+                </Button>
+              </Stack>
+              <Stack direction="row" spacing={1}>
+                <Button
+                  disabled={loading || busy || safeFilterPage === 0}
+                  onClick={() => setFilterPage(safeFilterPage - 1)}
+                  sx={{ px: 1.5 }}
+                >
+                  上一页
+                </Button>
+                <Button
+                  disabled={loading || busy || safeFilterPage >= filterPages - 1}
+                  onClick={() => setFilterPage(safeFilterPage + 1)}
+                  sx={{ px: 1.5 }}
+                >
+                  下一页
+                </Button>
+              </Stack>
+            </>
+          ) : (
+            <>
+              <Typography variant="body2" color="text.secondary">
+                {listing?.folder
+                  ? `第 ${listing.page + 1} 页`
+                  : `共 ${listing?.stats.total ?? 0} 条 · 第 ${(listing?.page ?? 0) + 1} / ${Math.max(1, Math.ceil((listing?.stats.total ?? 0) / 100))} 页`}
+              </Typography>
+              <Stack direction="row" spacing={1}>
+                <Button
+                  disabled={loading || busy || !listing?.page}
+                  onClick={() => void refresh((listing?.page ?? 0) - 1)}
+                  sx={{ px: 1.5 }}
+                >
+                  上一页
+                </Button>
+                <Button
+                  disabled={loading || busy || !listing?.has_more}
+                  onClick={() => void refresh((listing?.page ?? 0) + 1)}
+                  sx={{ px: 1.5 }}
+                >
+                  下一页
+                </Button>
+              </Stack>
+            </>
+          )}
         </Stack>
       </Paper>
       <Dialog

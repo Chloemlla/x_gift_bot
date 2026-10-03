@@ -8,22 +8,29 @@ const port = Number(process.env.PREVIEW_PORT || 4173);
 const paused = process.env.PREVIEW_PAUSED === "true";
 const states = new Map();
 const attempts = new Map();
-let folders = [{ id: "a".repeat(32), name: "本地预览 · 示例批次" }];
+let folders = [
+  { id: "a".repeat(32), name: "本地预览 · 示例批次" },
+  { id: "b".repeat(32), name: "国庆活动" },
+];
 const plaintext = new Map();
 const now = Math.floor(Date.now() / 1000);
 let codes = ["active", "processing", "succeeded", "review", "revoked"].map(
-  (status, index) => ({
-    id: (index + 1).toString(16).padStart(32, "0"),
-    folder: "a".repeat(32),
-    copyable: false,
-    hint: `DEMO000${index}`,
-    batch: "本地预览 · 示例批次",
-    months: index % 2 ? 3 : 6,
-    status,
-    username: index > 0 && index < 4 ? "demo_user" : "",
-    message: status === "review" ? "示例：结果正在核实，请勿重复兑换。" : "",
-    created: now - index * 3600,
-  }),
+  (status, index) => {
+    // Two batches plus one unfiled code so client-side filtering is demonstrable.
+    const folder = index < 2 ? folders[0] : index < 4 ? folders[1] : null;
+    return {
+      id: (index + 1).toString(16).padStart(32, "0"),
+      folder: folder?.id ?? "",
+      copyable: false,
+      hint: `DEMO000${index}`,
+      batch: folder?.name ?? "",
+      months: index % 2 ? 3 : 6,
+      status,
+      username: index > 0 && index < 4 ? "demo_user" : "",
+      message: status === "review" ? "示例：结果正在核实，请勿重复兑换。" : "",
+      created: now - index * 3600,
+    };
+  },
 );
 const files = {
   "/": ["index.html", "text/html"],

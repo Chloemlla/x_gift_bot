@@ -22,6 +22,7 @@ type Props = {
   stats?: AdminStats;
   filter: string;
   disabled: boolean;
+  muted?: boolean;
   onSelect: (id: string) => void;
   onBusyChange: (value: boolean) => void;
   onChanged: (deleted?: string) => Promise<void>;
@@ -31,6 +32,7 @@ export function FolderPanel({
   stats,
   filter,
   disabled,
+  muted = false,
   onSelect,
   onBusyChange,
   onChanged,
@@ -81,7 +83,14 @@ export function FolderPanel({
         direction="row"
         useFlexGap
         gap={1}
-        sx={{ height: 80, overflowX: "auto", alignItems: "center", pb: 1 }}
+        sx={{
+          height: 80,
+          overflowX: "auto",
+          alignItems: "center",
+          pb: 1,
+          opacity: muted ? 0.55 : 1,
+          transition: "opacity 160ms ease",
+        }}
         role="region"
         aria-label="批次文件夹，可横向滚动"
         tabIndex={0}

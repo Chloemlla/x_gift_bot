@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -71,7 +72,7 @@ func run() error {
 	pay := f.Bool("pay", false, "pay only at the exact allowed BDT total")
 	name := f.String("name", "", "secret name for put")
 	f.Usage = func() {
-		fmt.Fprintln(f.Output(), "Usage: xgift <setup|init|status|billing|import-chrome|put|proxy|check|username> [flags]\nsetup is the interactive first-time wizard; init reads a JSON object from stdin; put reads one JSON value from stdin.")
+		fmt.Fprintln(f.Output(), "Usage: xgift <setup|init|status|billing|import-chrome|put|proxy|check|username> [flags]\nsetup is the interactive first-time wizard; init reads a JSON object from stdin; put reads one JSON value from stdin (stripe-key: the raw pk_live_ key).")
 		f.PrintDefaults()
 	}
 	if err := f.Parse(rest); err != nil {
@@ -191,22 +192,22 @@ func run() error {
 		}
 		raw, e := v.Get("api-auth")
 		if e != nil {
-			return errors.New("record api-auth is missing; run setup")
+			return errors.New("record api-auth is missing; fix with put --name api-auth")
 		}
 		var auth struct{ Authorization string }
 		if e = json.Unmarshal(raw, &auth); e != nil || !strings.HasPrefix(auth.Authorization, "Bearer ") {
 			clear(raw)
-			return errors.New("invalid api-auth record; run setup to rewrite it")
+			return errors.New("invalid api-auth record; rewrite with put --name api-auth")
 		}
 		clear(raw)
 		fmt.Println("api-auth: encrypted record verified")
 		key, e := v.Get("stripe-key")
 		if e != nil {
-			return errors.New("record stripe-key is missing; run setup")
+			return errors.New("record stripe-key is missing; fix with put --name stripe-key")
 		}
 		if !stripeKeyPattern.Match(key) {
 			clear(key)
-			return errors.New("invalid stripe-key record; run setup to rewrite it")
+			return errors.New("invalid stripe-key record; rewrite with put --name stripe-key")
 		}
 		clear(key)
 		fmt.Println("stripe-key: encrypted record verified")
@@ -223,18 +224,31 @@ func run() error {
 		fmt.Println("X cookies refreshed in encrypted SQLite vault")
 		return nil
 	case "put":
-		if *name != "proxy" && *name != "card" && *name != "cookies" {
-			return errors.New("--name must be proxy, card or cookies")
+		switch *name {
+		case "proxy", "card", "cookies", "api-auth":
+			b, e := io.ReadAll(io.LimitReader(os.Stdin, 1024*1024))
+			if e != nil {
+				return e
+			}
+			defer clear(b)
+			if !json.Valid(b) {
+				return errors.New("stdin must be valid JSON")
+			}
+			return v.Put(*name, b)
+		case "stripe-key":
+			b, e := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+			if e != nil {
+				return e
+			}
+			defer clear(b)
+			b = bytes.TrimSpace(b)
+			if !stripeKeyPattern.Match(b) {
+				return errors.New("stdin must be the pk_live_ publishable key")
+			}
+			return v.Put(*name, b)
+		default:
+			return errors.New("--name must be proxy, card, cookies, api-auth or stripe-key")
 		}
-		b, e := io.ReadAll(io.LimitReader(os.Stdin, 1024*1024))
-		if e != nil {
-			return e
-		}
-		defer clear(b)
-		if !json.Valid(b) {
-			return errors.New("stdin must be valid JSON")
-		}
-		return v.Put(*name, b)
 	}
 	if command != "proxy" && command != "check" && !regexp.MustCompile(`^@?[A-Za-z0-9_]{1,15}$`).MatchString(command) {
 		return errors.New("invalid command or X username")

@@ -189,17 +189,22 @@ func runSetup(ctx context.Context, db, passwordFileFlag string) error {
 	defer v.Close()
 	fmt.Printf("加密保管库已创建：%s\n\n", db)
 
-	if err = w.setupXCredentials(v); err != nil {
-		return err
+	steps := []func() error{
+		func() error { return w.setupXCredentials(v) },
+		func() error { return w.setupCard(v) },
+		func() error { return w.setupProxy(ctx, v) },
+		func() error { return w.setupStripeKey(v) },
 	}
-	if err = w.setupCard(v); err != nil {
-		return err
-	}
-	if err = w.setupProxy(ctx, v); err != nil {
-		return err
-	}
-	if err = w.setupStripeKey(v); err != nil {
-		return err
+	for _, step := range steps {
+		if err = step(); err != nil {
+			fmt.Println()
+			fmt.Printf("配置未完成：%v\n", err)
+			fmt.Println("已创建的保管库会保留已写入的记录。修复方式：")
+			fmt.Printf("  1) 删除 %s、%s 和旁边的 password-path 后重新运行 setup；或\n", db, passwordFile)
+			fmt.Println("  2) 用 put --name <proxy|card|cookies|api-auth|stripe-key> / billing / import-chrome 补写缺失记录，")
+			fmt.Println("     再以 status 确认全部记录就绪。")
+			return err
+		}
 	}
 	siteConfigured, err := w.setupSite(db, passwordFile)
 	if err != nil {
@@ -550,8 +555,8 @@ func (w *wizard) setupSite(db, passwordFile string) (bool, error) {
 		return false, err
 	}
 	u, err := url.Parse(origin)
-	if err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
-		return false, errors.New("Origin 必须是 https://<主机名> 形式")
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return false, errors.New("Origin 必须是 https://<主机名> 形式（不带路径、查询或用户信息）")
 	}
 	listen, err := w.prompt("监听地址", "127.0.0.1:8787")
 	if err != nil {

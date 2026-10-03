@@ -4,11 +4,15 @@ import { CacheProvider } from "@emotion/react";
 import createCache from "@emotion/cache";
 import {
   Alert,
+  Box,
   Button,
   Container,
   CssBaseline,
+  Link,
   ThemeProvider,
+  Typography,
 } from "@mui/material";
+import GitHubIcon from "@mui/icons-material/GitHub";
 import { theme } from "./theme";
 
 export async function request<T>(
@@ -93,6 +97,53 @@ export function Shell({
       sx={{ py: { xs: 3, sm: 6 } }}
     >
       {children}
+      <Box
+        component="footer"
+        sx={{
+          mt: { xs: 4, sm: 6 },
+          pt: 2,
+          borderTop: 1,
+          borderColor: "divider",
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 0.75,
+          color: "text.secondary",
+        }}
+      >
+        <Typography variant="body2" component="span">
+          © 2026 mizorewww
+        </Typography>
+        <Typography variant="body2" component="span" aria-hidden="true">
+          ·
+        </Typography>
+        <Link
+          variant="body2"
+          color="inherit"
+          underline="hover"
+          href="https://github.com/mizorewww/x_gift_bot/blob/main/LICENSE"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          MIT License
+        </Link>
+        <Typography variant="body2" component="span" aria-hidden="true">
+          ·
+        </Typography>
+        <Link
+          variant="body2"
+          color="inherit"
+          underline="hover"
+          href="https://github.com/mizorewww/x_gift_bot"
+          target="_blank"
+          rel="noopener noreferrer"
+          sx={{ display: "inline-flex", alignItems: "center", gap: 0.5 }}
+        >
+          <GitHubIcon sx={{ fontSize: 16 }} aria-hidden="true" />
+          GitHub
+        </Link>
+      </Box>
     </Container>
   );
 }

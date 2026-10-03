@@ -48,7 +48,7 @@ type Tone = "primary" | "secondary" | "success" | "warning" | "neutral";
 
 // 调色板模式不向用户展示文本语法；文本模式沿用 FILTER_HINT。
 const PALETTE_HINT =
-  "点击调色板按钮拼接条件；画布聚焦时按 Backspace 撤销、Enter 应用。";
+  "点击调色板按钮拼接条件；点击画布中的条件可切换 = / ≠；画布聚焦时按 Backspace 撤销、Enter 应用。";
 
 const STATUS_ORDER = [
   "active",
@@ -109,6 +109,22 @@ const parenTokenSx: SystemStyleObject<Theme> = {
   "&:hover": { bgcolor: "action.hover" },
 };
 
+// NOT 词元：反色（深底浅字），与条件 / 连接符明显区分。
+function notTokenSx(theme: Theme): SystemStyleObject<Theme> {
+  const palette = paletteOf(theme);
+  return {
+    bgcolor: palette.text.primary,
+    color: palette.background.paper,
+    fontFamily: "monospace",
+    letterSpacing: ".06em",
+    "&:hover": { bgcolor: palette.text.secondary },
+    "& .MuiChip-deleteIcon": {
+      color: theme.alpha(palette.background.paper, 0.65),
+      "&:hover": { color: palette.background.paper },
+    },
+  };
+}
+
 const chipSizeSx: SystemStyleObject<Theme> = {
   height: 30,
   minHeight: 30,
@@ -127,15 +143,35 @@ const chipSizeSx: SystemStyleObject<Theme> = {
 function tokenTone(token: Token): Tone {
   if (token.kind !== "condition") return "neutral";
   if (token.field === "folder") return "secondary";
+  if (token.field === "months") return "success";
+  if (token.field === "username") return "warning";
   return STATUS_META[token.value]?.tone ?? "neutral";
+}
+
+function conditionLabel(token: Extract<Token, { kind: "condition" }>): string {
+  const op = token.negate ? "≠" : ":";
+  switch (token.field) {
+    case "folder":
+      return token.value === "-"
+        ? `批次${op}未分类`
+        : `批次${op}${token.value}`;
+    case "status":
+      return `状态${op}${STATUS_META[token.value]?.label ?? token.value}`;
+    case "months":
+      return `时长${op}${token.value} 个月`;
+    case "username":
+      return token.value === "-"
+        ? `账号${op}未绑定`
+        : `账号${op}${token.value}`;
+  }
 }
 
 function tokenLabel(token: Token): string {
   switch (token.kind) {
     case "condition":
-      if (token.field === "folder")
-        return token.value === "-" ? "批次:未分类" : `批次:${token.value}`;
-      return `状态:${STATUS_META[token.value]?.label ?? token.value}`;
+      return conditionLabel(token);
+    case "not":
+      return "NOT";
     case "and":
       return "AND";
     case "or":
@@ -147,8 +183,8 @@ function tokenLabel(token: Token): string {
   }
 }
 
-function quoteFolder(name: string) {
-  return /[\s()":]/.test(name) ? `folder:"${name}"` : `folder:${name}`;
+function quoteValue(name: string) {
+  return /[\s()":=!≠]/.test(name) ? `"${name}"` : name;
 }
 
 function serializeTokens(tokens: Token[]): string {
@@ -157,12 +193,14 @@ function serializeTokens(tokens: Token[]): string {
     .map((token, index) => {
       let text: string;
       switch (token.kind) {
-        case "condition":
+        case "condition": {
+          const op = token.negate ? "!=" : ":";
           text =
             token.field === "folder"
-              ? quoteFolder(token.value)
-              : `status:${token.value}`;
+              ? `folder${op}${quoteValue(token.value)}`
+              : `${token.field}${op}${token.value}`;
           break;
+        }
         case "lparen":
           text = "(";
           break;
@@ -261,6 +299,7 @@ export function FilterBar({
   const [mode, setMode] = useState<"palette" | "text">("palette");
   const [announce, setAnnounce] = useState("");
   const [desyncWarning, setDesyncWarning] = useState("");
+  const [username, setUsername] = useState("");
   const canvasRef = useRef<HTMLDivElement>(null);
 
   // 外部 value 变化（如清除、文本模式往返）时重新同步词元；
@@ -321,6 +360,19 @@ export function FilterBar({
     commit([...tokens, token], `已添加 ${tokenLabel(token)}`);
   }
 
+  const usernameValid = /^[A-Za-z0-9_]+$/.test(username.trim());
+
+  function addUsername() {
+    if (disabled || !usernameValid || conditionDisabled) return;
+    add({
+      kind: "condition",
+      field: "username",
+      value: username.trim(),
+      negate: false,
+    });
+    setUsername("");
+  }
+
   function removeAt(index: number) {
     if (disabled) return;
     const removed = tokens[index];
@@ -339,7 +391,29 @@ export function FilterBar({
     );
   }
 
-  // 词元 chip 暴露 role="button"，Enter/Space 与 Delete/Backspace 一样触发删除。
+  function toggleNegate(index: number) {
+    if (disabled) return;
+    const token = tokens[index];
+    if (token?.kind !== "condition") return;
+    const next = tokens.map((t, i) =>
+      i === index && t.kind === "condition" ? { ...t, negate: !t.negate } : t,
+    );
+    const updated = next[index];
+    commit(next, `已切换为 ${tokenLabel(updated)}`);
+  }
+
+  // 条件 chip：Enter/Space（与点击一致）切换 = / ≠。
+  function conditionChipKeyDown(index: number) {
+    return (event: KeyboardEvent) => {
+      if (disabled) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleNegate(index);
+      }
+    };
+  }
+
+  // 其他词元 chip 暴露 role="button"，Enter/Space 与 Delete/Backspace 一样触发删除。
   function chipKeyDown(index: number) {
     return (event: KeyboardEvent) => {
       if (disabled) return;
@@ -352,7 +426,11 @@ export function FilterBar({
 
   const last = tokens[tokens.length - 1] as Token | undefined;
   const startsOperand =
-    !last || last.kind === "and" || last.kind === "or" || last.kind === "lparen";
+    !last ||
+    last.kind === "and" ||
+    last.kind === "or" ||
+    last.kind === "not" ||
+    last.kind === "lparen";
   const endsOperand =
     !!last && (last.kind === "condition" || last.kind === "rparen");
   const depth = tokens.reduce(
@@ -366,7 +444,10 @@ export function FilterBar({
   const undoDisabled = disabled || tokens.length === 0;
   const incompleteTail =
     !!last &&
-    (last.kind === "and" || last.kind === "or" || last.kind === "lparen");
+    (last.kind === "and" ||
+      last.kind === "or" ||
+      last.kind === "not" ||
+      last.kind === "lparen");
   // 结构问题优先于解析问题：先指出括号/末尾，再做完整语法校验，
   // 保证筛选被禁用时用户总能看到原因（包括从中间删除词元后的断裂）。
   let invalidReason = "";
@@ -530,13 +611,28 @@ export function FilterBar({
                     sx={[chipSizeSx, parenTokenSx]}
                   />
                 ) : token.kind === "condition" ? (
+                  <Tooltip key={index} title="点击或按 Enter 切换 = / ≠" describeChild>
+                    <Chip
+                      label={tokenLabel(token)}
+                      aria-label={`${tokenLabel(token)}，按 Enter 或点击切换 = / ≠，按 Delete 或 Backspace 删除`}
+                      onClick={disabled ? undefined : () => toggleNegate(index)}
+                      onDelete={disabled ? undefined : () => removeAt(index)}
+                      onKeyDown={conditionChipKeyDown(index)}
+                      sx={[
+                        chipSizeSx,
+                        conditionTint(tokenTone(token)),
+                        { cursor: disabled ? "default" : "pointer" },
+                      ]}
+                    />
+                  </Tooltip>
+                ) : token.kind === "not" ? (
                   <Chip
                     key={index}
                     label={tokenLabel(token)}
-                    aria-label={`${tokenLabel(token)}，按 Enter、Delete 或 Backspace 删除`}
+                    aria-label={`逻辑 ${tokenLabel(token)}（补集），按 Enter、Delete 或 Backspace 删除`}
                     onDelete={disabled ? undefined : () => removeAt(index)}
                     onKeyDown={chipKeyDown(index)}
-                    sx={[chipSizeSx, conditionTint(tokenTone(token))]}
+                    sx={[chipSizeSx, notTokenSx]}
                   />
                 ) : (
                   <Chip
@@ -594,7 +690,12 @@ export function FilterBar({
                         : `添加 状态:${meta.label}`
                     }
                     onClick={() =>
-                      add({ kind: "condition", field: "status", value: status })
+                      add({
+                        kind: "condition",
+                        field: "status",
+                        value: status,
+                        negate: false,
+                      })
                     }
                     ariaLabel={`添加状态条件 ${meta.label}`}
                   />
@@ -625,6 +726,7 @@ export function FilterBar({
                       kind: "condition",
                       field: "folder",
                       value: folder.name,
+                      negate: false,
                     })
                   }
                   ariaLabel={`添加批次条件 ${folder.name}`}
@@ -638,9 +740,113 @@ export function FilterBar({
                   conditionDisabled ? operandReason : "添加 批次:未分类"
                 }
                 onClick={() =>
-                  add({ kind: "condition", field: "folder", value: "-" })
+                  add({
+                    kind: "condition",
+                    field: "folder",
+                    value: "-",
+                    negate: false,
+                  })
                 }
                 ariaLabel="添加批次条件 未分类"
+              />
+            </Stack>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ mt: { md: 0.75 } }}
+            >
+              时长
+            </Typography>
+            <Stack direction="row" useFlexGap gap={1} flexWrap="wrap">
+              {["3", "6"].map((months) => (
+                <PaletteButton
+                  key={months}
+                  label={`${months} 个月`}
+                  dot="success"
+                  disabled={conditionDisabled}
+                  tooltip={
+                    conditionDisabled
+                      ? operandReason
+                      : `添加 时长:${months} 个月`
+                  }
+                  onClick={() =>
+                    add({
+                      kind: "condition",
+                      field: "months",
+                      value: months,
+                      negate: false,
+                    })
+                  }
+                  ariaLabel={`添加时长条件 ${months} 个月`}
+                />
+              ))}
+            </Stack>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ mt: { md: 0.75 } }}
+            >
+              账号
+            </Typography>
+            <Stack
+              direction="row"
+              useFlexGap
+              gap={1}
+              flexWrap="wrap"
+              alignItems="center"
+            >
+              <TextField
+                size="small"
+                fullWidth={false}
+                placeholder="接收账号"
+                value={username}
+                disabled={disabled}
+                onChange={(event) => setUsername(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addUsername();
+                  }
+                }}
+                slotProps={{
+                  htmlInput: {
+                    "aria-label": "接收账号用户名（字母、数字、下划线）",
+                    spellCheck: false,
+                    sx: { fontFamily: "monospace", py: 0.5 },
+                  },
+                }}
+                sx={{ width: 160 }}
+              />
+              <PaletteButton
+                label="添加账号"
+                dot="warning"
+                disabled={disabled || !usernameValid || conditionDisabled}
+                tooltip={
+                  !usernameValid
+                    ? "请输入字母、数字或下划线组成的账号名"
+                    : conditionDisabled
+                      ? operandReason
+                      : `添加 账号:${username.trim()}`
+                }
+                onClick={addUsername}
+                ariaLabel="添加账号条件"
+              />
+              <PaletteButton
+                label="未绑定"
+                dot="warning"
+                disabled={conditionDisabled}
+                tooltip={
+                  conditionDisabled ? operandReason : "添加 账号:未绑定"
+                }
+                onClick={() =>
+                  add({
+                    kind: "condition",
+                    field: "username",
+                    value: "-",
+                    negate: false,
+                  })
+                }
+                ariaLabel="添加账号条件 未绑定"
               />
             </Stack>
             <Typography
@@ -670,6 +876,16 @@ export function FilterBar({
                 }
                 onClick={() => add({ kind: "or" })}
                 ariaLabel="添加逻辑或 OR"
+              />
+              <PaletteButton
+                label="非 NOT"
+                mono
+                disabled={conditionDisabled}
+                tooltip={
+                  conditionDisabled ? operandReason : "添加补集 NOT（非）"
+                }
+                onClick={() => add({ kind: "not" })}
+                ariaLabel="添加补集 NOT"
               />
               <PaletteButton
                 label="（"

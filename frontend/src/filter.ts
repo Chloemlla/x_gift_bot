@@ -1,30 +1,42 @@
 // 兑换码筛选表达式：词法分析 + 递归下降解析 + 求值。
 // 语法：expr := orExpr；orExpr := andExpr (('or'|'||') andExpr)*；
-// andExpr := factor (('and'|'&&') factor)*；factor := '(' expr ')' | condition；
-// condition := ('folder'|'status') ':' value。字段与运算符不区分大小写。
+// andExpr := unary (('and'|'&&') unary)*；
+// unary := ('not'|'!'|'非') unary | factor（补集，可叠加，not not X = X）；
+// factor := '(' expr ')' | condition；
+// condition := field (':'|'='|'!='|'≠') value。
+// 字段：folder、status、months、username；字段与运算符不区分大小写。
 
 export type CodeRow = {
   batch: string;
   status: string;
+  months?: number;
+  username?: string;
 };
 
 const STATUSES = ["active", "processing", "review", "succeeded", "revoked"];
+const FIELDS = ["folder", "status", "months", "username"] as const;
+type Field = (typeof FIELDS)[number];
 
 type Token =
   | { kind: "lparen" }
   | { kind: "rparen" }
   | { kind: "colon" }
+  | { kind: "eq" }
+  | { kind: "neq" }
   | { kind: "and" }
   | { kind: "or" }
+  | { kind: "not" }
   | { kind: "word"; text: string }
   | { kind: "string"; text: string };
 
 function tokenize(src: string): Token[] {
-  // 中文输入法容错：全角括号、冒号、引号统一归一为半角。
+  // 中文输入法容错：全角括号、冒号、引号、叹号、等号统一归一为半角。
   src = src
     .replace(/（/g, "(")
     .replace(/）/g, ")")
     .replace(/：/g, ":")
+    .replace(/！/g, "!")
+    .replace(/＝/g, "=")
     .replace(/[＂“”]/g, '"');
   const tokens: Token[] = [];
   let index = 0;
@@ -49,6 +61,26 @@ function tokenize(src: string): Token[] {
       index++;
       continue;
     }
+    if (char === "=") {
+      tokens.push({ kind: "eq" });
+      index++;
+      continue;
+    }
+    if (char === "≠") {
+      tokens.push({ kind: "neq" });
+      index++;
+      continue;
+    }
+    if (char === "!") {
+      if (src[index + 1] === "=") {
+        tokens.push({ kind: "neq" });
+        index += 2;
+      } else {
+        tokens.push({ kind: "not" });
+        index++;
+      }
+      continue;
+    }
     if (char === '"') {
       const end = src.indexOf('"', index + 1);
       if (end === -1)
@@ -57,11 +89,15 @@ function tokenize(src: string): Token[] {
       index = end + 1;
       continue;
     }
-    const match = /^[^\s()":]+/.exec(src.slice(index))!;
+    const match = /^[^\s()":=!≠]+/.exec(src.slice(index))!;
     const word = match[0];
     const lower = word.toLowerCase();
     if (lower === "and" || word === "&&") tokens.push({ kind: "and" });
     else if (lower === "or" || word === "||") tokens.push({ kind: "or" });
+    // 「非」只有作为独立词（两侧是空白 / 括号等边界）才是 NOT 运算符；
+    // 出现在其他字符中间（如批次名「非活动」）时按普通词处理。
+    // 因此无法直接匹配名为「非」的批次，需要加引号：folder:"非"。
+    else if (lower === "not" || word === "非") tokens.push({ kind: "not" });
     else tokens.push({ kind: "word", text: word });
     index += word.length;
   }
@@ -71,12 +107,13 @@ function tokenize(src: string): Token[] {
 type Node =
   | { type: "or"; left: Node; right: Node }
   | { type: "and"; left: Node; right: Node }
-  | { type: "folder"; value: string }
-  | { type: "status"; value: string };
+  | { type: "not"; operand: Node }
+  | { type: "condition"; field: Field; value: string; negate: boolean };
 
 // 调色板模式使用的扁平词元，按表达式中的出现顺序记录。
 export type ExpressionToken =
-  | { kind: "condition"; field: "folder" | "status"; value: string }
+  | { kind: "condition"; field: Field; value: string; negate: boolean }
+  | { kind: "not" }
   | { kind: "and" }
   | { kind: "or" }
   | { kind: "lparen" }
@@ -102,13 +139,22 @@ function parse(src: string): { root: Node; flat: ExpressionToken[] } {
     return left;
   }
   function parseAnd(): Node {
-    let left = parseFactor();
+    let left = parseUnary();
     while (peek()?.kind === "and") {
       next();
       flat.push({ kind: "and" });
-      left = { type: "and", left, right: parseFactor() };
+      left = { type: "and", left, right: parseUnary() };
     }
     return left;
+  }
+  function parseUnary(): Node {
+    if (peek()?.kind === "not") {
+      next();
+      flat.push({ kind: "not" });
+      if (!peek()) throw new Error("「not」后缺少条件。");
+      return { type: "not", operand: parseUnary() };
+    }
+    return parseFactor();
   }
   function parseFactor(): Node {
     const token = peek();
@@ -133,30 +179,43 @@ function parse(src: string): { root: Node; flat: ExpressionToken[] } {
   function parseCondition(): Node {
     const field = next()!;
     if (field.kind !== "word")
-      throw new Error("无法识别的条件：请使用 folder:批次名 或 status:状态。");
-    const name = field.text.toLowerCase();
-    if (name !== "folder" && name !== "status")
-      throw new Error(`未知字段「${field.text}」，仅支持 folder 和 status。`);
-    if (peek()?.kind !== "colon")
-      throw new Error(`「${field.text}」后缺少冒号。`);
+      throw new Error(
+        "无法识别的条件：请使用 folder:批次名、status:状态、months:时长或 username:账号。",
+      );
+    const name = field.text.toLowerCase() as Field;
+    if (!FIELDS.includes(name))
+      throw new Error(
+        `未知字段「${field.text}」，仅支持 ${FIELDS.join("、")}。`,
+      );
+    const op = peek();
+    const negate = op?.kind === "neq";
+    if (op?.kind !== "colon" && op?.kind !== "eq" && op?.kind !== "neq")
+      throw new Error(`「${field.text}」后缺少 : 或 !=。`);
     next();
     const value = peek();
     if (!value || (value.kind !== "word" && value.kind !== "string"))
       throw new Error(`「${field.text}:」后缺少值。`);
     next();
+    let normalized = value.text;
     if (name === "status") {
-      const status = value.text.toLowerCase();
-      if (!STATUSES.includes(status))
+      normalized = value.text.toLowerCase();
+      if (!STATUSES.includes(normalized))
         throw new Error(
           `不支持的状态值「${value.text}」，可用：${STATUSES.join("、")}。`,
         );
-      flat.push({ kind: "condition", field: "status", value: status });
-      return { type: "status", value: status };
+    } else if (name === "months") {
+      if (!/^\d+$/.test(value.text))
+        throw new Error(
+          `「months:」后需要数字（如 3、6），收到「${value.text}」。`,
+        );
+    } else if (name === "folder") {
+      if (!value.text)
+        throw new Error("「folder:」后缺少批次名；未分类请使用 folder:-。");
+    } else if (!value.text) {
+      throw new Error("「username:」后需要账号名；未绑定请使用 username:-。");
     }
-    if (!value.text)
-      throw new Error("「folder:」后缺少批次名；未分类请使用 folder:-。");
-    flat.push({ kind: "condition", field: "folder", value: value.text });
-    return { type: "folder", value: value.text };
+    flat.push({ kind: "condition", field: name, value: normalized, negate });
+    return { type: "condition", field: name, value: normalized, negate };
   }
 
   const root = parseExpr();
@@ -168,13 +227,13 @@ function parse(src: string): { root: Node; flat: ExpressionToken[] } {
     if (rest.kind === "word" || rest.kind === "string") {
       // 尽量引用完整条件（field:value）而不仅是字段名。
       let text = rest.text;
-      const colon = tokens[position + 1];
+      const op = tokens[position + 1];
       const val = tokens[position + 2];
       if (
-        colon?.kind === "colon" &&
+        (op?.kind === "colon" || op?.kind === "eq" || op?.kind === "neq") &&
         (val?.kind === "word" || val?.kind === "string")
       )
-        text += `:${val.text}`;
+        text += `${op.kind === "neq" ? "!=" : ":"}${val.text}`;
       throw new Error(`「${text}」前缺少逻辑运算符（and / or）。`);
     }
     throw new Error("表达式意外的结尾：存在无法解析的内容。");
@@ -190,12 +249,33 @@ export function parseFilter(src: string): (code: CodeRow) => boolean {
         return evaluate(node.left, code) || evaluate(node.right, code);
       case "and":
         return evaluate(node.left, code) && evaluate(node.right, code);
-      case "status":
-        return code.status.toLowerCase() === node.value;
-      case "folder":
-        return node.value === "-"
-          ? !code.batch
-          : code.batch.toLowerCase() === node.value.toLowerCase();
+      case "not":
+        return !evaluate(node.operand, code);
+      case "condition": {
+        let matched: boolean;
+        switch (node.field) {
+          case "status":
+            matched = code.status.toLowerCase() === node.value;
+            break;
+          case "folder":
+            matched =
+              node.value === "-"
+                ? !code.batch
+                : code.batch.toLowerCase() === node.value.toLowerCase();
+            break;
+          case "months":
+            matched = code.months === Number(node.value);
+            break;
+          case "username":
+            matched =
+              node.value === "-"
+                ? !code.username
+                : (code.username ?? "").toLowerCase() ===
+                  node.value.toLowerCase();
+            break;
+        }
+        return node.negate ? !matched : matched;
+      }
     }
   }
   return (code: CodeRow) => evaluate(root, code);
@@ -207,4 +287,4 @@ export function parseExpressionTokens(src: string): ExpressionToken[] {
 }
 
 export const FILTER_HINT =
-  "条件：folder:批次名、status:状态；逻辑：and、or、括号；folder:- 表示未分类。";
+  "条件：folder:批次名、status:状态、months:时长、username:账号；逻辑：and、or、not、括号；!= 取反；folder:- 未分类、username:- 未绑定。";

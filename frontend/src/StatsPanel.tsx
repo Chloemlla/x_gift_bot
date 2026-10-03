@@ -39,7 +39,7 @@ function StatCard({
 }) {
   return (
     <Box
-      sx={{ border: 1, borderColor: "divider", borderRadius: 2, p: 1.5, minWidth: 0 }}
+      sx={{ border: 1, borderColor: "divider", borderRadius: 2, p: 2, minWidth: 0 }}
     >
       <Typography variant="caption" color="text.secondary" component="p">
         {label}
@@ -57,9 +57,9 @@ function StatCard({
 }
 
 const series = [
-  { key: "created", label: "生成", fill: "primary.main" },
-  { key: "redeemed", label: "兑换", fill: "secondary.main" },
-  { key: "succeeded", label: "成功", fill: "success.main" },
+  { key: "created", label: "生成" },
+  { key: "redeemed", label: "兑换" },
+  { key: "succeeded", label: "成功" },
 ] as const;
 
 function ActivityChart({ daily }: { daily: AdminStatsDetail["daily"] }) {
@@ -70,12 +70,7 @@ function ActivityChart({ daily }: { daily: AdminStatsDetail["daily"] }) {
     redeemed: theme.vars.palette.secondary.main,
     succeeded: theme.vars.palette.success.main,
   } as const;
-  const ink = theme.vars.palette.text.secondary;
   const rule = theme.vars.palette.divider;
-  const peak = Math.max(
-    1,
-    ...daily.flatMap((day) => [day.created, day.redeemed, day.succeeded]),
-  );
   const totals = daily.reduce(
     (sum, day) => ({
       created: sum.created + day.created,
@@ -85,116 +80,103 @@ function ActivityChart({ daily }: { daily: AdminStatsDetail["daily"] }) {
     { created: 0, redeemed: 0, succeeded: 0 },
   );
   const width = 720;
-  const baseline = 128;
-  const group = width / daily.length;
-  const ticks = daily
-    .map((day, index) => ({ day, index }))
-    .filter(({ index }) => index % 5 === 0 || index === daily.length - 1);
+  const height = 40;
+  const slot = width / daily.length;
+  const first = daily[0];
+  const middle = daily[Math.floor((daily.length - 1) / 2)];
+  const last = daily[daily.length - 1];
+  const format = (date: string) => date.slice(5).replace("-", "/");
   return (
     <Box>
-      <Stack
-        component="ul"
-        direction="row"
-        useFlexGap
-        flexWrap="wrap"
-        gap={2}
-        sx={{ listStyle: "none", m: 0, p: 0, mb: 1 }}
-      >
-        {series.map((item) => (
-          <Stack
-            component="li"
-            key={item.key}
-            direction="row"
-            alignItems="center"
-            spacing={0.75}
-          >
-            <Box
-              aria-hidden
-              sx={{
-                width: 10,
-                height: 10,
-                borderRadius: "50%",
-                bgcolor: item.fill,
-              }}
-            />
-            <Typography variant="caption" color="text.secondary">
-              {item.label}
-            </Typography>
-          </Stack>
-        ))}
-      </Stack>
       <Box
-        component="svg"
         role="img"
         aria-label={`最近 30 天共生成 ${totals.created} 枚，兑换 ${totals.redeemed} 枚，成功 ${totals.succeeded} 枚。`}
-        viewBox={`0 0 ${width} 150`}
-        preserveAspectRatio="none"
-        sx={{ display: "block", width: "100%", height: 160 }}
       >
-        <Box
-          component="line"
-          x1={0}
-          x2={width}
-          y1={baseline / 2}
-          y2={baseline / 2}
-          stroke={rule}
-          strokeWidth={1}
-          strokeDasharray="3 4"
-        />
-        <Box
-          component="line"
-          x1={0}
-          x2={width}
-          y1={baseline}
-          y2={baseline}
-          stroke={rule}
-          strokeWidth={1}
-        />
-        {daily.map((day, index) =>
-          series.map((item, order) => {
-            const height =
-              day[item.key] > 0
-                ? Math.max(2, (day[item.key] / peak) * (baseline - 8))
-                : 0;
+        <Stack spacing={1.5}>
+          {series.map((item) => {
+            const values = daily.map((day) => day[item.key]);
+            const peak = Math.max(1, ...values);
             return (
-              <Box
-                component="rect"
-                key={`${day.date}-${item.key}`}
-                x={index * group + group * 0.18 + order * group * 0.24}
-                y={baseline - height}
-                width={group * 0.2}
-                height={height}
-                rx={1}
-                fill={fills[item.key]}
-              />
+              <Box key={item.key}>
+                <Stack
+                  direction="row"
+                  alignItems="baseline"
+                  spacing={1}
+                  sx={{ mb: 0.5 }}
+                >
+                  <Typography variant="body2" fontWeight={600}>
+                    {item.label}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    共 {totals[item.key]}
+                  </Typography>
+                </Stack>
+                <Box
+                  component="svg"
+                  aria-hidden
+                  viewBox={`0 0 ${width} ${height}`}
+                  preserveAspectRatio="none"
+                  sx={{
+                    display: "block",
+                    width: "100%",
+                    height: { xs: 36, sm: 44 },
+                  }}
+                >
+                  <Box
+                    component="line"
+                    x1={0}
+                    x2={width}
+                    y1={height - 0.5}
+                    y2={height - 0.5}
+                    stroke={rule}
+                    strokeWidth={1}
+                  />
+                  {values.map((value, index) => {
+                    if (value === 0) return null;
+                    const bar = Math.max(2, (value / peak) * (height - 4));
+                    return (
+                      <Box
+                        component="rect"
+                        key={daily[index].date}
+                        x={index * slot + slot * 0.22}
+                        y={height - bar}
+                        width={slot * 0.56}
+                        height={bar}
+                        rx={2}
+                        fill={fills[item.key]}
+                      />
+                    );
+                  })}
+                </Box>
+              </Box>
             );
-          }),
-        )}
-        {ticks.map(({ day, index }) => (
-          <Box
-            component="text"
-            key={day.date}
-            x={
-              index === 0
-                ? 0
-                : index === daily.length - 1
-                  ? width
-                  : index * group + group / 2
-            }
-            y={144}
-            textAnchor={
-              index === 0
-                ? "start"
-                : index === daily.length - 1
-                  ? "end"
-                  : "middle"
-            }
-            fill={ink}
-            fontSize={11}
+          })}
+        </Stack>
+        <Box
+          sx={{
+            display: "grid",
+            gridTemplateColumns: "1fr auto 1fr",
+            mt: 0.75,
+          }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            {format(first.date)}
+          </Typography>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            textAlign="center"
           >
-            {day.date.slice(5).replace("-", "/")}
-          </Box>
-        ))}
+            {format(middle.date)}
+          </Typography>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            textAlign="right"
+          >
+            {format(last.date)}
+          </Typography>
+        </Box>
       </Box>
       <Box component="table" sx={visuallyHidden}>
         <caption>最近 30 天每日生成、兑换和成功的兑换码数量</caption>
@@ -227,6 +209,7 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const sequence = useRef(0);
+  const theme = useTheme<CssVarsTheme>();
   const reducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
   const load = useCallback(async () => {
     const current = ++sequence.current;
@@ -253,11 +236,12 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
     data && data.codes.redeemed > 0
       ? `${Math.round(data.rates.success * 100)}%`
       : "—";
-  const monthPeak = Math.max(1, ...(data?.months ?? []).map((m) => m.total));
+  const codesTotal = Math.max(1, data?.codes.total ?? 1);
   const stagePeak = Math.max(
     1,
     ...(data?.review_stages ?? []).map((stage) => stage.count),
   );
+  const remainder = theme.vars.palette.primary.light;
   return (
     <Paper variant="outlined" sx={{ mb: 3, overflow: "hidden" }}>
       <Button
@@ -306,13 +290,12 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
                   gridTemplateColumns: {
                     xs: "repeat(2, 1fr)",
                     sm: "repeat(3, 1fr)",
-                    md: "repeat(6, 1fr)",
                   },
                   gap: 1.5,
                 }}
               >
                 {Array.from({ length: 6 }, (_, index) => (
-                  <Skeleton key={index} variant="rounded" height={84} />
+                  <Skeleton key={index} variant="rounded" height={92} />
                 ))}
               </Box>
               <Skeleton variant="rounded" height={160} />
@@ -338,7 +321,6 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
                   gridTemplateColumns: {
                     xs: "repeat(2, 1fr)",
                     sm: "repeat(3, 1fr)",
-                    md: "repeat(6, 1fr)",
                   },
                   gap: 1.5,
                 }}
@@ -371,51 +353,93 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
                   <Typography id="stats-months-title" variant="h3" sx={{ mb: 1.5 }}>
                     套餐分布
                   </Typography>
+                  <Stack
+                    component="ul"
+                    direction="row"
+                    useFlexGap
+                    flexWrap="wrap"
+                    gap={2}
+                    sx={{ listStyle: "none", m: 0, p: 0, mb: 1.5 }}
+                  >
+                    <Stack
+                      component="li"
+                      direction="row"
+                      alignItems="center"
+                      spacing={0.75}
+                    >
+                      <Box
+                        aria-hidden
+                        sx={{
+                          width: 10,
+                          height: 10,
+                          borderRadius: "50%",
+                          bgcolor: "success.main",
+                        }}
+                      />
+                      <Typography variant="caption" color="text.secondary">
+                        成功
+                      </Typography>
+                    </Stack>
+                    <Stack
+                      component="li"
+                      direction="row"
+                      alignItems="center"
+                      spacing={0.75}
+                    >
+                      <Box
+                        aria-hidden
+                        sx={{
+                          width: 10,
+                          height: 10,
+                          borderRadius: "50%",
+                          bgcolor: remainder,
+                        }}
+                      />
+                      <Typography variant="caption" color="text.secondary">
+                        未完成
+                      </Typography>
+                    </Stack>
+                  </Stack>
                   <Stack spacing={1.5}>
                     {data.months.map((entry) => (
                       <Box key={entry.months}>
                         <Stack
                           direction="row"
                           justifyContent="space-between"
+                          alignItems="baseline"
                           spacing={1}
-                          sx={{ mb: 0.5 }}
+                          sx={{ mb: 0.75 }}
                         >
                           <Typography variant="body2" fontWeight={600}>
                             {entry.months} 个月
                           </Typography>
                           <Typography variant="body2" color="text.secondary">
-                            {entry.total} 枚 · 成功 {entry.succeeded}
+                            共 {entry.total} · 成功 {entry.succeeded}（
+                            {Math.round((entry.succeeded / entry.total) * 100)}
+                            %）
                           </Typography>
                         </Stack>
                         <Box
                           aria-hidden
                           sx={{
                             display: "flex",
-                            height: 10,
-                            borderRadius: 5,
-                            bgcolor: "action.hover",
+                            width: `${(entry.total / codesTotal) * 100}%`,
+                            height: 22,
+                            borderRadius: 1,
                             overflow: "hidden",
                           }}
                         >
                           <Box
                             sx={{
-                              width: `${(entry.succeeded / monthPeak) * 100}%`,
+                              width: `${(entry.succeeded / entry.total) * 100}%`,
                               bgcolor: "success.main",
                             }}
                           />
-                          <Box
-                            sx={{
-                              width: `${((entry.total - entry.succeeded) / monthPeak) * 100}%`,
-                              bgcolor: "primary.main",
-                            }}
-                          />
+                          <Box sx={{ flex: 1, bgcolor: remainder }} />
                         </Box>
                       </Box>
                     ))}
                   </Stack>
-                  <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
-                    深色为成功部分，长度为各套餐占比。
-                  </Typography>
                 </Box>
               )}
               {data.review_stages.length > 0 && (
@@ -423,7 +447,7 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
                   <Typography id="stats-stages-title" variant="h3" sx={{ mb: 1.5 }}>
                     待审核阶段分布
                   </Typography>
-                  <Stack spacing={1}>
+                  <Stack spacing={1.5}>
                     {[...data.review_stages]
                       .sort((a, b) => a.progress - b.progress)
                       .map((stage) => (
@@ -436,20 +460,13 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
                           <Typography variant="body2" sx={{ minWidth: 72 }}>
                             阶段 {stage.progress}%
                           </Typography>
-                          <Box
-                            aria-hidden
-                            sx={{
-                              flex: 1,
-                              height: 10,
-                              borderRadius: 5,
-                              bgcolor: "action.hover",
-                              overflow: "hidden",
-                            }}
-                          >
+                          <Box sx={{ flex: 1 }}>
                             <Box
+                              aria-hidden
                               sx={{
                                 width: `${(stage.count / stagePeak) * 100}%`,
-                                height: "100%",
+                                height: 22,
+                                borderRadius: 1,
                                 bgcolor: "warning.main",
                               }}
                             />
@@ -464,6 +481,14 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
                         </Stack>
                       ))}
                   </Stack>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    component="p"
+                    sx={{ mt: 1 }}
+                  >
+                    阶段百分比对应兑换流程的进度位置。
+                  </Typography>
                 </Box>
               )}
             </Stack>

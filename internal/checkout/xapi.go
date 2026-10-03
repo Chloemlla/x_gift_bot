@@ -17,6 +17,8 @@ import (
 type Plan struct {
 	Months, Minor int
 	ProductID     string
+	Merchant      string
+	Currency      string
 }
 
 var ErrNotEligible = errors.New("recipient cannot receive Premium gifts")
@@ -33,15 +35,6 @@ func Eligibility(ctx context.Context, v *vault.Vault, user string, port int) (st
 	return c.recipient(ctx, user)
 }
 
-func planFor(months int) (Plan, error) {
-	switch months {
-	case 3:
-		return Plan{3, 30000, "prod_EXAMPLE3MO"}, nil
-	case 6:
-		return Plan{6, 60000, "prod_EXAMPLE6MO"}, nil
-	}
-	return Plan{}, errors.New("only 3 months / 300 BDT or 6 months / 600 BDT are allowed")
-}
 func (p Plan) Name() string { return fmt.Sprintf("Premium Gift - %d months", p.Months) }
 
 type xClient struct {
@@ -288,8 +281,8 @@ func (c *xClient) quote(ctx context.Context, user string, p Plan) error {
 		return errors.New("unexpected X product or price list")
 	}
 	price := product.Prices[0]
-	if price.Type != "OneTime" || !strings.EqualFold(price.Currency, "bdt") || price.Amount != int64(p.Minor)*10000 {
-		return errors.New("X price is not exactly the allowed one-time BDT amount")
+	if price.Type != "OneTime" || !strings.EqualFold(price.Currency, p.Currency) || price.Amount != int64(p.Minor)*10000 {
+		return errors.New("X price is not exactly the allowed one-time amount")
 	}
 	return nil
 }

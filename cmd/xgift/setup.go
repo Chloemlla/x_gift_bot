@@ -20,12 +20,22 @@ import (
 
 	"golang.org/x/term"
 
+	"xgift/internal/checkout"
 	"xgift/internal/proxy"
 	"xgift/internal/vault"
 )
 
 const defaultBearer = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+
+// X's public gifting product identifiers as discovered from x.com checkout.
+// They are merchant-side identifiers published by X, not operator secrets.
+const (
+	defaultXMerchant   = "acct_EXAMPLE"
+	defaultXCurrency   = "bdt"
+	defaultXProduct3Mo = "prod_EXAMPLE3MO"
+	defaultXProduct6Mo = "prod_EXAMPLE6MO"
+)
 
 var stripeKeyPattern = regexp.MustCompile(`^pk_live_[A-Za-z0-9]+$`)
 
@@ -194,6 +204,7 @@ func runSetup(ctx context.Context, db, passwordFileFlag string) error {
 		func() error { return w.setupCard(v) },
 		func() error { return w.setupProxy(ctx, v) },
 		func() error { return w.setupStripeKey(v) },
+		func() error { return w.setupCatalog(v) },
 	}
 	for _, step := range steps {
 		if err = step(); err != nil {
@@ -201,7 +212,7 @@ func runSetup(ctx context.Context, db, passwordFileFlag string) error {
 			fmt.Printf("配置未完成：%v\n", err)
 			fmt.Println("已创建的保管库会保留已写入的记录。修复方式：")
 			fmt.Printf("  1) 删除 %s、%s 和旁边的 password-path 后重新运行 setup；或\n", db, passwordFile)
-			fmt.Println("  2) 用 put --name <proxy|card|cookies|api-auth|stripe-key> / billing / import-chrome 补写缺失记录，")
+			fmt.Println("  2) 用 put --name <proxy|card|cookies|api-auth|stripe-key|catalog> / billing / import-chrome 补写缺失记录，")
 			fmt.Println("     再以 status 确认全部记录就绪。")
 			return err
 		}
@@ -214,7 +225,7 @@ func runSetup(ctx context.Context, db, passwordFileFlag string) error {
 	fmt.Println()
 	fmt.Println("配置完成。")
 	fmt.Printf("保管库：%s\n密码文件：%s\n", db, passwordFile)
-	fmt.Println("已写入记录：cookies、api-auth、card、proxy、stripe-key")
+	fmt.Println("已写入记录：cookies、api-auth、card、proxy、stripe-key、catalog")
 	if siteConfigured {
 		fmt.Printf("站点配置：%s\n", filepath.Join(filepath.Dir(db), "site.env"))
 	}
@@ -539,6 +550,107 @@ func (w *wizard) setupStripeKey(v *vault.Vault) error {
 	}
 	fmt.Printf("已保存 Stripe 公钥（尾号 %s）\n\n", tail(key))
 	return nil
+}
+
+// majorToMinor converts a major-unit amount like "300" or "4.99" to minor units.
+func majorToMinor(s string) (int, error) {
+	if !regexp.MustCompile(`^[0-9]+(\.[0-9]{1,2})?$`).MatchString(s) {
+		return 0, errors.New("金额必须是数字，最多两位小数")
+	}
+	whole, frac, _ := strings.Cut(s, ".")
+	minor, err := strconv.Atoi(whole)
+	if err != nil {
+		return 0, errors.New("金额超出范围")
+	}
+	minor *= 100
+	if frac != "" {
+		if len(frac) == 1 {
+			frac += "0"
+		}
+		cents, _ := strconv.Atoi(frac)
+		minor += cents
+	}
+	return minor, nil
+}
+
+func (w *wizard) setupCatalog(v *vault.Vault) error {
+	fmt.Println("—— 商品目录 ——")
+	fmt.Println("目录记录商户、币种与允许购买的套餐（时长、金额、商品 ID），金额最终以最小货币单位保存。")
+	useDefault, err := w.yesNo("使用 X Premium 默认目录？", true)
+	if err != nil {
+		return err
+	}
+	var catalog checkout.Catalog
+	if useDefault {
+		catalog = checkout.Catalog{Merchant: defaultXMerchant, Currency: defaultXCurrency, Plans: []checkout.CatalogPlan{
+			{Months: 3, Amount: 30000, Product: defaultXProduct3Mo},
+			{Months: 6, Amount: 60000, Product: defaultXProduct6Mo},
+		}}
+	} else {
+		catalog, err = w.customCatalog()
+		if err != nil {
+			return err
+		}
+	}
+	raw, err := json.Marshal(catalog)
+	if err != nil {
+		return err
+	}
+	defer clear(raw)
+	if _, err = checkout.ParseCatalog(raw); err != nil {
+		return err
+	}
+	if err = v.Put("catalog", raw); err != nil {
+		return err
+	}
+	fmt.Printf("已保存商品目录（%d 个套餐，币种 %s）\n\n", len(catalog.Plans), strings.ToUpper(catalog.Currency))
+	return nil
+}
+
+func (w *wizard) customCatalog() (checkout.Catalog, error) {
+	var catalog checkout.Catalog
+	merchant, err := w.prompt("Stripe 商户账号（acct_...）", "")
+	if err != nil {
+		return catalog, err
+	}
+	catalog.Merchant = merchant
+	currency, err := w.prompt("币种（三位小写字母，如 bdt）", "")
+	if err != nil {
+		return catalog, err
+	}
+	catalog.Currency = currency
+	countStr, err := w.prompt("套餐数量（1-2）", "1")
+	if err != nil {
+		return catalog, err
+	}
+	count, err := strconv.Atoi(countStr)
+	if err != nil || count < 1 || count > 2 {
+		return catalog, errors.New("套餐数量必须是 1 或 2")
+	}
+	for i := 1; i <= count; i++ {
+		monthsStr, err := w.prompt(fmt.Sprintf("套餐 %d 时长（月，1-24）", i), "")
+		if err != nil {
+			return catalog, err
+		}
+		months, err := strconv.Atoi(monthsStr)
+		if err != nil {
+			return catalog, errors.New("时长必须是整数月数")
+		}
+		amountStr, err := w.prompt(fmt.Sprintf("套餐 %d 金额（%s，如 300 或 4.99）", i, strings.ToUpper(currency)), "")
+		if err != nil {
+			return catalog, err
+		}
+		minor, err := majorToMinor(amountStr)
+		if err != nil {
+			return catalog, err
+		}
+		product, err := w.prompt(fmt.Sprintf("套餐 %d Stripe 商品 ID（prod_...）", i), "")
+		if err != nil {
+			return catalog, err
+		}
+		catalog.Plans = append(catalog.Plans, checkout.CatalogPlan{Months: months, Amount: minor, Product: product})
+	}
+	return catalog, nil
 }
 
 func (w *wizard) setupSite(db, passwordFile string) (bool, error) {

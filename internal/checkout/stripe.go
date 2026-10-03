@@ -18,8 +18,6 @@ import (
 	"xgift/internal/vault"
 )
 
-const xMerchant = "acct_EXAMPLE"
-
 type stripeClient struct {
 	http  *http.Client
 	key   string
@@ -179,7 +177,7 @@ func (p *paymentPage) UnmarshalJSON(b []byte) error {
 }
 func nullJSON(v json.RawMessage) bool { return len(v) == 0 || string(v) == "null" }
 func (p *paymentPage) guard(r *Record, plan Plan, before bool) error {
-	if p.SessionID != r.SessionID || p.Account.ID != xMerchant || !p.Live || p.Mode != "payment" || p.Currency != "bdt" || p.Group.Currency != "bdt" || p.SuccessURL != "https://x.com/"+r.Username+"/gift-premium/success" || p.CancelURL != "https://x.com/"+r.Username+"/gift-premium" {
+	if p.SessionID != r.SessionID || p.Account.ID != plan.Merchant || !p.Live || p.Mode != "payment" || p.Currency != plan.Currency || p.Group.Currency != plan.Currency || p.SuccessURL != "https://x.com/"+r.Username+"/gift-premium/success" || p.CancelURL != "https://x.com/"+r.Username+"/gift-premium" {
 		return errors.New("Stripe merchant, session, recipient return URLs, currency or payment mode mismatch")
 	}
 	if !nullJSON(p.SetupFuture) || !nullJSON(p.Subscription) || !nullJSON(p.SetupIntent) {
@@ -189,11 +187,11 @@ func (p *paymentPage) guard(r *Record, plan Plan, before bool) error {
 		return errors.New("Stripe final total or line item count does not match the exact allowed price")
 	}
 	item := p.Group.Items[0]
-	if item.Name != plan.Name() || item.Quantity != 1 || item.Subtotal != plan.Minor || item.Total != plan.Minor || item.Price.Currency != "bdt" || item.Price.Type != "one_time" || item.Price.UnitAmount != plan.Minor || !nullJSON(item.Price.Recurring) || item.Price.Product.ID != plan.ProductID || item.Price.Product.Name != plan.Name() || !item.Price.Product.Live {
+	if item.Name != plan.Name() || item.Quantity != 1 || item.Subtotal != plan.Minor || item.Total != plan.Minor || item.Price.Currency != plan.Currency || item.Price.Type != "one_time" || item.Price.UnitAmount != plan.Minor || !nullJSON(item.Price.Recurring) || item.Price.Product.ID != plan.ProductID || item.Price.Product.Name != plan.Name() || !item.Price.Product.Live {
 		return errors.New("Stripe product, duration, quantity or unit amount mismatch")
 	}
 	if p.Intent != nil {
-		if p.Intent.Currency != "bdt" || p.Intent.Amount != plan.Minor {
+		if p.Intent.Currency != plan.Currency || p.Intent.Amount != plan.Minor {
 			return errors.New("Stripe payment intent amount or currency mismatch")
 		}
 		if before {

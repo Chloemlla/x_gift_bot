@@ -17,7 +17,11 @@ func ResumeForRecipient(ctx context.Context, v *vault.Vault, user, recipient str
 		return nil, errors.New("bound recipient is required")
 	}
 	user = strings.ToLower(strings.TrimPrefix(user, "@"))
-	plan, err := planFor(months)
+	catalog, err := ReadCatalog(v)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := catalog.PlanFor(months)
 	if err != nil {
 		return nil, err
 	}
@@ -32,7 +36,7 @@ func ResumeForRecipient(ctx context.Context, v *vault.Vault, user, recipient str
 	}
 	defer clear(raw)
 	var r Record
-	if json.Unmarshal(raw, &r) != nil || r.Username != user || r.RecipientID != recipient || r.Months != months || r.Amount != plan.Minor || r.Currency != "BDT" || r.ProductID != plan.ProductID {
+	if json.Unmarshal(raw, &r) != nil || r.Username != user || r.RecipientID != recipient || r.Months != months || r.Amount != plan.Minor || r.Currency != strings.ToUpper(plan.Currency) || r.ProductID != plan.ProductID {
 		return nil, errors.New("bound order identity or plan mismatch")
 	}
 	if r.Status == "succeeded" || r.Status == "submitting" || r.Status == "unknown" || r.Status == "requires_action" {

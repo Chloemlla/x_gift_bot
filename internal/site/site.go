@@ -605,8 +605,11 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		} else if errors.Is(err, checkout.ErrUserNotFound) {
 			msg = "未找到绑定的 X 账号，本次未提交付款。请核对原账号后重新检查。"
 		}
-		if err == nil && record != nil && record.Status == "succeeded" && record.RecipientID == recipient && record.Months == c.Months && record.Amount == c.Months*10000 && record.Currency == "BDT" {
-			status, msg = "succeeded", fmt.Sprintf("已为 @%s 完成 %d 个月 Premium 赠送。", user, c.Months)
+		if err == nil && record != nil && record.Status == "succeeded" && record.RecipientID == recipient && record.Months == c.Months {
+			plan, planErr := s.catalogPlan(c.Months)
+			if planErr == nil && record.Amount == plan.Minor && record.Currency == strings.ToUpper(plan.Currency) {
+				status, msg = "succeeded", fmt.Sprintf("已为 @%s 完成 %d 个月 Premium 赠送。", user, c.Months)
+			}
 		}
 		if record != nil && record.Status == "requires_action" {
 			msg = "付款需要持卡人完成银行验证，请联系管理员。请勿重复兑换。"

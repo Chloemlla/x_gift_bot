@@ -42,11 +42,15 @@ func inspect(ctx context.Context, v *vault.Vault, user string, port, months int,
 	if e = json.Unmarshal(b, &r); e != nil {
 		return e
 	}
-	plan, e := planFor(months)
+	catalog, e := ReadCatalog(v)
 	if e != nil {
 		return e
 	}
-	if r.RecipientID != id || r.Months != plan.Months || r.Amount != plan.Minor || r.Currency != "BDT" || r.ProductID != plan.ProductID {
+	plan, e := catalog.PlanFor(months)
+	if e != nil {
+		return e
+	}
+	if r.RecipientID != id || r.Months != plan.Months || r.Amount != plan.Minor || r.Currency != strings.ToUpper(plan.Currency) || r.ProductID != plan.ProductID {
 		return errors.New("recorded recipient or plan mismatch")
 	}
 	if !sessionURL(r.URL, r.SessionID) {
@@ -152,7 +156,7 @@ func inspectInactiveIntent(ctx context.Context, v *vault.Vault, s *stripeClient,
 	if result.Received == nil || result.Capturable == nil {
 		return errors.New("PaymentIntent is missing explicit amount evidence")
 	}
-	if !result.Live || result.ID != intent.ID || result.Amount != plan.Minor || result.Currency != "bdt" {
+	if !result.Live || result.ID != intent.ID || result.Amount != plan.Minor || result.Currency != plan.Currency {
 		return errors.New("retrieved PaymentIntent identity or amount mismatch")
 	}
 	if e = v.Put("stripe-intent-inspection:"+r.RecipientID, raw); e != nil {

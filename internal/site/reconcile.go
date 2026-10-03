@@ -5,10 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 	"xgift/internal/checkout"
 )
+
+// catalogPlan resolves the configured plan per flow, never at startup, so the
+// site boots before the operator writes the catalog record.
+func (s *server) catalogPlan(months int) (checkout.Plan, error) {
+	catalog, err := checkout.ReadCatalog(s.vault)
+	if err != nil {
+		return checkout.Plan{}, err
+	}
+	return catalog.PlanFor(months)
+}
 
 // A status query can repair delayed/lost success writes, but can never pay.
 func (s *server) reconcileStatus(ctx context.Context, c *codeRow) {
@@ -33,7 +44,11 @@ func (s *server) reconcileStatus(ctx context.Context, c *codeRow) {
 	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 	record, err := checkout.Reconcile(ctx, s.vault, c.RecipientID, s.port)
-	if err != nil || record == nil || record.Status != "succeeded" || record.RecipientID != c.RecipientID || record.Username != c.Username || record.Months != c.Months || record.Amount != c.Months*10000 || record.Currency != "BDT" {
+	if err != nil || record == nil || record.Status != "succeeded" || record.RecipientID != c.RecipientID || record.Username != c.Username || record.Months != c.Months {
+		return
+	}
+	plan, err := s.catalogPlan(c.Months)
+	if err != nil || record.Amount != plan.Minor || record.Currency != strings.ToUpper(plan.Currency) {
 		return
 	}
 	msg := fmt.Sprintf("已为 @%s 完成 %d 个月 Premium 赠送。打开 X 查看会员状态；如未刷新，请重新打开 X。", c.Username, c.Months)

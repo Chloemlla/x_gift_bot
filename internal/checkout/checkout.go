@@ -67,7 +67,11 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	if !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(user) {
 		return nil, errors.New("invalid username")
 	}
-	plan, e := planFor(months)
+	catalog, e := ReadCatalog(v)
+	if e != nil {
+		return nil, e
+	}
+	plan, e := catalog.PlanFor(months)
 	if e != nil {
 		return nil, e
 	}
@@ -93,7 +97,7 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	var r Record
 	raw, e := v.Get("checkout:" + recipient)
 	if e == nil {
-		if json.Unmarshal(raw, &r) != nil || r.RecipientID != recipient || r.Months != plan.Months || r.Amount != plan.Minor || r.Currency != "BDT" || r.ProductID != plan.ProductID {
+		if json.Unmarshal(raw, &r) != nil || r.RecipientID != recipient || r.Months != plan.Months || r.Amount != plan.Minor || r.Currency != strings.ToUpper(plan.Currency) || r.ProductID != plan.ProductID {
 			return nil, errors.New("existing checkout differs from this recipient or plan; refusing another order")
 		}
 		if r.Status == "creating" {
@@ -130,7 +134,7 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	}
 	if r.SessionID == "" {
 		if r.Status == "" {
-			r = Record{Username: user, RecipientID: recipient, Months: plan.Months, Amount: plan.Minor, Currency: "BDT", ProductID: plan.ProductID, Status: "creating", Created: time.Now().Unix()}
+			r = Record{Username: user, RecipientID: recipient, Months: plan.Months, Amount: plan.Minor, Currency: strings.ToUpper(plan.Currency), ProductID: plan.ProductID, Status: "creating", Created: time.Now().Unix()}
 		}
 		for r.CreationAttempts < maxAttempts {
 			if e = ctx.Err(); e != nil {

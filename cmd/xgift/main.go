@@ -66,13 +66,13 @@ func run() error {
 	key := f.String("password-file", os.Getenv("XGIFT_PASSWORD_FILE"), "owner-only password file")
 	profile := f.String("profile", "Default", "Chrome directory name")
 	port := f.Int("port", 0, "local proxy port; default automatic (proxy command: 18791)")
-	months := f.Int("months", 6, "Premium gift duration: 3 (300 BDT) or 6 (600 BDT)")
+	months := f.Int("months", 6, "gift duration in months; must match a plan in the catalog record")
 	retire := f.Bool("retire-canceled", false, "archive an inactive, canceled, unpaid order after read-only verification")
 	inspect := f.Bool("inspect", false, "read the existing Stripe order status without paying")
-	pay := f.Bool("pay", false, "pay only at the exact allowed BDT total")
+	pay := f.Bool("pay", false, "pay only at the exact catalog plan total")
 	name := f.String("name", "", "secret name for put")
 	f.Usage = func() {
-		fmt.Fprintln(f.Output(), "Usage: xgift <setup|init|status|billing|import-chrome|put|proxy|check|username> [flags]\nsetup is the interactive first-time wizard; init reads a JSON object from stdin; put reads one JSON value from stdin (stripe-key: the raw pk_live_ key).")
+		fmt.Fprintln(f.Output(), "Usage: xgift <setup|init|status|billing|import-chrome|put|proxy|check|username> [flags]\nsetup is the interactive first-time wizard; init reads a JSON object from stdin; put reads one JSON value from stdin (stripe-key: the raw pk_live_ key; catalog: merchant/plan catalog JSON).")
 		f.PrintDefaults()
 	}
 	if err := f.Parse(rest); err != nil {
@@ -211,6 +211,10 @@ func run() error {
 		}
 		clear(key)
 		fmt.Println("stripe-key: encrypted record verified")
+		if _, e = checkout.ReadCatalog(v); e != nil {
+			return e
+		}
+		fmt.Println("catalog: encrypted record verified")
 		return nil
 	case "import-chrome":
 		b, e := chrome.Extract(*profile)
@@ -246,8 +250,18 @@ func run() error {
 				return errors.New("stdin must be the pk_live_ publishable key")
 			}
 			return v.Put(*name, b)
+		case "catalog":
+			b, e := io.ReadAll(io.LimitReader(os.Stdin, 65536))
+			if e != nil {
+				return e
+			}
+			defer clear(b)
+			if _, e = checkout.ParseCatalog(b); e != nil {
+				return e
+			}
+			return v.Put(*name, b)
 		default:
-			return errors.New("--name must be proxy, card, cookies, api-auth or stripe-key")
+			return errors.New("--name must be proxy, card, cookies, api-auth, stripe-key or catalog")
 		}
 	}
 	if command != "proxy" && command != "check" && !regexp.MustCompile(`^@?[A-Za-z0-9_]{1,15}$`).MatchString(command) {

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"xgift/internal/vault"
 )
 
@@ -21,11 +22,15 @@ func Reconcile(ctx context.Context, v *vault.Vault, recipient string, port int) 
 	if err = json.Unmarshal(raw, &r); err != nil {
 		return nil, err
 	}
-	plan, err := planFor(r.Months)
+	catalog, err := ReadCatalog(v)
 	if err != nil {
 		return nil, err
 	}
-	if r.RecipientID != recipient || r.Amount != plan.Minor || r.Currency != "BDT" || r.ProductID != plan.ProductID || !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(r.Username) || !sessionURL(r.URL, r.SessionID) {
+	plan, err := catalog.PlanFor(r.Months)
+	if err != nil {
+		return nil, err
+	}
+	if r.RecipientID != recipient || r.Amount != plan.Minor || r.Currency != strings.ToUpper(plan.Currency) || r.ProductID != plan.ProductID || !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(r.Username) || !sessionURL(r.URL, r.SessionID) {
 		return nil, errors.New("recorded order identity or price mismatch")
 	}
 	if r.Status == "succeeded" {
@@ -117,7 +122,7 @@ func (s *stripeClient) poll(ctx context.Context, r *Record, plan Plan) (string, 
 	if p.SessionID != r.SessionID || !p.Live || p.Sandbox == nil || *p.Sandbox || p.Mode != "payment" || p.SuccessURL != "https://x.com/"+r.Username+"/gift-premium/success" {
 		return "", errors.New("Stripe result session or recipient mismatch")
 	}
-	if (p.Currency != nil && *p.Currency != "bdt") || (p.Amount != nil && *p.Amount != plan.Minor) || (p.AccountID != nil && *p.AccountID != xMerchant) {
+	if (p.Currency != nil && *p.Currency != plan.Currency) || (p.Amount != nil && *p.Amount != plan.Minor) || (p.AccountID != nil && *p.AccountID != plan.Merchant) {
 		return "", errors.New("Stripe result price or merchant mismatch")
 	}
 	if err := s.vault.Put("stripe-result:"+r.SessionID, raw); err != nil {

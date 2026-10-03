@@ -21,7 +21,11 @@ func TestResumeOrderBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer v.Close()
-	base := Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "BDT", ProductID: "prod_EXAMPLE6MO", SessionID: "cs_live_Original123", URL: "https://checkout.stripe.com/z/pay/cs_live_Original123", Status: "created", Created: 123}
+	catalog := `{"merchant":"acct_TESTMERCHANT","currency":"usd","plans":[{"months":3,"amount":30000,"product":"prod_TEST3MO"},{"months":6,"amount":60000,"product":"prod_TEST6MO"}]}`
+	if err := v.Put("catalog", []byte(catalog)); err != nil {
+		t.Fatal(err)
+	}
+	base := Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "USD", ProductID: "prod_TEST6MO", SessionID: "cs_live_Original123", URL: "https://checkout.stripe.com/z/pay/cs_live_Original123", Status: "created", Created: 123}
 	tests := []struct {
 		name        string
 		mutate      func(*Record)

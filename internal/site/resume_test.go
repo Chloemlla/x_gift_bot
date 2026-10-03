@@ -39,7 +39,11 @@ func resumeFixture(t *testing.T, status, ledgerStatus string) *server {
 	if e != nil {
 		t.Fatal(e)
 	}
-	r := checkout.Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "BDT", ProductID: "prod_EXAMPLE6MO", SessionID: "cs_live_Original123", URL: "https://checkout.stripe.com/a/pay/cs_live_Original123", Status: ledgerStatus, Created: 123}
+	catalog := `{"merchant":"acct_TESTMERCHANT","currency":"usd","plans":[{"months":3,"amount":30000,"product":"prod_TEST3MO"},{"months":6,"amount":60000,"product":"prod_TEST6MO"}]}`
+	if e = v.Put("catalog", []byte(catalog)); e != nil {
+		t.Fatal(e)
+	}
+	r := checkout.Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "USD", ProductID: "prod_TEST6MO", SessionID: "cs_live_Original123", URL: "https://checkout.stripe.com/a/pay/cs_live_Original123", Status: ledgerStatus, Created: 123}
 	raw, _ := json.Marshal(r)
 	if e = v.Put("checkout:1234", raw); e != nil {
 		t.Fatal(e)

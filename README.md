@@ -46,7 +46,7 @@ npm run preview
 ### 第二步：构建
 
 ```sh
-git clone https://github.com/<your-org>/x_gift_bot.git
+git clone https://github.com/mizorewww/x_gift_bot.git
 cd x_gift_bot
 npm ci && npm run build        # 构建前端（只需一次，产物已随仓库提交时可跳过）
 go build -o bin/xgift ./cmd/xgift

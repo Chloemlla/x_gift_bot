@@ -15,36 +15,81 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"xgift/internal/proxy"
 	"xgift/internal/vault"
 )
 
 type stripeClient struct {
-	http  *http.Client
-	key   string
-	vault *vault.Vault
+	http       *http.Client
+	key        string
+	vault      *vault.Vault
+	closeRoute func()
 }
 type stripeError struct {
-	Code, Type                string
-	Message, Param, RequestID string
-	HTTP                      int
-	Replayed                  bool
+	Code, Type                            string
+	Message, Param, RequestID             string
+	DeclineCode, AdviceCode               string
+	NetworkDeclineCode, NetworkAdviceCode string
+	HTTP                                  int
+	Replayed                              bool
 }
 
 func (e *stripeError) Error() string {
-	return fmt.Sprintf("Stripe rejected the request (HTTP %d, type=%s, code=%s, param=%s, request=%s): %s", e.HTTP, e.Type, e.Code, e.Param, e.RequestID, e.Message)
+	return fmt.Sprintf("Stripe rejected the request (HTTP %d, type=%s, code=%s, decline=%s, advice=%s, network_decline=%s, network_advice=%s, param=%s, request=%s): %s", e.HTTP, e.Type, e.Code, e.DeclineCode, e.AdviceCode, e.NetworkDeclineCode, e.NetworkAdviceCode, e.Param, e.RequestID, e.Message)
 }
-func newStripe(v *vault.Vault, port int) (*stripeClient, error) {
+
+// Keep only the fields needed to diagnose and verify this payment. Never retain
+// arbitrary error payloads containing payment-method or billing details.
+type stripeIntentEvidence struct {
+	ID, Status, Currency string
+	ClientSecret         string `json:"client_secret"`
+	Live                 bool   `json:"livemode"`
+	Amount               int
+	Received             *int `json:"amount_received"`
+	Capturable           *int `json:"amount_capturable"`
+}
+type stripeAPIError struct {
+	Type, Code, Message, Param string
+	DeclineCode                string                `json:"decline_code"`
+	AdviceCode                 string                `json:"advice_code"`
+	NetworkDeclineCode         string                `json:"network_decline_code"`
+	NetworkAdviceCode          string                `json:"network_advice_code"`
+	Intent                     *stripeIntentEvidence `json:"payment_intent"`
+}
+
+func newStripe(ctx context.Context, v *vault.Vault, recipient string) (*stripeClient, error) {
 	key, e := v.Get("stripe-key")
 	if e != nil {
 		return nil, e
 	}
+	defer clear(key)
 	if !regexp.MustCompile(`^pk_live_[A-Za-z0-9]+$`).Match(key) {
 		return nil, errors.New("invalid Stripe merchant publishable key")
 	}
-	p, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
-	return &stripeClient{http: &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(p), TLSHandshakeTimeout: 15 * time.Second}, Timeout: 35 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("unexpected Stripe API redirect") }}, key: string(key), vault: v}, nil
+	route, e := selectPaymentRoute(v, recipient)
+	if e != nil {
+		return nil, e
+	}
+	// Missing/empty pool is direct; an assigned order never silently falls back.
+	client := &http.Client{Transport: &http.Transport{Proxy: nil, TLSHandshakeTimeout: 15 * time.Second}, Timeout: 35 * time.Second}
+	closeRoute := func() { client.CloseIdleConnections() }
+	if route != nil {
+		client, closeRoute, e = proxy.OpenOutbound(ctx, route.Outbound)
+		clear(route.Outbound)
+		if e != nil {
+			return nil, e
+		}
+	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("unexpected Stripe API redirect") }
+	return &stripeClient{http: client, key: string(key), vault: v, closeRoute: closeRoute}, nil
 }
-func (s *stripeClient) close() { s.http.CloseIdleConnections() }
+func (s *stripeClient) close() {
+	if s.closeRoute != nil {
+		s.closeRoute()
+	} else {
+		s.http.CloseIdleConnections()
+	}
+}
 func (s *stripeClient) call(ctx context.Context, method, path string, form url.Values, idempotency string, out any) error {
 	form.Set("key", s.key)
 	target := "https://api.stripe.com/v1/" + path
@@ -76,16 +121,12 @@ func (s *stripeClient) call(ctx context.Context, method, path string, form url.V
 	}
 	defer clear(raw)
 	var envelope struct {
-		Error *struct{ Type, Code, Message, Param string } `json:"error"`
+		Error *stripeAPIError `json:"error"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return httpFailure(errors.New("Stripe returned non-JSON data"), res.StatusCode, res.Header.Get("Retry-After"))
 	}
 	if envelope.Error != nil {
-		diagnostic, _ := json.Marshal(map[string]any{"http_status": res.StatusCode, "request_id": res.Header.Get("Request-Id"), "idempotent_replayed": res.Header.Get("Idempotent-Replayed"), "path": path, "error": envelope.Error})
-		if err := s.vault.Put("stripe-error:last", diagnostic); err != nil {
-			return errors.New("could not persist Stripe error; order requires inspection")
-		}
 		msg := envelope.Error.Message
 		for name, values := range form {
 			if strings.Contains(name, "card[") || strings.Contains(name, "billing_details") || name == "key" {
@@ -106,7 +147,26 @@ func (s *stripeClient) call(ctx context.Context, method, path string, form url.V
 		if len(msg) > 600 {
 			msg = msg[:600]
 		}
-		return httpFailure(&stripeError{Code: safeErrorField(envelope.Error.Code), Type: safeErrorField(envelope.Error.Type), HTTP: res.StatusCode, Message: msg, Param: safeErrorField(envelope.Error.Param), RequestID: safeErrorField(res.Header.Get("Request-Id")), Replayed: res.Header.Get("Idempotent-Replayed") == "true"}, res.StatusCode, res.Header.Get("Retry-After"))
+		se := &stripeError{Code: safeErrorField(envelope.Error.Code), Type: safeErrorField(envelope.Error.Type), HTTP: res.StatusCode, Message: msg, Param: safeErrorField(envelope.Error.Param), RequestID: safeErrorField(res.Header.Get("Request-Id")), Replayed: res.Header.Get("Idempotent-Replayed") == "true", DeclineCode: safeErrorField(envelope.Error.DeclineCode), AdviceCode: safeErrorField(envelope.Error.AdviceCode), NetworkDeclineCode: safeErrorField(envelope.Error.NetworkDeclineCode), NetworkAdviceCode: safeErrorField(envelope.Error.NetworkAdviceCode)}
+		diagnostic, _ := json.Marshal(map[string]any{"http_status": res.StatusCode, "path": path, "error": se, "observed_at": time.Now().Unix()})
+		defer clear(diagnostic)
+		if err := s.vault.Put("stripe-error:last", diagnostic); err != nil {
+			return errors.New("could not persist Stripe error; order requires inspection")
+		}
+		parts := strings.Split(path, "/")
+		if len(parts) >= 2 && parts[0] == "payment_pages" && sessionPattern.MatchString(parts[1]) {
+			if err := s.vault.Put("stripe-error:"+parts[1], diagnostic); err != nil {
+				return errors.New("could not persist order payment error")
+			}
+			if intent := envelope.Error.Intent; intent != nil && regexp.MustCompile(`^pi_[A-Za-z0-9]+$`).MatchString(intent.ID) && strings.HasPrefix(intent.ClientSecret, intent.ID+"_secret_") {
+				evidence, _ := json.Marshal(intent)
+				defer clear(evidence)
+				if err := s.vault.Put("stripe-intent-evidence:"+parts[1], evidence); err != nil {
+					return errors.New("could not persist payment intent evidence")
+				}
+			}
+		}
+		return httpFailure(se, res.StatusCode, res.Header.Get("Retry-After"))
 	}
 	if res.StatusCode != 200 {
 		return httpFailure(&stripeError{HTTP: res.StatusCode}, res.StatusCode, res.Header.Get("Retry-After"))
@@ -310,6 +370,9 @@ func (s *stripeClient) tokenize(ctx context.Context, r *Record, c card) (string,
 	return pm.ID, nil
 }
 func idempotency(r *Record, operation string) string {
+	if r.ManualRecovery {
+		operation += fmt.Sprintf(":manual:%d", r.RecoveryAttempts)
+	}
 	sum := sha256.Sum256([]byte("xgift-v1:" + operation + ":" + r.SessionID + ":" + r.RecipientID + ":" + strconv.Itoa(r.Months)))
 	return "xgift-" + hex.EncodeToString(sum[:])
 }

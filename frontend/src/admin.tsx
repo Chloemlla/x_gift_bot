@@ -40,6 +40,8 @@ import { adminApi as api, type AdminStats, type Folder } from "./adminApi";
 import { FolderPanel } from "./FolderPanel";
 import { FilterBar } from "./FilterBar";
 import { parseFilter } from "./filter";
+import { CustomerPanel, type RecoverySelection } from "./CustomerPanel";
+import { RecoveryPanel } from "./RecoveryPanel";
 import { StatsPanel } from "./StatsPanel";
 
 type Code = {
@@ -81,6 +83,12 @@ const statuses: Record<
   revoked: { label: "已停用", color: "default" },
 };
 function Admin() {
+  const [customerSelection, setCustomerSelection] = useState<{
+    id: string;
+    seq: number;
+  } | null>(null);
+  const [recoverySelection, setRecoverySelection] =
+    useState<RecoverySelection | null>(null);
   const [listing, setListing] = useState<Listing | null>(null);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState("");
@@ -372,13 +380,20 @@ function Admin() {
               listing
                 ? listing.payments_enabled
                   ? "充值已开放"
-                  : "充值暂停 · 不会付款"
+                  : "用户充值入口已暂停"
                 : "正在获取服务状态"
             }
           />
           <AppearanceMenu />
         </Stack>
       </Stack>
+      <CustomerPanel
+        selected={customerSelection}
+        onPrepare={(id, mode) =>
+          setRecoverySelection({ id, mode, seq: Date.now() })
+        }
+      />
+      <RecoveryPanel selection={recoverySelection} />
       <StatsPanel refreshSignal={statsSignal} />
       <FolderPanel
         folders={listing?.folders ?? []}
@@ -803,6 +818,16 @@ function Admin() {
                   </TableCell>
                   <TableCell onClick={(e) => e.stopPropagation()}>
                     <Stack direction="row" spacing={1}>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        disabled={busy || loading}
+                        onClick={() =>
+                          setCustomerSelection({ id: code.id, seq: Date.now() })
+                        }
+                      >
+                        查看卡密 / 补单
+                      </Button>
                       <Tooltip
                         describeChild
                         title={
@@ -917,7 +942,9 @@ function Admin() {
                   上一页
                 </Button>
                 <Button
-                  disabled={loading || busy || safeFilterPage >= filterPages - 1}
+                  disabled={
+                    loading || busy || safeFilterPage >= filterPages - 1
+                  }
                   onClick={() => setFilterPage(safeFilterPage + 1)}
                   sx={{ px: 1.5 }}
                 >

@@ -39,6 +39,9 @@ func ResumeForRecipient(ctx context.Context, v *vault.Vault, user, recipient str
 	if json.Unmarshal(raw, &r) != nil || r.Username != user || r.RecipientID != recipient || r.Months != months || r.Amount != plan.Minor || r.Currency != strings.ToUpper(plan.Currency) || r.ProductID != plan.ProductID {
 		return nil, errors.New("bound order identity or plan mismatch")
 	}
+	if IsPaymentDeclined(&r) {
+		return &r, ErrPaymentDeclined
+	}
 	if r.Status == "succeeded" || r.Status == "submitting" || r.Status == "unknown" || r.Status == "requires_action" {
 		return Reconcile(ctx, v, recipient, port)
 	}

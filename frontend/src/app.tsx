@@ -38,6 +38,7 @@ type Result = {
   progress?: number;
   months?: number;
   rechecking?: boolean;
+  payment_declined?: boolean;
 };
 type Input = { code: string; username: string };
 const steps = ["核对账号", "核验订单", "付款处理", "兑换完成"];
@@ -50,6 +51,7 @@ function App() {
   >("loading");
   const [busy, setBusy] = useState(false);
   const [confirmation, setConfirmation] = useState(false);
+  const [pauseNotice, setPauseNotice] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const [severity, setSeverity] = useState<
     "info" | "success" | "warning" | "error"
@@ -77,7 +79,8 @@ function App() {
 
   useEffect(() => {
     const health = new AbortController();
-    request<{ payments_enabled: boolean }>(
+    const refreshService = () =>
+      request<{ payments_enabled: boolean }>(
       "/healthz",
       undefined,
       AbortSignal.any([health.signal, AbortSignal.timeout(10000)]),
@@ -90,12 +93,22 @@ function App() {
       .catch(() => {
         if (!health.signal.aborted) setService("unknown");
       });
+    void refreshService();
+    const refreshTimer = setInterval(refreshService, 30000);
+    window.addEventListener("focus", refreshService);
     return () => {
       health.abort();
+      clearInterval(refreshTimer);
+      window.removeEventListener("focus", refreshService);
       clearTimeout(timer.current);
       controller.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    setPauseNotice(service === "paused");
+    if (service !== "enabled") setConfirmation(false);
+  }, [service]);
 
   function finish() {
     inFlight.current = false;
@@ -112,6 +125,7 @@ function App() {
     );
   }
   function apply(ok: boolean, data: Result) {
+    if (data.status === "paused") setService("paused");
     setResult({
       ...data,
       message:
@@ -131,7 +145,10 @@ function App() {
             ? "warning"
             : "info",
     );
-    if (["processing", "review", "succeeded"].includes(data.status ?? "")) {
+    if (data.payment_declined) {
+      setProgress(null);
+      setLocked(false);
+    } else if (["processing", "review", "succeeded"].includes(data.status ?? "")) {
       setLocked(data.status !== "review");
       setProgress((previous) =>
         data.status === "succeeded"
@@ -212,6 +229,7 @@ function App() {
   }
   async function redeem() {
     setConfirmation(false);
+    if (service !== "enabled" || result?.payment_declined) return;
     if (!start()) return;
     setResult({ status: "processing", message: "正在核实 X 账号和赠送资格…" });
     try {
@@ -297,8 +315,8 @@ function App() {
           输入兑换码和 X 用户名，套餐时长以兑换码为准。
         </Typography>
         {service === "paused" && (
-          <Alert severity="info" sx={{ mb: 3 }}>
-            充值暂未开放。你可以先核实赠送资格，兑换码不会被使用。
+          <Alert severity="warning" sx={{ mb: 3 }}>
+            充值暂时暂停，恢复时间待定。请保留兑换码，已有订单仍可查询进度。
           </Alert>
         )}
         {service === "unknown" && (
@@ -311,7 +329,8 @@ function App() {
           ref={form}
           onSubmit={(event) => {
             event.preventDefault();
-            if (valid() && !locked && !busy) setConfirmation(true);
+            if (service === "enabled" && !result?.payment_declined && valid() && !locked && !busy)
+              setConfirmation(true);
           }}
           noValidate
         >
@@ -395,15 +414,17 @@ function App() {
               type="submit"
               variant="contained"
               size="large"
-              disabled={busy || locked || service === "loading"}
+              disabled={busy || locked || service !== "enabled" || result?.payment_declined}
               endIcon={<ArrowForwardRounded />}
             >
-              {busy
-                ? "正在处理，请稍候"
-                : locked
-                  ? "请查询原订单进度"
-                  : service === "paused"
-                    ? "核实赠送资格"
+              {service === "paused"
+                ? "充值已暂停"
+                : result?.payment_declined
+                  ? "付款被拒，请联系管理员"
+                : busy
+                  ? "正在处理，请稍候"
+                  : locked
+                    ? "请查询原订单进度"
                     : result?.status === "review"
                       ? "重新检查并继续兑换"
                       : "兑换 Premium"}
@@ -590,6 +611,32 @@ function App() {
         ))}
       </Box>
       <Dialog
+        open={pauseNotice && service === "paused"}
+        onClose={() => setPauseNotice(false)}
+        aria-labelledby="pause-dialog-title"
+        aria-describedby="pause-dialog-description"
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle id="pause-dialog-title">充值暂时暂停</DialogTitle>
+        <DialogContent>
+          <DialogContentText id="pause-dialog-description">
+            当前充值服务暂时不可用，正在处理中，恢复时间待定。
+            暂停期间无法提交新的兑换，请保留兑换码。
+            已提交的订单可继续查询进度，请勿重复提交。
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            variant="contained"
+            onClick={() => setPauseNotice(false)}
+            autoFocus
+          >
+            我知道了
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
         open={confirmation}
         onClose={() => setConfirmation(false)}
         aria-labelledby="redeem-dialog-title"
@@ -597,28 +644,28 @@ function App() {
         maxWidth="xs"
       >
         <DialogTitle id="redeem-dialog-title">
-          {service === "paused"
-            ? "核实这个账号的赠送资格？"
-            : result?.status === "review"
-              ? "重新检查并继续这笔兑换？"
-              : "确认接收 Premium 的账号"}
+          {result?.status === "review"
+            ? "重新检查并继续这笔兑换？"
+            : "确认接收 Premium 的账号"}
         </DialogTitle>
         <DialogContent>
           <DialogContentText>
             接收账号为 <strong>@{cleanUser}</strong>。
-            {service === "paused"
-              ? "服务暂停期间只核实资格，兑换码不会使用。"
-              : result?.status === "review"
-                ? "将重新核对账号资格和原订单；符合条件且尚未付款时继续付款，已提交过付款的订单只核实结果。"
-                : "提交后将开始兑换，具体时长以兑换码为准。赠送成功后无法更换账号。"}
+            {result?.status === "review"
+              ? "将重新核对账号资格和原订单；符合条件且尚未付款时继续付款，已提交过付款的订单只核实结果。"
+              : "提交后将开始兑换，具体时长以兑换码为准。赠送成功后无法更换账号。"}
           </DialogContentText>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setConfirmation(false)} autoFocus>
             返回核对
           </Button>
-          <Button variant="contained" onClick={() => void redeem()}>
-            {service === "paused" ? "确认核实" : "确认兑换"}
+          <Button
+            variant="contained"
+            disabled={service !== "enabled"}
+            onClick={() => void redeem()}
+          >
+            确认兑换
           </Button>
         </DialogActions>
       </Dialog>

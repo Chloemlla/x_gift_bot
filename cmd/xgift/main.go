@@ -72,7 +72,7 @@ func run() error {
 	pay := f.Bool("pay", false, "pay only at the exact catalog plan total")
 	name := f.String("name", "", "secret name for put")
 	f.Usage = func() {
-		fmt.Fprintln(f.Output(), "Usage: xgift <setup|init|status|billing|import-chrome|put|proxy|check|username> [flags]\nsetup is the interactive first-time wizard; init reads a JSON object from stdin; put reads one JSON value from stdin (stripe-key: the raw pk_live_ key; catalog: merchant/plan catalog JSON).")
+		fmt.Fprintln(f.Output(), "Usage: xgift <setup|init|status|billing|import-chrome|put|proxy|check|check-payment-outbounds|resume-payments|username> [flags]\nsetup is the interactive first-time wizard; init reads a JSON object from stdin; put reads one JSON value from stdin (stripe-key: the raw pk_live_ key; catalog: merchant/plan catalog JSON; payment-outbounds: an outbound array). check-payment-outbounds probes public endpoints without paying.")
 		f.PrintDefaults()
 	}
 	if err := f.Parse(rest); err != nil {
@@ -146,6 +146,36 @@ func run() error {
 	}
 	defer v.Close()
 	switch command {
+	case "check-payment-outbounds":
+		failed := false
+		enc := json.NewEncoder(os.Stdout)
+		if err := checkout.ProbePaymentOutbounds(context.Background(), v, func(result checkout.PaymentNodeProbe) {
+			enc.Encode(result)
+			if !result.Healthy {
+				failed = true
+			}
+		}); err != nil {
+			return err
+		}
+		if failed {
+			return errors.New("one or more payment outbounds could not reach Stripe; no payment submitted")
+		}
+		return nil
+	case "resume-payments":
+		lock, e := os.OpenFile(filepath.Join(filepath.Dir(*db), "checkout.lock"), os.O_CREATE|os.O_RDWR, 0600)
+		if e != nil {
+			return e
+		}
+		defer lock.Close()
+		if e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); e != nil {
+			return errors.New("another checkout is running")
+		}
+		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		if e = checkout.ResetPaymentPause(v); e != nil {
+			return e
+		}
+		fmt.Println("Automatic payment pause cleared; payment spacing remains enforced.")
+		return nil
 	case "billing":
 		raw, e := v.Get("card")
 		if e != nil {
@@ -229,6 +259,22 @@ func run() error {
 		return nil
 	case "put":
 		switch *name {
+		case "payment-outbounds":
+			b, e := io.ReadAll(io.LimitReader(os.Stdin, (1<<20)+1))
+			if e != nil {
+				return e
+			}
+			defer clear(b)
+			nodes, e := proxy.ParseOutboundPool(b)
+			if e != nil {
+				return e
+			}
+			// Updating the pool never edits existing per-order node bindings.
+			if e = v.Put(*name, b); e != nil {
+				return e
+			}
+			fmt.Printf("Payment outbound pool saved: %d nodes; existing order bindings retained\n", len(nodes))
+			return nil
 		case "proxy", "card", "cookies", "api-auth":
 			b, e := io.ReadAll(io.LimitReader(os.Stdin, 1024*1024))
 			if e != nil {
@@ -261,7 +307,7 @@ func run() error {
 			}
 			return v.Put(*name, b)
 		default:
-			return errors.New("--name must be proxy, card, cookies, api-auth, stripe-key or catalog")
+			return errors.New("--name must be proxy, payment-outbounds, card, cookies, api-auth, stripe-key or catalog")
 		}
 	}
 	if command != "proxy" && command != "check" && !regexp.MustCompile(`^@?[A-Za-z0-9_]{1,15}$`).MatchString(command) {

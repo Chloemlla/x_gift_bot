@@ -40,18 +40,19 @@ var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{1,15}$`)
 var codePattern = regexp.MustCompile(`^XG-[A-F0-9]{48}$`)
 
 type server struct {
-	db        *sql.DB
-	vault     *vault.Vault
-	origin    string
-	adminHash [32]byte
-	payments  bool
-	port      int
-	lockPath  string
-	work      chan struct{}
-	jobs      sync.WaitGroup
-	ctx       context.Context
-	limitsMu  sync.Mutex
-	limits    map[string]limit
+	db         *sql.DB
+	vault      *vault.Vault
+	origin     string
+	adminHash  [32]byte
+	payments   bool
+	port       int
+	lockPath   string
+	work       chan struct{}
+	jobs       sync.WaitGroup
+	ctx        context.Context
+	recoveryMu sync.Mutex
+	limitsMu   sync.Mutex
+	limits     map[string]limit
 }
 type limit struct {
 	start time.Time
@@ -114,6 +115,10 @@ func Run(ctx context.Context) error {
 		return err
 	}
 	s.vault = v
+	if err = s.initRecovery(); err != nil {
+		v.Close()
+		return err
+	}
 	defer v.Close()
 	if s.payments {
 		if err = checkout.CheckPaymentConfiguration(v); err != nil {
@@ -210,7 +215,12 @@ func Run(ctx context.Context) error {
 			reply(w, 503, map[string]any{"ok": false})
 			return
 		}
-		reply(w, 200, map[string]any{"ok": true, "payments_enabled": s.payments})
+		ready, err := s.paymentsAvailable()
+		if err != nil {
+			reply(w, 503, map[string]any{"ok": false, "payments_enabled": false})
+			return
+		}
+		reply(w, 200, map[string]any{"ok": true, "payments_enabled": ready})
 	})
 	mux.HandleFunc("POST /api/redeem", s.redeem)
 	mux.HandleFunc("POST /api/status", s.status)
@@ -219,6 +229,11 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("GET /admin.js", s.admin(s.asset("admin.js", "application/javascript; charset=utf-8")))
 	mux.HandleFunc("GET /api/admin/codes", s.admin(s.list))
 	mux.HandleFunc("GET /api/admin/stats", s.admin(s.stats))
+	mux.HandleFunc("GET /api/admin/customer", s.admin(s.customerOrder))
+	mux.HandleFunc("GET /api/admin/recovery", s.admin(s.recoveryStatus))
+	mux.HandleFunc("POST /api/admin/recovery/preview", s.admin(s.recoveryPreview))
+	mux.HandleFunc("POST /api/admin/recovery/start", s.admin(s.recoveryStart))
+	mux.HandleFunc("POST /api/admin/recovery/stop", s.admin(s.recoveryStop))
 	mux.HandleFunc("POST /api/admin/codes", s.admin(s.generate))
 	mux.HandleFunc("POST /api/admin/revoke", s.admin(s.revoke))
 	mux.HandleFunc("POST /api/admin/folders", s.admin(s.createFolder))
@@ -459,8 +474,9 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	if c.Status == "review" {
 		s.reconcileStatus(r.Context(), &c)
 	}
-	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message, "progress": c.Progress, "rechecking": s.autoChecking(&c)})
+	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message, "progress": c.Progress, "rechecking": s.autoChecking(&c), "payment_declined": s.paymentDeclined(&c)})
 }
+
 // eligibilityCheck is the read-only X pre-check; tests substitute a fake.
 var eligibilityCheck = checkout.Eligibility
 
@@ -503,6 +519,11 @@ func (s *server) check(w http.ResponseWriter, r *http.Request) {
 	reply(w, 200, map[string]any{"eligible": true, "message": "该账号当前可以接收赠送。"})
 }
 func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
+	ready, availabilityErr := s.paymentsAvailable()
+	if !ready || availabilityErr != nil {
+		reply(w, http.StatusServiceUnavailable, map[string]any{"status": "paused", "message": "充值暂时暂停，恢复时间待定。请保留兑换码，已有订单可继续查询进度。"})
+		return
+	}
 	code, user, ok := readInput(w, r)
 	if !ok {
 		return
@@ -553,14 +574,6 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-	}
-	if !s.payments {
-		if resuming {
-			reply(w, 503, map[string]any{"status": "review", "months": c.Months, "progress": c.Progress, "message": "充值服务暂未开放，原订单已保留，请稍后重新检查并继续兑换。"})
-		} else {
-			reply(w, 503, map[string]any{"status": "paused", "eligible": true, "months": c.Months, "message": "这个账号可以接收赠送，但充值服务暂未开放。兑换码未使用，请稍后再来。"})
-		}
-		return
 	}
 	// The same lock is used by the CLI. Keep it until the final database write.
 	lock, e := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
@@ -658,6 +671,12 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		}
 		if record != nil && record.Status == "requires_action" {
 			msg = "付款需要持卡人完成银行验证，请联系管理员。请勿重复兑换。"
+		}
+		if checkout.IsPaymentDeclined(record) {
+			msg = "付款被支付机构拒绝，本次兑换未完成。请联系管理员处理，请勿重复提交。"
+		}
+		if errors.Is(err, checkout.ErrPaymentPaused) {
+			msg = "充值已自动暂停，原订单已保留。请联系管理员处理付款方式。"
 		}
 		updated, e := s.db.Exec("UPDATE codes SET status=?,message=?,updated=?,progress=CASE WHEN ?='succeeded' THEN 100 ELSE progress END WHERE id=? AND status='processing'", status, msg, time.Now().Unix(), status, c.ID)
 		if e != nil {

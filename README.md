@@ -77,6 +77,8 @@ npm run audit:ui -- --url http://127.0.0.1:4173/admin --runs 1
 
 用户填写兑换码和用户名，系统先以只读请求核实 X 是否允许赠送。X 不允许时明确提示，兑换码不使用；服务暂停或查询失败也不消耗兑换码。付款会原子锁定兑换码和收件人，使用同一订单校验流程；只有 Stripe 确认成功后才显示完成。付款确认只发一次；结果不明时后台继续只读核实，不重新付款。重启后也只恢复结果查询。点击「查询兑换进度」会对待核实订单执行只读结果查询；若确认已成功，自动修复账本和兑换码状态，不再次扣款。
 
+待核实订单允许用户使用原兑换码和绑定用户名，主动点击「重新检查并继续兑换」。尚无付款提交证据的原订单会重新核对 X 身份、资格、套餐以及 Stripe 金额、商户、商品和未付款状态，已有有效 session 时复用原链接继续付款。已提交、结果未知或需要银行验证的订单只查询原付款结果；查询接口、后台任务和页面轮询不会触发新付款。兑换码不能换绑其他账号；过期链接和缺少安全恢复条件的创建记录仍停止处理。首次建单前未通过资格检查的未使用码仍可换账号，已绑定的待核实码保留原绑定。
+
 后台使用 HTTPS Basic Auth，用户名 `admin`，随机密码从权限为 `0600` 的文件读取。支持：
 
 - 每批 1–500 枚兑换码，绑定 3 或 6 个月，可自定义批次名称。
@@ -111,7 +113,9 @@ npm run audit:ui -- --url http://127.0.0.1:4173/admin --runs 1
 | `/etc/xgift/site.env` | 服务配置，生产站点 `XGIFT_PAYMENTS_ENABLED=true`，模板默认关闭 |
 | `/etc/caddy/conf.d/xp.example.com.caddy` | 本站反向代理 |
 
-配置模板在 `deploy/`。程序仅允许绑定回环 IP；Caddy 覆盖 `X-Real-IP`。`xp.example.com` 的 A 记录已开启 Cloudflare 代理（橙云），源站保留 Caddy HTTPS。仅当 TCP 来源属于 Cloudflare 官方 IP 段时使用 `CF-Connecting-IP`，直连请求仍使用实际来源 IP，避免伪造请求头绕过限流。IP 段来自 `https://www.cloudflare.com/ips-v4` 和 `https://www.cloudflare.com/ips-v6`，更新时须同步 `deploy/Caddyfile`。兑换、查询与后台响应维持 `Cache-Control: no-store`，不缓存订单或管理数据。
+配置模板在 `deploy/`。程序仅允许绑定回环 IP；Caddy 覆盖 `X-Real-IP`。`xp.example.com` 的 A 记录已开启 Cloudflare 代理（橙云），源站保留 Caddy HTTPS。本站 HTTP/HTTPS 入口仅接受 TCP 来源属于 Cloudflare 官方 IP 段且带有 `CF-Connecting-IP` 的请求；其他来源统一返回 403，不转发到应用。来源匹配使用 `remote_ip`，不能通过伪造 `CF-Connecting-IP`、`X-Real-IP` 或 `X-Forwarded-For` 获得访问权限。IP 段来自 `https://www.cloudflare.com/ips-v4` 和 `https://www.cloudflare.com/ips-v6`，更新时须同步 `deploy/Caddyfile` 及线上配置。此限制仅作用于本站，其他同机站点不受影响；本机运维健康检查使用 `http://127.0.0.1:8787/healthz`。兑换、查询与后台响应维持 `Cache-Control: no-store`，不缓存订单或管理数据。
+
+2026-10-02 19:54（UTC+8）已部署 Cloudflare 回源白名单，核对官方 IPv4 15 段、IPv6 7 段。配置备份位于 `/var/backups/xgift/cloudflare-only-20261002T115405Z`。完整 Caddy 配置校验通过后热加载；14 项低频访问检查通过，包括 CDN 首页/健康/静态资源、后台鉴权、HTTP/HTTPS 直连拒绝以及伪造转发头拒绝。其他站点配置摘要和付款服务 PID 保持不变，充值开关保持开启，未发起付款。验证记录：`.artifacts/security-audit/cloudflare-only-verification.json`。白名单是静态快照，Cloudflare 官方网段更新时需复核并同步。
 
 ```sh
 ssh example-server 'sudo systemctl status xgift --no-pager'
@@ -146,7 +150,7 @@ X 建单请求在发送前建立加密审计，记录固定操作与接收人/�
 
 ## 临时故障自动恢复
 
-- X 的只读请求、Stripe 结账初始化、付款方式创建遇临时传输/读取故障、429 或 5xx 时最多尝试 3 次，退避等待可取消并尊重不超过 60 秒的 Retry-After。已知永久 4xx、业务拒绝、金额/商品/身份校验失败及审计失败不自动重试。
+- X 的只读请求、Stripe 结账初始化、付款方式创建遇临时传输/读取故障、429 或 5xx 时最多尝试 3 次，退避等待可取消并尊重不超过 60 秒的 Retry-After。X 只读查询的 HTTP 403 也在同一预算内重试（默认等待 2 秒、4 秒），不改变凭据或代理；此例外不适用于 X 建单或 Stripe 请求。401、其他不可恢复 4xx、明确业务拒绝、金额/商品/身份校验失败及审计失败不自动重试。X 查询失败响应、阶段、HTTP 状态和请求标识加密保存，响应正文最多保留 32 KiB，不保存请求认证头。
 - X 建单每次 POST 前持久化创建次数并清除恢复许可；只有已完成审计的临时失败才允许继续，最多 3 次，总次数不因重启或再次调用清零。响应丢失可能留下未使用的外部未付款 session，本站只选择并保存一个有效 session 进入付款。
 - 已保存 session 复用原单；付款方式的重试使用同一表单与幂等键。Stripe 付款确认请求从不套重试包装，确认失败或超时后仅查询。
 - 整个兑换任务最长 240 秒，重试时进度不回退。后台每 30 秒最多检查一条最近 24 小时的待核实记录，单次 8 秒超时，服从同一订单锁；浏览器关闭也继续只读核实，成功自动回写原兑换码。未提交付款的失败不会被后台查询任务自动转成新扣款。
@@ -157,3 +161,13 @@ X 建单请求在发送前建立加密审计，记录固定操作与接收人/�
 2026-10-02 后续修正（19:30 UTC+8 已部署）：批次与文件夹合并为同一概念，并支持列表点击复制加密保存的新码。隔离 SQLite/vault 验证覆盖迁移重复执行、同名批次合并、改名/移动同步、重新打开 vault 后复制、历史码不可恢复、分页和权限检查。浏览器验证覆盖刷新后整行复制、键盘复制，以及停用/勾选不误复制。批次导航固定高度并支持横向滚动，避免异步加载导致内容跳动；后台 Lighthouse 深色连续两轮 98，CLS 约 0.0007，浅色 98，其余三项均为 100；SSH 恢复后已部署至 `/home/operator/xgift-releases/release-20261002-batches-WtRlXw`，切换前备份位于 `/var/backups/xgift/20261002T113011Z`。原有 24 枚兑换码已按原批次归入 5 个文件夹，状态保持可使用 16、已停用 3、已完成 5；批次名称与分类一致性、后台认证、静态资源一致性、gzip、CSP 及公网健康检查均通过，充值配置保持开启。未生成生产测试兑换码或提交付款。
 
 2026-10-02 19:33（UTC+8）按用户提供的 20 枚兑换码白名单完成生产清理：逐一摘要匹配后保留这 20 条，删除其余 4 条测试兑换码及无内容批次。保留记录的批次、状态、接收账号和时间等元数据均未改变，当前可使用 16、已完成 4。完整兑换码补存至现有加密 vault，逐条通过后台复制接口核验 20/20 与输入一致；未将明文写入 Git 或操作日志，已删除本地临时输入。备份位于 `/var/backups/xgift/20261002T113306Z-retain20`，公网健康检查正常，充值保持开启。
+
+2026-10-02 19:47（UTC+8）已部署 Stripe checkout 路径兼容修复：严格接受 `/f/pay/<同一正式环境 session>`，保留原 `/g/pay/`、`/c/pay/` 及域名、协议、身份限制。建单错误区分状态、session ID、URL 校验原因。新增 15 项链接兼容与安全边界回归用例，`go test ./...` 与 checkout 静态检查通过。发布目录 `/home/operator/xgift-releases/release-20261002-checkout-path`；部署备份 `/var/backups/xgift/20261002T114734Z-checkout-path`；二进制哈希、服务与内外网健康检查通过。
+
+同次处理 `user-c` 的 6 个月订单：原 X 建单返回 HTTP 200 / Unpaid，但 `/f/pay/` 链接被旧校验拒绝。用户授权再次尝试付款后，核对加密审计中的账号、商品、回调和原 session，并以 Stripe 实时 guard 确认 open / unpaid、600 BDT、PaymentIntent 明确为 null，随后恢复同一 session 至 created。正常付款流程被 X 当前明确的 `premium_gifting_eligible=false` 拦住，未提交付款；复核原 Stripe session 仍未付款。网站保持 review 并更新资格提示，未强制成功或绕过资格检查。恢复证据和资格响应保存在加密 vault；一次性工具已删除。恢复前备份 `/var/backups/xgift/20261002T114518Z-user-c-recovery`。X 资格变化原因尚不明确，不能据此推断账号已经充值。
+
+2026-10-02 19:50（UTC+8）按用户要求将 checkout 路径统一为 `/[A-Za-z]/pay/<同一正式环境 session>`，接受任意单个大小写英文字母，不再逐个维护路径白名单；保留 HTTPS、精确域名、无凭据、无查询参数及 session 一致性校验。回归验证覆盖全部 52 个字母及多字母、数字、符号、非 ASCII、错误操作等拒绝场景。测试、checkout 静态检查、线上二进制一致性与内外网健康检查通过。发布目录 `/home/operator/xgift-releases/release-20261002-checkout-letter`，备份 `/var/backups/xgift/20261002T115034Z-checkout-letter`。本次仅更新程序，未提交付款。
+
+2026-10-02 20:03（UTC+8）已部署待核实订单主动恢复：同一码、同一绑定账号再次提交时，以订单锁和条件更新切换到 processing；未提交付款的原订单重新完整核验并复用有效 session，已提交订单仅只读对账。前端待核实状态提供「重新检查并继续兑换」及付款说明，查询仍不付款。新增恢复状态、身份/金额、提交证据、锁冲突、暂停、处理中和只读查询测试；本地与服务器竞态测试通过，Go 静态检查及前端构建通过，隔离浏览器验证首次失败→主动恢复→模拟成功和手机布局。生产服务、二进制及公网前端哈希核验通过。发布目录 `/home/operator/xgift-releases/release-20261002-resume-review`；备份 `/var/backups/xgift/20261002T120324Z-resume-review`。本次未提交真实付款，user-c 原码仍为 review，等待用户主动重新提交。
+
+2026-10-02 22:38（UTC+8）复查 user-d 的 22:30 失败：建单前 PremiumGiftingQuery 返回 403，旧策略未重试；稍后只读查询恢复，用户授权重新提交后于 22:34:53 完成 6 个月付款，原码 succeeded / 100%。已部署只读 X 查询 403 的有限重试、加密失败诊断及明确恢复提示；不扩大 X 建单和 Stripe 确认重试。模拟测试覆盖 403→成功、持续 403 三次后停止、401/建单403不重试、长 Retry-After 停止、业务资格拒绝不重试和失败诊断留存；本地/服务器竞态测试、静态检查、服务与内外网健康检查通过，未提交测试付款。发布目录 `/home/operator/xgift-releases/release-20261002-query-recovery`，备份 `/var/backups/xgift/20261002T143845Z-query-recovery`。

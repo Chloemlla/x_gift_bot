@@ -232,6 +232,8 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/admin/lookup", s.admin(s.lookup))
 	mux.HandleFunc("GET /api/admin/stats", s.admin(s.stats))
 	mux.HandleFunc("GET /api/admin/customer", s.admin(s.customerOrder))
+	mux.HandleFunc("GET /api/admin/manual-link/plans", s.admin(s.manualLinkPlans))
+	mux.HandleFunc("POST /api/admin/manual-link", s.admin(s.manualLink))
 	mux.HandleFunc("GET /api/admin/recovery", s.admin(s.recoveryStatus))
 	mux.HandleFunc("POST /api/admin/recovery/preview", s.admin(s.recoveryPreview))
 	mux.HandleFunc("POST /api/admin/recovery/start", s.admin(s.recoveryStart))

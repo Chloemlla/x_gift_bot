@@ -51,6 +51,7 @@ import { CustomerPanel, type RecoverySelection } from "./CustomerPanel";
 import { LookupPanel } from "./LookupPanel";
 import { RecoveryPanel } from "./RecoveryPanel";
 import { StatsPanel } from "./StatsPanel";
+import { ManualPaymentPanel } from "./ManualPaymentPanel";
 
 type Code = AdminCode;
 type Listing = {
@@ -415,6 +416,7 @@ function Admin() {
           onRevoke={(code) => setConfirmation({ kind: "revoke", code })}
         />
       </Box>
+      <ManualPaymentPanel />
       <RecoveryPanel selection={recoverySelection} />
       <StatsPanel refreshSignal={statsSignal} />
       <FolderPanel

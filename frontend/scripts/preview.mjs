@@ -74,6 +74,10 @@ createServer(async (req, res) => {
       res.end(data);
       return;
     }
+    if (req.method === "GET" && url.pathname === "/api/admin/manual-link/plans") {
+      json(200, { plans: [{months: 3, amount: 30000, currency: "BDT"}, {months: 6, amount: 60000, currency: "BDT"}] });
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/healthz") {
       json(200, { ok: true, payments_enabled: !paused });
       return;
@@ -239,6 +243,16 @@ createServer(async (req, res) => {
       }
     }
     const body = JSON.parse(raw);
+    if (url.pathname === "/api/admin/manual-link") {
+      if (![3, 6].includes(body.months) || !/^[a-z0-9_]{1,15}$/.test(body.username || "")) {
+        json(400, {message: "请填写正确用户名和套餐。"}); return;
+      }
+      if (body.username === "expired_demo" && !body.verified_unpaid) {
+        json(409, {message: "原付款链接已失效，请核实原订单未付款后再重新生成。", needs_unpaid_verification: true}); return;
+      }
+      json(200, {username: body.username, months: body.months, amount: body.months === 3 ? 30000 : 60000, currency: "BDT", status: "created", checkout_url: "https://checkout.stripe.com/c/pay/cs_test_ManualPreviewOnly"});
+      return;
+    }
     if (url.pathname.startsWith("/api/admin/recovery/")) {
       json(503, { message: "本地模拟预览不提供补单操作。" });
       return;

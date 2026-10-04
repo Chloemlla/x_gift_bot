@@ -131,7 +131,7 @@ func prepareRecoveryLink(ctx context.Context, v *vault.Vault, r *Record, s *stri
 				if err = markAuthenticationRequired(v, r); err != nil {
 					return r, err
 				}
-				return r, errors.New("bank authentication required")
+				return r, ErrPaymentActionRequired
 			}
 			if !IsPaymentDeclined(r) {
 				return r, errors.New("original payment outcome is unknown")

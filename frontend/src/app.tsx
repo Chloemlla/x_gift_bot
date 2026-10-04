@@ -29,6 +29,7 @@ import ShieldOutlined from "@mui/icons-material/ShieldOutlined";
 import HistoryRounded from "@mui/icons-material/HistoryRounded";
 import { mount, request, Shell } from "./shared";
 import { AppearanceMenu } from "./AppearanceMenu";
+import { ManualPaymentPanel } from "./ManualPaymentPanel";
 import { EligibilityCard } from "./EligibilityCard";
 
 type Result = {
@@ -604,6 +605,14 @@ function App() {
             </AccordionDetails>
           </Accordion>
         ))}
+        <Accordion disableGutters slotProps={{ transition: { unmountOnExit: true } }} sx={{ bgcolor: "transparent", borderBottom: 1, borderColor: "divider", "&:before": { display: "none" } }}>
+          <AccordionSummary expandIcon={<ExpandMoreRounded />} id="faq-manual-link" aria-controls="faq-manual-link-content" sx={{ px: 0, minHeight: 64 }}>
+            <Typography fontWeight={500}>没有兑换码，可以为某个用户生成 Stripe 付款链接吗？</Typography>
+          </AccordionSummary>
+          <AccordionDetails id="faq-manual-link-content" sx={{ px: 0, pb: 3 }}>
+            <ManualPaymentPanel publicMode />
+          </AccordionDetails>
+        </Accordion>
       </Box>
       <Dialog
         open={pauseNotice && service === "paused"}

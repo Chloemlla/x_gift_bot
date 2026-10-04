@@ -55,3 +55,21 @@ func manualLinkJSONRequest(body string) *http.Request {
 	r.Header.Set("Content-Type", "application/json")
 	return r
 }
+
+func TestPublicLinkCookieBoundary(t *testing.T) {
+	s := resumeFixture(t, "review", "created")
+	w := httptest.NewRecorder()
+	s.publicLink(w, manualLinkJSONRequest(`{"username":"recipient","months":6,"verified_unpaid":true}`))
+	if w.Code != 400 {
+		t.Fatal("missing owner cookie allowed", w.Code)
+	}
+	w = httptest.NewRecorder()
+	s.publicLinkPlans(w, httptest.NewRequest("GET", "https://example.test/api/manual-link/plans", nil))
+	if w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "__Host-xgift-link" || !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode || len(cookies[0].Value) != 64 {
+		t.Fatal("unsafe ownership cookie")
+	}
+}

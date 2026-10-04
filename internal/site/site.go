@@ -224,6 +224,8 @@ func Run(ctx context.Context) error {
 		reply(w, 200, map[string]any{"ok": true, "payments_enabled": ready})
 	})
 	mux.HandleFunc("POST /api/redeem", s.redeem)
+	mux.HandleFunc("GET /api/manual-link/plans", s.publicLinkPlans)
+	mux.HandleFunc("POST /api/manual-link", s.publicLink)
 	mux.HandleFunc("POST /api/status", s.status)
 	mux.HandleFunc("POST /api/check", s.check)
 	mux.HandleFunc("GET /admin", s.admin(s.asset("admin.html", "text/html; charset=utf-8")))
@@ -419,6 +421,9 @@ func (s *server) middleware(next http.Handler) http.Handler {
 			if r.URL.Path == "/api/redeem" {
 				max = 8
 				bucket = "redeem:"
+			} else if r.URL.Path == "/api/manual-link" {
+				max = 4
+				bucket = "manual-link:"
 			} else if r.URL.Path == "/api/check" {
 				max = 8
 				bucket = "check:"

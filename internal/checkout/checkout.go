@@ -101,6 +101,13 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	if expectedRecipient != "" && recipient != expectedRecipient {
 		return nil, errors.New("recipient identity changed; refusing to create or pay an order")
 	}
+	// Public manual checkouts must never be taken over by saved-card payment.
+	if raw, err := v.Get("public-checkout:" + recipient); err == nil {
+		clear(raw)
+		return nil, ErrPublicLinkConflict
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
 	// Fail closed on legacy records rather than silently bypassing an earlier attempt.
 	if _, e = v.Get("checkout:" + user); e == nil {
 		return nil, errors.New("legacy checkout requires migration before creating another order")

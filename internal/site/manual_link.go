@@ -2,9 +2,12 @@ package site
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -29,7 +32,29 @@ func (s *server) manualLinkPlans(w http.ResponseWriter, r *http.Request) {
 	reply(w, 200, map[string]any{"plans": plans})
 }
 
+func (s *server) publicLinkPlans(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie("__Host-xgift-link"); err != nil || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(c.Value) {
+		var b [32]byte
+		if _, err = rand.Read(b[:]); err != nil {
+			message(w, 503, "请稍后重试。")
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "__Host-xgift-link", Value: hex.EncodeToString(b[:]), Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 30 * 24 * 60 * 60})
+	}
+	s.manualLinkPlans(w, r)
+}
+func (s *server) publicLink(w http.ResponseWriter, r *http.Request) {
+	c, err := r.Cookie("__Host-xgift-link")
+	if err != nil || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(c.Value) {
+		message(w, 400, "请刷新页面后重新生成链接。")
+		return
+	}
+	s.generateManualLink(w, r, c.Value)
+}
 func (s *server) manualLink(w http.ResponseWriter, r *http.Request) {
+	s.generateManualLink(w, r, "")
+}
+func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publicOwner string) {
 	var q struct {
 		Username       string `json:"username"`
 		Months         int    `json:"months"`
@@ -72,9 +97,16 @@ func (s *server) manualLink(w http.ResponseWriter, r *http.Request) {
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	ctx, cancel := context.WithTimeout(r.Context(), 110*time.Second)
 	defer cancel()
-	record, err := checkout.ManualLinkForUsername(ctx, s.vault, q.Username, s.port, q.Months, q.VerifiedUnpaid)
+	var record *checkout.Record
+	if publicOwner != "" {
+		record, err = checkout.PublicLinkForUsername(ctx, s.vault, q.Username, publicOwner, s.port, q.Months)
+	} else {
+		record, err = checkout.ManualLinkForUsername(ctx, s.vault, q.Username, s.port, q.Months, q.VerifiedUnpaid)
+	}
 	if err != nil {
 		switch {
+		case errors.Is(err, checkout.ErrPublicLinkConflict):
+			message(w, 409, "该账号暂时无法生成新链接，请使用原付款页面或联系管理员核实。")
 		case errors.Is(err, checkout.ErrVerifyUnpaid):
 			reply(w, 409, map[string]any{"message": "原付款链接已失效，请核实原订单未付款后再重新生成。", "needs_unpaid_verification": true})
 		case errors.Is(err, checkout.ErrNotEligible):

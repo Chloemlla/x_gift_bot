@@ -74,7 +74,7 @@ createServer(async (req, res) => {
       res.end(data);
       return;
     }
-    if (req.method === "GET" && url.pathname === "/api/admin/manual-link/plans") {
+    if (req.method === "GET" && ["/api/admin/manual-link/plans", "/api/manual-link/plans"].includes(url.pathname)) {
       json(200, { plans: [{months: 3, amount: 30000, currency: "BDT"}, {months: 6, amount: 60000, currency: "BDT"}] });
       return;
     }
@@ -243,7 +243,7 @@ createServer(async (req, res) => {
       }
     }
     const body = JSON.parse(raw);
-    if (url.pathname === "/api/admin/manual-link") {
+    if (["/api/admin/manual-link", "/api/manual-link"].includes(url.pathname)) {
       if (![3, 6].includes(body.months) || !/^[a-z0-9_]{1,15}$/.test(body.username || "")) {
         json(400, {message: "请填写正确用户名和套餐。"}); return;
       }

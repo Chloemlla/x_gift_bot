@@ -26,6 +26,13 @@ import {
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import { adminApi, formatTime } from "./adminApi";
 import type { RecoverySelection } from "./CustomerPanel";
+import {
+  PaymentStatusPanels,
+  nodeName,
+  type CardStatus,
+  type Network,
+  type Rotation,
+} from "./PaymentStatusPanel";
 
 type Item = {
   payment_node?: string;
@@ -52,9 +59,15 @@ type Batch = {
   message: string;
   items: Item[];
 };
-type Network = { mode: "pool" | "direct"; nodes: number; available?: number; cooling?: number };
 type QueueSummary = { review: number; processing: number };
-type Response = { batch: Batch | null; network?: Network; summary?: QueueSummary };
+type Response = {
+  batch: Batch | null;
+  network?: Network;
+  cards?: CardStatus[];
+  rotation?: Rotation;
+  paused?: boolean;
+  summary?: QueueSummary;
+};
 const labels: Record<string, string> = {
   preview: "待确认",
   pending: "待处理",
@@ -127,7 +140,7 @@ function Orders({ items }: { items: Item[] }) {
               @{item.username} · 兑换码尾号 {item.hint}
             </Typography>
             {item.payment_node && (
-              <Typography variant="caption">付款节点 {item.payment_node}</Typography>
+              <Typography variant="caption">付款节点 {nodeName(item.payment_node)}</Typography>
             )}
             <Typography variant="body2">
               {item.months} 个月 · {item.currency}{" "}
@@ -178,7 +191,7 @@ function Orders({ items }: { items: Item[] }) {
                   <Typography variant="body2">@{item.username}</Typography>
                   <Typography variant="caption" display="block">
                     兑换码尾号 {item.hint}
-                    {item.payment_node && ` · 付款节点 ${item.payment_node}`}
+                    {item.payment_node && ` · 付款节点 ${nodeName(item.payment_node)}`}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
                     {item.months} 个月
@@ -225,6 +238,9 @@ export function RecoveryPanel({
 }) {
   const [batch, setBatch] = useState<Batch | null>(null);
   const [network, setNetwork] = useState<Network | null>(null);
+  const [cards, setCards] = useState<CardStatus[]>([]);
+  const [rotation, setRotation] = useState<Rotation | null>(null);
+  const [paused, setPaused] = useState(false);
   const [summary, setSummary] = useState<QueueSummary | null>(null);
   const [statusError, setStatusError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -251,6 +267,9 @@ export function RecoveryPanel({
         if (!disposed && !mutating.current && seq === sequence.current) {
           setBatch(data.batch);
           setNetwork(data.network || null);
+          setCards(data.cards || []);
+          setRotation(data.rotation || null);
+          setPaused(!!data.paused);
           setSummary(data.summary || null);
           setStatusError("");
         }
@@ -320,207 +339,220 @@ export function RecoveryPanel({
     }
   }
   return (
-    <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, mb: 3 }}>
-      <Stack
-        direction={{ xs: "column", sm: "row" }}
-        justifyContent="space-between"
-        spacing={2}
-      >
-        <Box>
-          <Typography variant="h2" sx={{ fontSize: 21 }}>
-            管理员手动补单
-          </Typography>
-          <Typography color="text.secondary" variant="body2" sx={{ mt: 1 }}>
-            支持只生成补单链接，或确认后使用已保存的银行卡付款。服务器逐笔处理，间隔至少
-            30 秒。
-          </Typography>
-          <Typography color="text.secondary" variant="body2" sx={{ mt: 1 }}>
-            X 生成链接走配置代理。
-            {network?.mode === "pool"
-              ? `Stripe 节点池：${network.nodes} 个出口，可用 ${network.available ?? network.nodes} 个，冷却 ${network.cooling ?? 0} 个。连接故障冷却 6 小时，安全查询最多尝试 3 个出口；付款提交失败不自动重扣。`
-              : network?.mode === "direct"
-                ? "新订单的 Stripe 请求走服务器直连；已有节点绑定的订单保留原节点。"
-                : "正在读取 Stripe 付款网络配置。"}
-            手动打开付款链接时，使用当前浏览器的网络。
-          </Typography>
-        </Box>
-        <Stack
-          direction="row"
-          spacing={1}
-          alignItems="center"
-          sx={{ flexWrap: "wrap", rowGap: 1 }}
-        >
-          <Button
-            variant="outlined"
-            disabled={busy || active}
-            onClick={() => void act("preview", { mode: "links" })}
-          >
-            仅生成补单链接
-          </Button>
-          <Button
-            variant="contained"
-            disabled={busy || active}
-            onClick={() => void act("preview")}
-          >
-            预览并补单
-          </Button>
-          {active && (
-            <Button
-              variant="outlined"
-              color="error"
-              disabled={busy || batch?.state === "stopping"}
-              onClick={() => void act("stop")}
-            >
-              停止后续订单
-            </Button>
-          )}
-        </Stack>
-      </Stack>
-      {error && !open && (
-        <Alert severity="error" role="alert" sx={{ mt: 2 }}>
-          {error}
+    <>
+      {statusError && (
+        <Alert severity="error" role="alert" sx={{ mb: 3 }}>
+          当前状态读取失败：{statusError}
         </Alert>
       )}
-      {statusError && <Alert severity="error" role="alert" sx={{ mt: 2 }}>当前状态读取失败：{statusError}</Alert>}
-      <Box sx={{ mt: 2 }}>
-        <Typography variant="body2" fontWeight={600} aria-live="polite">
-          {statusError ? "当前状态暂不可用" : active ? "当前有补单任务运行中" : summary ? "当前没有运行中的补单任务" : "正在读取当前状态…"}
-        </Typography>
-        {summary && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-          当前订单：待核实 {summary.review} 笔 · 充值处理中 {summary.processing} 笔
-        </Typography>}
-      </Box>
-      {batch && active && !statusError && (
-        <Box sx={{ mt: 2 }}>
-          <BatchDetails batch={batch} />
-        </Box>
-      )}
-      {batch && !active && (
-        <Accordion key={`${batch.id}-${batch.state}`} disableGutters elevation={0} sx={{ mt: 2, border: 1, borderColor: "divider", "&::before": { display: "none" } }}>
-          <AccordionSummary expandIcon={<ExpandMoreRounded />} aria-controls="recovery-history-content" id="recovery-history-heading">
-            <Box>
-              <Typography variant="body2" fontWeight={600}>
-                {batch.state === "preview" ? "上次预览（未启动）" : "上次补单记录（历史）"}
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                {taskTime(batch.updated || batch.created)} · {resultSummary(batch.items)}
-              </Typography>
-            </Box>
-          </AccordionSummary>
-          <AccordionDetails id="recovery-history-content">
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-              以下为这次任务保存的处理结果。当前订单数量显示在上方；刷新页面不会重新执行此任务。
-            </Typography>
-            <BatchDetails batch={batch} />
-          </AccordionDetails>
-        </Accordion>
-      )}
-      <Dialog
-        open={open}
-        onClose={() => {
-          if (!busy) setOpen(false);
-        }}
-        fullWidth
-        maxWidth="md"
-        slotProps={{
-          paper: {
-            sx: {
-              m: { xs: 2, sm: 4 },
-              width: { xs: "calc(100% - 32px)", sm: "calc(100% - 64px)" },
-            },
-          },
-        }}
-        aria-labelledby="recovery-title"
-        aria-describedby="recovery-dialog-description"
+      <PaymentStatusPanels
+        network={network}
+        cards={cards}
+        rotation={rotation}
+        failed={!!statusError}
+      />
+      <Paper
+        component="section"
+        aria-labelledby="recovery-panel-title"
+        variant="outlined"
+        sx={{ p: { xs: 2, sm: 3 }, mb: 3 }}
       >
-        <DialogTitle id="recovery-title">
-          {linksOnly ? "确认生成补单链接（不付款）" : "确认手动补单"}
-        </DialogTitle>
-        <DialogContent id="recovery-dialog-description">
-          {error && (
-            <Alert severity="error" role="alert" sx={{ mb: 2 }}>
-              {error}
-            </Alert>
-          )}
-          <Typography sx={{ mb: 1 }}>
-            {linksOnly ? (
-              "只生成或更新付款链接，不提交银行卡付款；核验并处理"
-            ) : (
-              <>
-                {batch?.cards && batch.cards > 1 ? <>使用 <strong>{batch.cards}</strong> 张银行卡随机轮换（当前尾号 <strong>{batch?.last4}</strong>）</> : <>使用银行卡尾号 <strong>{batch?.last4}</strong></>}，核验并处理
-              </>
-            )}{" "}
-            <strong>{pending}</strong> 笔订单，账单总额{" "}
-            <strong>{totals(batch?.items || [])}</strong>。
-          </Typography>
-          <Alert severity="warning" sx={{ mb: 2 }}>
-            {linksOnly
-              ? "这一步只准备付款链接，不付款。有效链接会复用；旧链接失效时，核验并保留旧记录后生成新链接。"
-              : "确认后会尝试真实付款。旧链接失效时可先生成新链接；已付款只同步结果，不符合条件的订单跳过。普通拒付只标记该单失败；结果不明、需银行验证或支付方明确禁止重试时停止任务。"}
-          </Alert>
-          {batch && <Orders items={batch.items} />}
-          {batch?.paused && !linksOnly && (
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={reset}
-                  disabled={busy}
-                  onChange={(e) => setReset(e.target.checked)}
-                />
-              }
-              label="我已检查付款方式，确认解除本轮暂停并重新尝试；拒付保护继续生效。"
-            />
-          )}
-          {batch?.items.some((item) => item.needs_unpaid_verification) && (
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={verifiedUnpaid}
-                  disabled={busy}
-                  onChange={(e) => setVerifiedUnpaid(e.target.checked)}
-                />
-              }
-              label="我已核对原订单未扣款；若旧链接失效，允许保留旧记录并生成新链接。未勾选则不会替换无法在线确认的账单。"
-            />
-          )}
-          <FormControlLabel
-            control={
-              <Checkbox
-                checked={consent}
-                disabled={busy}
-                onChange={(e) => setConsent(e.target.checked)}
-              />
-            }
-            label={
-              linksOnly
-                ? "我已核对客户和套餐，确认仅生成补单链接，不付款。"
-                : "我已核对客户、套餐、账单金额和银行卡，确认启动本批次付款。"
-            }
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button disabled={busy} onClick={() => setOpen(false)}>
-            取消
-          </Button>
-          <Button
-            variant="contained"
-            disabled={
-              busy ||
-              !consent ||
-              !pending ||
-              (!linksOnly && batch?.paused && !reset) ||
-              batch?.state !== "preview"
-            }
-            onClick={() => void act("start")}
+        <Stack
+          direction={{ xs: "column", sm: "row" }}
+          justifyContent="space-between"
+          spacing={2}
+        >
+          <Box>
+            <Typography id="recovery-panel-title" variant="h2" sx={{ fontSize: 21 }}>
+              管理员手动补单
+            </Typography>
+            <Typography color="text.secondary" variant="body2" sx={{ mt: 1 }}>
+              支持只生成补单链接，或确认后使用已保存的付款卡付款。服务器逐笔处理，间隔至少
+              30 秒。
+            </Typography>
+          </Box>
+          <Stack
+            direction="row"
+            spacing={1}
+            alignItems="center"
+            sx={{ flexWrap: "wrap", rowGap: 1 }}
           >
-            {busy
-              ? "正在提交…"
-              : linksOnly
-                ? "确认生成链接（不付款）"
-                : "确认付款并启动补单"}
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Paper>
+            <Button
+              variant="outlined"
+              disabled={busy || active}
+              onClick={() => void act("preview", { mode: "links" })}
+            >
+              仅生成补单链接
+            </Button>
+            <Button
+              variant="contained"
+              disabled={busy || active}
+              onClick={() => void act("preview")}
+            >
+              预览并补单
+            </Button>
+            {active && (
+              <Button
+                variant="outlined"
+                color="error"
+                disabled={busy || batch?.state === "stopping"}
+                onClick={() => void act("stop")}
+              >
+                停止后续订单
+              </Button>
+            )}
+          </Stack>
+        </Stack>
+        {paused && (
+          <Alert severity="warning" sx={{ mt: 2 }}>
+            付款保护已触发：用户充值与付款卡付款均已暂停。启动补单时，需在确认框中勾选解除暂停。
+          </Alert>
+        )}
+        {error && !open && (
+          <Alert severity="error" role="alert" sx={{ mt: 2 }}>
+            {error}
+          </Alert>
+        )}
+        <Box sx={{ mt: 2 }}>
+          <Typography variant="body2" fontWeight={600} aria-live="polite">
+            {statusError ? "当前状态暂不可用，正在自动重试" : active ? "当前有补单任务运行中" : summary ? "当前没有运行中的补单任务" : "正在读取当前状态…"}
+          </Typography>
+          {summary && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+            当前订单：待核实 {summary.review} 笔 · 充值处理中 {summary.processing} 笔
+          </Typography>}
+        </Box>
+        {batch && active && !statusError && (
+          <Box sx={{ mt: 2 }}>
+            <BatchDetails batch={batch} />
+          </Box>
+        )}
+        {batch && !active && (
+          <Accordion key={`${batch.id}-${batch.state}`} disableGutters elevation={0} sx={{ mt: 2, border: 1, borderColor: "divider", "&::before": { display: "none" } }}>
+            <AccordionSummary expandIcon={<ExpandMoreRounded />} aria-controls="recovery-history-content" id="recovery-history-heading">
+              <Box>
+                <Typography variant="body2" fontWeight={600}>
+                  {batch.state === "preview" ? "上次预览（未启动）" : "上次补单记录（历史）"}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {taskTime(batch.updated || batch.created)} · {resultSummary(batch.items)}
+                </Typography>
+              </Box>
+            </AccordionSummary>
+            <AccordionDetails id="recovery-history-content">
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                以下为这次任务保存的处理结果。当前订单数量显示在上方；刷新页面不会重新执行此任务。
+              </Typography>
+              <BatchDetails batch={batch} />
+            </AccordionDetails>
+          </Accordion>
+        )}
+        <Dialog
+          open={open}
+          onClose={() => {
+            if (!busy) setOpen(false);
+          }}
+          fullWidth
+          maxWidth="md"
+          slotProps={{
+            paper: {
+              sx: {
+                m: { xs: 2, sm: 4 },
+                width: { xs: "calc(100% - 32px)", sm: "calc(100% - 64px)" },
+              },
+            },
+          }}
+          aria-labelledby="recovery-title"
+          aria-describedby="recovery-dialog-description"
+        >
+          <DialogTitle id="recovery-title">
+            {linksOnly ? "确认生成补单链接（不付款）" : "确认手动补单"}
+          </DialogTitle>
+          <DialogContent id="recovery-dialog-description">
+            {error && (
+              <Alert severity="error" role="alert" sx={{ mb: 2 }}>
+                {error}
+              </Alert>
+            )}
+            <Typography sx={{ mb: 1 }}>
+              {linksOnly ? (
+                "只生成或更新付款链接，不使用付款卡付款；核验并处理"
+              ) : (
+                <>
+                  {batch?.cards && batch.cards > 1 ? <>使用 <strong>{batch.cards}</strong> 张付款卡随机轮换（当前尾号 <strong>{batch?.last4}</strong>）</> : <>使用付款卡尾号 <strong>{batch?.last4}</strong></>}，核验并处理
+                </>
+              )}{" "}
+              <strong>{pending}</strong> 笔订单，账单总额{" "}
+              <strong>{totals(batch?.items || [])}</strong>。
+            </Typography>
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              {linksOnly
+                ? "这一步只准备付款链接，不付款。有效链接会复用；旧链接失效时，核验并保留旧记录后生成新链接。"
+                : "确认后会尝试真实付款。旧链接失效时可先生成新链接；已付款只同步结果，不符合条件的订单跳过。普通拒付只标记该单失败；结果不明、需银行验证或支付方明确禁止重试时停止任务。"}
+            </Alert>
+            {batch && <Orders items={batch.items} />}
+            {batch?.paused && !linksOnly && (
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={reset}
+                    disabled={busy}
+                    onChange={(e) => setReset(e.target.checked)}
+                  />
+                }
+                label="我已检查付款方式，确认解除本轮暂停并重新尝试；拒付保护继续生效。"
+              />
+            )}
+            {batch?.items.some((item) => item.needs_unpaid_verification) && (
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={verifiedUnpaid}
+                    disabled={busy}
+                    onChange={(e) => setVerifiedUnpaid(e.target.checked)}
+                  />
+                }
+                label="我已核对原订单未扣款；若旧链接失效，允许保留旧记录并生成新链接。未勾选则不会替换无法在线确认的账单。"
+              />
+            )}
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={consent}
+                  disabled={busy}
+                  onChange={(e) => setConsent(e.target.checked)}
+                />
+              }
+              label={
+                linksOnly
+                  ? "我已核对客户和套餐，确认仅生成补单链接，不付款。"
+                  : "我已核对客户、套餐、账单金额和付款卡，确认启动本批次付款。"
+              }
+            />
+          </DialogContent>
+          <DialogActions>
+            <Button disabled={busy} onClick={() => setOpen(false)}>
+              取消
+            </Button>
+            <Button
+              variant="contained"
+              disabled={
+                busy ||
+                !consent ||
+                !pending ||
+                (!linksOnly && batch?.paused && !reset) ||
+                batch?.state !== "preview"
+              }
+              onClick={() => void act("start")}
+            >
+              {busy
+                ? "正在提交…"
+                : linksOnly
+                  ? "确认生成链接（不付款）"
+                  : "确认付款并启动补单"}
+            </Button>
+          </DialogActions>
+        </Dialog>
+      </Paper>
+    </>
   );
 }

@@ -122,9 +122,31 @@ createServer(async (req, res) => {
     }
     if (req.method !== "POST") {
       if (req.method === "GET" && url.pathname === "/api/admin/recovery") {
+        // PREVIEW_NETWORK=direct 可预览直连模式;默认节点池。
+        const direct = process.env.PREVIEW_NETWORK === "direct";
         json(200, {
           batch: null,
-          network: { mode: "direct", nodes: 1 },
+          network: direct
+            ? { mode: "direct", nodes: 0 }
+            : { mode: "pool", nodes: 12, available: 9, cooling: 3 },
+          cards: [
+            { last4: "4242", usable: true },
+            { last4: "1881", usable: true, cooling_seconds: 1500 },
+            {
+              last4: "0005",
+              usable: true,
+              blocked: "do_not_try_again",
+              pair_cooling: 2,
+            },
+            { last4: "9917", usable: false, problem: "card has expired" },
+          ],
+          rotation: {
+            batch_size: 3,
+            used: 2,
+            card_last4: "4242",
+            node: direct ? "direct" : "node-1a2b3c4d5e6f",
+          },
+          paused: false,
           summary: {
             review: codes.filter((code) => code.status === "review").length,
             processing: codes.filter((code) => code.status === "processing")

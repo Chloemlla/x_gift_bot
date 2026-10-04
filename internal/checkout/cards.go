@@ -23,9 +23,11 @@ const (
 	cardBlockRecord = "payment-card-blocks"
 )
 
-// paymentCardCooldown is how long a declined card stays out of rotation while
-// other cards are available. A provider no-retry instruction blocks it until an
-// operator explicitly unblocks it.
+// paymentCardCooldown is how long a declined card+node pair stays out of
+// rotation while another node for the same card is available. A second decline
+// of the same card on a different node cools the whole card for the same
+// window. A provider no-retry instruction blocks the card until an operator
+// explicitly unblocks it.
 const paymentCardCooldown = 30 * time.Minute
 
 var ErrNoUsableCard = errors.New("no usable payment card is available; every configured card may be blocked or cooling down")
@@ -239,8 +241,16 @@ func touchCardUsageLocked(v *vault.Vault, fingerprint string) error {
 	return v.Put(cardUsageRecord, b)
 }
 
-// paymentCardBlocked reports whether a card is currently out of rotation,
-// either permanently blocked or inside its post-decline cooldown.
+// pairBlockKey scopes a cooldown to one card+node combination so the same card
+// can be retried through a different node.
+func pairBlockKey(fingerprint, nodeID string) string { return fingerprint + ":" + nodeID }
+
+func activeCardBlock(block cardBlock, now int64) bool {
+	return block.Until == 0 || block.Until > now
+}
+
+// paymentCardBlocked reports whether the whole card is currently out of
+// rotation, either permanently blocked or inside a card-level cooldown.
 func paymentCardBlocked(v *vault.Vault, fingerprint string) (bool, error) {
 	blocks, err := readCardBlocks(v)
 	if err != nil {
@@ -250,7 +260,20 @@ func paymentCardBlocked(v *vault.Vault, fingerprint string) (bool, error) {
 	if !blocked {
 		return false, nil
 	}
-	return block.Until == 0 || block.Until > time.Now().Unix(), nil
+	return activeCardBlock(block, time.Now().Unix()), nil
+}
+
+// paymentPairBlocked reports whether this card+node combination is cooling.
+func paymentPairBlocked(v *vault.Vault, fingerprint, nodeID string) (bool, error) {
+	if fingerprint == "" || nodeID == "" {
+		return false, nil
+	}
+	blocks, err := readCardBlocks(v)
+	if err != nil {
+		return false, err
+	}
+	block, blocked := blocks[pairBlockKey(fingerprint, nodeID)]
+	return blocked && activeCardBlock(block, time.Now().Unix()), nil
 }
 
 // blockPaymentCard excludes one card from rotation until an operator unblocks
@@ -292,7 +315,37 @@ func coolPaymentCardLocked(v *vault.Vault, fingerprint, reason string) error {
 	if existing, ok := blocks[fingerprint]; ok && existing.Until == 0 {
 		return nil
 	}
-	blocks[fingerprint] = cardBlock{Reason: reason, BlockedAt: time.Now().Unix(), Until: time.Now().Add(paymentCardCooldown).Unix()}
+	now := time.Now()
+	blocks[fingerprint] = cardBlock{Reason: reason, BlockedAt: now.Unix(), Until: now.Add(paymentCardCooldown).Unix()}
+	return saveCardBlocks(v, blocks)
+}
+
+// coolPaymentPairLocked cools one card+node combination. When the same card has
+// declined on two distinct nodes inside the window, the whole card is cooled so
+// a bad card cannot be tested across the whole node pool. Caller must hold
+// paymentRouteMu.
+func coolPaymentPairLocked(v *vault.Vault, fingerprint, nodeID, reason string) error {
+	if fingerprint == "" || nodeID == "" {
+		return nil
+	}
+	blocks, err := readCardBlocks(v)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	until := now.Add(paymentCardCooldown).Unix()
+	blocks[pairBlockKey(fingerprint, nodeID)] = cardBlock{Reason: reason, BlockedAt: now.Unix(), Until: until}
+	distinct := 0
+	for key, block := range blocks {
+		if strings.HasPrefix(key, fingerprint+":") && block.Until > now.Unix() {
+			distinct++
+		}
+	}
+	if distinct >= 2 {
+		if existing, ok := blocks[fingerprint]; !ok || existing.Until != 0 {
+			blocks[fingerprint] = cardBlock{Reason: "declined_multi_node", BlockedAt: now.Unix(), Until: until}
+		}
+	}
 	return saveCardBlocks(v, blocks)
 }
 
@@ -355,17 +408,19 @@ func hasUsableCard(v *vault.Vault) (bool, error) {
 	return false, nil
 }
 
-// CardStatus is a number-free view of one configured card for the CLI.
+// CardStatus is a number-free view of one configured card for the CLI and the
+// admin dashboard.
 type CardStatus struct {
 	Last4          string `json:"last4"`
 	Usable         bool   `json:"usable"`
 	Problem        string `json:"problem,omitempty"`
 	Blocked        string `json:"blocked,omitempty"`
 	CoolingSeconds int64  `json:"cooling_seconds,omitempty"`
+	PairCooling    int    `json:"pair_cooling,omitempty"`
 }
 
 func CardsStatus(v *vault.Vault) ([]CardStatus, error) {
-	cards, err := readCards(v)
+	cards, err := readCardsOptional(v)
 	if err != nil {
 		return nil, err
 	}
@@ -373,17 +428,29 @@ func CardsStatus(v *vault.Vault) ([]CardStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now().Unix()
 	status := make([]CardStatus, 0, len(cards))
 	for _, c := range cards {
 		entry := CardStatus{Last4: cardTail(c), Usable: true}
+		fingerprint := cardFingerprint(c)
 		if problem := validateCard(c); problem != nil {
 			entry.Usable = false
 			entry.Problem = problem.Error()
 		}
-		if block, ok := blocks[cardFingerprint(c)]; ok {
+		// Expired cooldowns no longer keep the card out of rotation, so they
+		// must not be reported as blocks.
+		if block, ok := blocks[fingerprint]; ok && activeCardBlock(block, now) {
 			entry.Blocked = block.Reason
-			if remaining := block.Until - time.Now().Unix(); block.Until > 0 && remaining > 0 {
-				entry.CoolingSeconds = remaining
+			if block.Until > 0 {
+				entry.CoolingSeconds = block.Until - now
+			}
+		}
+		for key, block := range blocks {
+			if !strings.HasPrefix(key, fingerprint+":") {
+				continue
+			}
+			if block.Until > now {
+				entry.PairCooling++
 			}
 		}
 		status = append(status, entry)
@@ -605,7 +672,7 @@ type RotationInfo struct {
 }
 
 func PaymentRotationStatus(v *vault.Vault) (RotationInfo, error) {
-	cards, err := readCards(v)
+	cards, err := readCardsOptional(v)
 	if err != nil {
 		return RotationInfo{}, err
 	}

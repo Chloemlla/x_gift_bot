@@ -408,10 +408,13 @@ func runCards(v *vault.Vault, sub, last4 string) error {
 			}
 			if s.Blocked != "" {
 				if s.CoolingSeconds > 0 {
-					line += fmt.Sprintf("（被拒冷却：%s，剩 %d 分钟）", s.Blocked, (s.CoolingSeconds+59)/60)
+					line += fmt.Sprintf("（整卡冷却：%s，剩 %d 分钟）", s.Blocked, (s.CoolingSeconds+59)/60)
 				} else {
 					line += "（已封锁：" + s.Blocked + "）"
 				}
+			}
+			if s.PairCooling > 0 {
+				line += fmt.Sprintf("（%d 组卡+节点组合冷却中）", s.PairCooling)
 			}
 			fmt.Println(line)
 		}

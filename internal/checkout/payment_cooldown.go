@@ -12,7 +12,10 @@ import (
 	"xgift/internal/vault"
 )
 
-const paymentNodeCooldown = 6 * time.Hour
+const (
+	paymentNodeCooldown        = 6 * time.Hour
+	paymentNodeDeclineCooldown = 30 * time.Minute
+)
 
 var ErrPaymentNodesCooling = errors.New("all payment nodes are cooling down; no alternate route available")
 
@@ -79,11 +82,18 @@ func nodeCoolingUntil(v *vault.Vault, node json.RawMessage) (int64, error) {
 func coolPaymentNode(v *vault.Vault, node json.RawMessage) error {
 	paymentRouteMu.Lock()
 	defer paymentRouteMu.Unlock()
+	return coolPaymentNodeLocked(v, node, "transport_failure", paymentNodeCooldown)
+}
+
+// coolPaymentNodeLocked cools the node, its server group and any shared egress
+// IP so a flagged exit is skipped for every card. Caller must hold
+// paymentRouteMu.
+func coolPaymentNodeLocked(v *vault.Vault, node json.RawMessage, reason string, window time.Duration) error {
 	keys, e := nodeCooldownKeys(v, node)
 	if e != nil {
 		return e
 	}
-	until := time.Now().Add(paymentNodeCooldown).Unix()
+	until := time.Now().Add(window).Unix()
 	old, e := nodeCoolingUntil(v, node)
 	if e != nil {
 		return e
@@ -91,7 +101,7 @@ func coolPaymentNode(v *vault.Vault, node json.RawMessage) error {
 	if old > until {
 		until = old
 	}
-	b, _ := json.Marshal(nodeCooldown{Until: until, Reason: "transport_failure"})
+	b, _ := json.Marshal(nodeCooldown{Until: until, Reason: reason})
 	defer clear(b)
 	for _, key := range keys {
 		if e = v.Put(key, b); e != nil {

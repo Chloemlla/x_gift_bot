@@ -3,6 +3,7 @@ package checkout
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -150,5 +151,51 @@ func TestBlockedCardsAreSkippedUntilExplicitlyUnblocked(t *testing.T) {
 	}
 	if usable, _ := hasUsableCard(v); !usable {
 		t.Fatal("unblock did not restore rotation")
+	}
+}
+
+func TestCardsStatusReportsEmptyWhenUnconfigured(t *testing.T) {
+	v := controlFixture(t)
+	status, err := CardsStatus(v)
+	if err != nil || len(status) != 0 {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	rotation, err := PaymentRotationStatus(v)
+	if err != nil || rotation.Cards != 0 || rotation.CardLast4 != "" {
+		t.Fatalf("rotation=%+v err=%v", rotation, err)
+	}
+}
+
+func TestCardsStatusDropsExpiredCooldown(t *testing.T) {
+	v := controlFixture(t)
+	if _, err := AddCardRecords(v, []byte(testCardOne)); err != nil {
+		t.Fatal(err)
+	}
+	cards, _ := readCards(v)
+	fingerprint := cardFingerprint(cards[0])
+	if err := coolPaymentCard(v, fingerprint, "declined"); err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ := readCardBlocks(v)
+	entry := blocks[fingerprint]
+	entry.Until = time.Now().Add(-time.Second).Unix()
+	blocks[fingerprint] = entry
+	if err := saveCardBlocks(v, blocks); err != nil {
+		t.Fatal(err)
+	}
+	status, err := CardsStatus(v)
+	if err != nil || len(status) != 1 {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	if status[0].Blocked != "" || status[0].CoolingSeconds != 0 {
+		t.Fatalf("expired cooldown still reported: %+v", status[0])
+	}
+	// An active cooldown still reports the reason and remaining seconds.
+	if err := coolPaymentCard(v, fingerprint, "declined"); err != nil {
+		t.Fatal(err)
+	}
+	status, _ = CardsStatus(v)
+	if status[0].Blocked == "" || status[0].CoolingSeconds <= 0 {
+		t.Fatalf("active cooldown not reported: %+v", status[0])
 	}
 }

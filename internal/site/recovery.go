@@ -114,13 +114,28 @@ func (s *server) recoveryStatus(w http.ResponseWriter, r *http.Request) {
 		message(w, 503, "付款节点池配置无效，请检查配置。")
 		return
 	}
+	cards, err := checkout.CardsStatus(s.vault)
+	if err != nil {
+		message(w, 503, "无法读取付款卡状态。")
+		return
+	}
+	rotation, err := checkout.PaymentRotationStatus(s.vault)
+	if err != nil {
+		message(w, 503, "无法读取付款卡轮换状态。")
+		return
+	}
+	paused, err := checkout.PaymentPaused(s.vault)
+	if err != nil {
+		message(w, 503, "无法读取付款保护状态。")
+		return
+	}
 	// Queue counts describe current orders, independently of the saved last task.
 	var review, processing int
 	if err = s.db.QueryRow("SELECT COUNT(CASE WHEN status='review' THEN 1 END),COUNT(CASE WHEN status='processing' THEN 1 END) FROM codes").Scan(&review, &processing); err != nil {
 		message(w, 503, "无法读取当前订单状态。")
 		return
 	}
-	reply(w, 200, map[string]any{"batch": recoveryView(q), "network": network, "summary": map[string]int{"review": review, "processing": processing}})
+	reply(w, 200, map[string]any{"batch": recoveryView(q), "network": network, "cards": cards, "rotation": rotation, "paused": paused, "summary": map[string]int{"review": review, "processing": processing}})
 }
 func (s *server) recoveryCandidate(id string) (recoveryItem, error) {
 	item := recoveryItem{ID: id, State: "skipped"}
@@ -140,7 +155,7 @@ func (s *server) recoveryCandidate(id string) (recoveryItem, error) {
 	}
 	raw, err := s.vault.Get("checkout:" + item.Recipient)
 	if errors.Is(err, sql.ErrNoRows) {
-		item.Detail = "没有可核实的原账单，需单独检查"
+		item.Detail = "尚未创建账单，未提交付款；请使用原兑换码和账号重新检查并继续兑换"
 		return item, nil
 	}
 	if err != nil {
@@ -210,8 +225,12 @@ func (s *server) recoveryPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	last4, cardCount, binding, err := checkout.CardSummary(s.vault)
 	if err != nil {
-		message(w, 503, "付款方式配置无法读取。")
-		return
+		if in.Mode != "links" {
+			message(w, 503, "付款方式配置无法读取。")
+			return
+		}
+		// 仅生成链接不提交付款卡;未配置付款卡时也允许预览。
+		last4, cardCount, binding = "", 0, ""
 	}
 	paused, err := checkout.PaymentPaused(s.vault)
 	if err != nil {
@@ -320,10 +339,14 @@ func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 			release()
 		}
 	}()
-	_, _, binding, err := checkout.CardSummary(s.vault)
-	if err != nil || binding != q.Binding {
-		message(w, 409, "付款方式已变化，请重新预览。")
-		return
+	binding := q.Binding
+	// 仅生成链接不涉及付款卡,跳过卡集一致性核验。
+	if q.Mode != "links" {
+		_, _, current, err := checkout.CardSummary(s.vault)
+		if err != nil || current != binding {
+			message(w, 409, "付款方式已变化，请重新预览。")
+			return
+		}
 	}
 	count := 0
 	for _, item := range q.Items {
@@ -507,9 +530,11 @@ func (s *server) recoverOne(item recoveryItem, binding string) (state, detail st
 	return s.recoverOneOptions(item, binding, "pay", false)
 }
 func (s *server) recoverOneOptions(item recoveryItem, binding, mode string, verified bool) (state, detail string, stop bool) {
-	_, _, current, err := checkout.CardSummary(s.vault)
-	if err != nil || current != binding {
-		return "blocked", "付款方式配置变化，已停止", true
+	if mode != "links" {
+		_, _, current, err := checkout.CardSummary(s.vault)
+		if err != nil || current != binding {
+			return "blocked", "付款方式配置变化，已停止", true
+		}
 	}
 	checked, err := s.recoveryCandidate(item.ID)
 	if err != nil || checked != item {

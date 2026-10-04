@@ -76,20 +76,93 @@ func ResetPaymentRotation(v *vault.Vault) error {
 	return savePaymentRotation(v, rotation)
 }
 
-// choosePaymentPair picks one random usable card and one random available node.
-// Cards that are blocked or cooling are skipped; keepCard pins the running
-// batch to its card; forbidden replaces the given node when possible.
+// pickCard returns the pinned card when it is still available, otherwise the
+// least recently used candidate (random tie-break) so rotation stays balanced.
+func pickCard(v *vault.Vault, candidates []card, pinned string) (card, error) {
+	if pinned != "" {
+		for _, c := range candidates {
+			if cardFingerprint(c) == pinned {
+				return c, nil
+			}
+		}
+	}
+	usage, err := readCardUsage(v)
+	if err != nil {
+		return card{}, err
+	}
+	oldest := int64(-1)
+	preferred := make([]card, 0, len(candidates))
+	for _, c := range candidates {
+		used := usage[cardFingerprint(c)]
+		if oldest < 0 || used < oldest {
+			oldest = used
+			preferred = append(preferred[:0], c)
+		} else if used == oldest {
+			preferred = append(preferred, c)
+		}
+	}
+	index, err := rand.Int(rand.Reader, big.NewInt(int64(len(preferred))))
+	if err != nil {
+		return card{}, errors.New("cannot choose payment card")
+	}
+	return preferred[index.Int64()], nil
+}
+
+// preferNode favours a different server than the last used one and drops the
+// forbidden node unless it is the only option left.
+func preferNode(list []json.RawMessage, lastGroup, forbidden string) []json.RawMessage {
+	out := list
+	if lastGroup != "" {
+		filtered := make([]json.RawMessage, 0, len(out))
+		for _, node := range out {
+			if routeGroup(node) != lastGroup {
+				filtered = append(filtered, node)
+			}
+		}
+		if len(filtered) > 0 {
+			out = filtered
+		}
+	}
+	if len(out) > 1 && forbidden != "" {
+		filtered := make([]json.RawMessage, 0, len(out))
+		for _, node := range out {
+			if outboundID(node) != forbidden {
+				filtered = append(filtered, node)
+			}
+		}
+		if len(filtered) > 0 {
+			out = filtered
+		}
+	}
+	return out
+}
+
+func pickNode(list []json.RawMessage) (json.RawMessage, error) {
+	if len(list) == 0 {
+		return nil, ErrNoUsableCard
+	}
+	index, err := rand.Int(rand.Reader, big.NewInt(int64(len(list))))
+	if err != nil {
+		return nil, errors.New("cannot choose payment node")
+	}
+	return list[index.Int64()], nil
+}
+
+// choosePaymentPair picks one card and one node. Whole-card blocks cool the
+// card everywhere; a declined pair only cools that card+node combination so the
+// same card can be retried through another node.
 func choosePaymentPair(v *vault.Vault, cards []card, nodes []json.RawMessage, keepCard, forbidden string) (card, json.RawMessage, error) {
 	blocks, err := readCardBlocks(v)
 	if err != nil {
 		return card{}, nil, err
 	}
+	now := time.Now().Unix()
 	usable := make([]card, 0, len(cards))
 	for _, c := range cards {
 		if validateCard(c) != nil {
 			continue
 		}
-		if _, blocked := blocks[cardFingerprint(c)]; blocked {
+		if block, ok := blocks[cardFingerprint(c)]; ok && activeCardBlock(block, now) {
 			continue
 		}
 		usable = append(usable, c)
@@ -97,42 +170,11 @@ func choosePaymentPair(v *vault.Vault, cards []card, nodes []json.RawMessage, ke
 	if len(usable) == 0 {
 		return card{}, nil, ErrNoUsableCard
 	}
-	pickable := usable
-	if keepCard != "" {
-		for _, c := range usable {
-			if cardFingerprint(c) == keepCard {
-				pickable = []card{c}
-				break
-			}
-		}
-	}
-	// New batches prefer the usable card that has gone unused the longest, so a
-	// two-card set alternates instead of streaking by chance.
-	if keepCard == "" {
-		usage, err := readCardUsage(v)
+	if len(nodes) == 0 {
+		chosen, err := pickCard(v, usable, keepCard)
 		if err != nil {
 			return card{}, nil, err
 		}
-		oldest := int64(-1)
-		preferred := make([]card, 0, len(pickable))
-		for _, c := range pickable {
-			used := usage[cardFingerprint(c)]
-			if oldest < 0 || used < oldest {
-				oldest = used
-				preferred = append(preferred[:0], c)
-			} else if used == oldest {
-				preferred = append(preferred, c)
-			}
-		}
-		pickable = preferred
-	}
-	cardIndex, err := rand.Int(rand.Reader, big.NewInt(int64(len(pickable))))
-	if err != nil {
-		return card{}, nil, errors.New("cannot choose payment card")
-	}
-	chosen := pickable[cardIndex.Int64()]
-
-	if len(nodes) == 0 {
 		return chosen, json.RawMessage(`{"type":"direct","tag":"direct"}`), nil
 	}
 	available, err := availablePaymentNodes(v, nodes)
@@ -142,9 +184,8 @@ func choosePaymentPair(v *vault.Vault, cards []card, nodes []json.RawMessage, ke
 	if len(available) == 0 {
 		return card{}, nil, ErrPaymentNodesCooling
 	}
-	choices := available
+	lastGroup := ""
 	if last, e := v.Get("stripe-route:last-node"); e == nil && len(last) > 0 {
-		lastGroup := ""
 		for _, node := range nodes {
 			if outboundID(node) == string(last) {
 				lastGroup = routeGroup(node)
@@ -152,34 +193,36 @@ func choosePaymentPair(v *vault.Vault, cards []card, nodes []json.RawMessage, ke
 			}
 		}
 		clear(last)
-		if lastGroup != "" {
-			filtered := make([]json.RawMessage, 0, len(choices))
-			for _, node := range choices {
-				if routeGroup(node) != lastGroup {
-					filtered = append(filtered, node)
-				}
-			}
-			if len(filtered) > 0 {
-				choices = filtered
-			}
-		}
 	}
-	if len(choices) > 1 && forbidden != "" {
-		filtered := make([]json.RawMessage, 0, len(choices))
-		for _, node := range choices {
-			if outboundID(node) != forbidden {
-				filtered = append(filtered, node)
+	freeNodes := make(map[string][]json.RawMessage, len(usable))
+	candidates := make([]card, 0, len(usable))
+	for _, c := range usable {
+		fingerprint := cardFingerprint(c)
+		list := make([]json.RawMessage, 0, len(available))
+		for _, node := range available {
+			if block, ok := blocks[pairBlockKey(fingerprint, outboundID(node))]; ok && activeCardBlock(block, now) {
+				continue
 			}
+			list = append(list, node)
 		}
-		if len(filtered) > 0 {
-			choices = filtered
+		if len(list) == 0 {
+			continue
 		}
+		freeNodes[fingerprint] = preferNode(list, lastGroup, forbidden)
+		candidates = append(candidates, c)
 	}
-	nodeIndex, err := rand.Int(rand.Reader, big.NewInt(int64(len(choices))))
+	if len(candidates) == 0 {
+		return card{}, nil, ErrNoUsableCard
+	}
+	chosen, err := pickCard(v, candidates, keepCard)
 	if err != nil {
-		return card{}, nil, errors.New("cannot choose payment node")
+		return card{}, nil, err
 	}
-	return chosen, choices[nodeIndex.Int64()], nil
+	node, err := pickNode(freeNodes[cardFingerprint(chosen)])
+	if err != nil {
+		return card{}, nil, err
+	}
+	return chosen, node, nil
 }
 
 func paymentNodes(v *vault.Vault) ([]json.RawMessage, error) {
@@ -207,18 +250,28 @@ func continueOrRotate(v *vault.Vault, cards []card, nodes []json.RawMessage, rot
 				if len(rotation.Outbound) == 0 {
 					return c, json.RawMessage(`{"type":"direct","tag":"direct"}`), rotation.Used + 1, nil
 				}
+				pairCooling, e := paymentPairBlocked(v, rotation.CardFingerprint, rotation.NodeID)
+				if e != nil {
+					return card{}, nil, 0, e
+				}
 				until, e := nodeCoolingUntil(v, rotation.Outbound)
 				if e != nil {
 					return card{}, nil, 0, e
 				}
-				if until <= time.Now().Unix() {
+				if !pairCooling && until <= time.Now().Unix() {
 					return c, rotation.Outbound, rotation.Used + 1, nil
 				}
+				// The running card keeps the batch but moves to another node
+				// when its own pair or node is cooling.
 				next, node, e := choosePaymentPair(v, cards, nodes, rotation.CardFingerprint, rotation.NodeID)
 				if e != nil {
 					return card{}, nil, 0, e
 				}
-				return next, node, rotation.Used + 1, nil
+				used := rotation.Used + 1
+				if cardFingerprint(next) != rotation.CardFingerprint {
+					used = 1
+				}
+				return next, node, used, nil
 			}
 		}
 	}
@@ -270,20 +323,27 @@ func assignPaymentRoute(v *vault.Vault, recipient string, rotate bool) (*payment
 	}
 
 	if routeErr == nil && !rotate && boundOK {
-		// The order keeps its pinned pair; only a durable transport cooldown may
-		// move the node, and the card always stays with the order.
-		until, e := nodeCoolingUntil(v, route.Outbound)
+		// The order keeps its pinned pair; only a durable node cooldown or a
+		// cooling card+node pair may move it, and the card always stays with the
+		// order.
+		pairCooling, e := paymentPairBlocked(v, route.Card, route.NodeID)
 		if e != nil {
 			return nil, card{}, e
 		}
-		if until > time.Now().Unix() {
-			next, e := rotateCoolingRouteLocked(v, route)
+		if !pairCooling {
+			until, e := nodeCoolingUntil(v, route.Outbound)
 			if e != nil {
 				return nil, card{}, e
 			}
-			return next, bound, nil
+			if until > time.Now().Unix() {
+				next, e := rotateCoolingRouteLocked(v, route)
+				if e != nil {
+					return nil, card{}, e
+				}
+				return next, bound, nil
+			}
+			return route, bound, nil
 		}
-		return route, bound, nil
 	}
 
 	// A fresh pair is needed: first attempt, a route with no usable card, or an
@@ -295,7 +355,7 @@ func assignPaymentRoute(v *vault.Vault, recipient string, rotate bool) (*payment
 	}
 	if rotate && routeErr == nil && route.Card != "" {
 		if _, ok := cardByFingerprint(cards, route.Card); ok {
-			if err = coolPaymentCardLocked(v, route.Card, "declined"); err != nil {
+			if err = coolPaymentPairLocked(v, route.Card, route.NodeID, "declined"); err != nil {
 				return nil, card{}, err
 			}
 		}
@@ -363,8 +423,9 @@ func assignPaymentRoute(v *vault.Vault, recipient string, rotate bool) (*payment
 	return next, chosen, nil
 }
 
-// markPaymentDecline ends the running batch and keeps the declined card out of
-// rotation for the cooldown while other cards remain available.
+// markPaymentDecline ends the running batch and applies the cooling order the
+// operator requested: the exit node (and its shared egress IP) is cooled first,
+// and only a card that keeps declining on another node is cooled as well.
 func markPaymentDecline(v *vault.Vault, recipient string) error {
 	if recipient == "" {
 		return nil
@@ -378,9 +439,16 @@ func markPaymentDecline(v *vault.Vault, recipient string) error {
 	if rotation == nil {
 		rotation = &paymentRotation{}
 	}
-	if route, e := readPaymentRoute(v, recipient); e == nil && route.Card != "" {
-		if err = coolPaymentCardLocked(v, route.Card, "declined"); err != nil {
-			return err
+	if route, e := readPaymentRoute(v, recipient); e == nil {
+		if route.Card != "" {
+			if err = coolPaymentPairLocked(v, route.Card, route.NodeID, "declined"); err != nil {
+				return err
+			}
+		}
+		if len(route.Outbound) > 0 {
+			if err = coolPaymentNodeLocked(v, route.Outbound, "declined", paymentNodeDeclineCooldown); err != nil {
+				return err
+			}
 		}
 	}
 	rotation.Used = PaymentBatchSize

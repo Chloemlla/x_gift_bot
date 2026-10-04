@@ -220,3 +220,17 @@ func TestRecoveryBlockedAdviceIsNotQueued(t *testing.T) {
 		t.Fatal("no-retry order queued")
 	}
 }
+
+func TestRecoveryLinksPreviewWithoutCards(t *testing.T) {
+	s := resumeFixture(t, "review", "created")
+	if w := recoveryRequest(s, "preview", `{"mode":"links"}`); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	q, _ := s.loadRecovery()
+	if q.Mode != "links" || q.Last4 != "" || q.Binding != "" {
+		t.Fatalf("bad links preview: %+v", q)
+	}
+	if w := recoveryRequest(s, "preview", `{}`); w.Code != 503 {
+		t.Fatal("pay preview accepted without cards")
+	}
+}

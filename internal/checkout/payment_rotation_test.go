@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"xgift/internal/proxy"
 	"xgift/internal/vault"
 )
 
@@ -64,18 +65,52 @@ func TestDeclineEndsBatchAndNextRotationAvoidsCard(t *testing.T) {
 	if err != nil || rotation.Used != PaymentBatchSize {
 		t.Fatalf("decline was not recorded as a batch end: %+v %v", rotation, err)
 	}
-	if blocked, _ := paymentCardBlocked(v, card); !blocked {
-		t.Fatal("declined card was not cooled down")
+	if blocked, _ := paymentPairBlocked(v, card, node); !blocked {
+		t.Fatal("declined card+node pair was not cooled down")
 	}
-	nextNode, nextCard := assignPair(t, v, "202", false)
-	if nextCard == card {
-		t.Fatal("next order reused the declined card")
+	if route, e := readPaymentRoute(v, "201"); e != nil {
+		t.Fatal(e)
+	} else if until, e := nodeCoolingUntil(v, route.Outbound); e != nil || until <= time.Now().Unix() {
+		t.Fatal("declined exit node and its shared IP were not cooled")
 	}
+	if blocked, _ := paymentCardBlocked(v, card); blocked {
+		t.Fatal("first decline cooled the whole card instead of the node")
+	}
+	nextNode, _ := assignPair(t, v, "202", false)
 	if nextNode == node {
 		t.Fatal("next order reused the declined node")
 	}
 	if _, err := readPaymentRotation(v); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDeclinedPairLeavesOtherNodesForTheSameCard(t *testing.T) {
+	v := rotationSetup(t, testCardOne, testCardTwo, testCardThree)
+	cards, _ := readCards(v)
+	nodes, err := proxy.ParseOutboundPool([]byte(twoPaymentNodes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := cardFingerprint(cards[0])
+	if err := coolPaymentPairLocked(v, first, outboundID(nodes[0]), "declined"); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, _ := paymentCardBlocked(v, first); blocked {
+		t.Fatal("one pair decline cooled the whole card")
+	}
+	picked, node, err := choosePaymentPair(v, []card{cards[0]}, nodes, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cardFingerprint(picked) != first || outboundID(node) == outboundID(nodes[0]) {
+		t.Fatal("same card was not retried through another node")
+	}
+	if err := coolPaymentPairLocked(v, first, outboundID(nodes[1]), "declined"); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, _ := paymentCardBlocked(v, first); !blocked {
+		t.Fatal("second decline on another node did not cool the card")
 	}
 }
 
@@ -209,7 +244,7 @@ func TestDoNotTryAgainBlocksOneCardWithoutGlobalPause(t *testing.T) {
 	if paused, _ := PaymentPaused(v); !paused {
 		t.Fatal("all cards blocked but the site stayed open")
 	}
-	if cleared, err := UnblockPaymentCards(v); err != nil || cleared != 3 {
+	if cleared, err := UnblockPaymentCards(v); err != nil || cleared < 3 {
 		t.Fatalf("cleared=%d err=%v", cleared, err)
 	}
 	if paused, _ := PaymentPaused(v); paused {

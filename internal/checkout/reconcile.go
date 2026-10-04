@@ -36,13 +36,13 @@ func Reconcile(ctx context.Context, v *vault.Vault, recipient string, port int) 
 	if r.Status == "succeeded" {
 		return &r, nil
 	}
-	if r.Status != "unknown" && r.Status != "submitting" && r.Status != "requires_action" {
+	if r.Status != "unknown" && r.Status != "submitting" && r.Status != "requires_action" && !IsPaymentDeclined(&r) {
 		return &r, errors.New("order has no submitted payment to reconcile")
 	}
 	if err = verifySubmission(v, &r, plan); err != nil {
 		return &r, err
 	}
-	s, err := newStripe(v, port)
+	s, err := newStripe(ctx, v, r.RecipientID, paymentRead)
 	if err != nil {
 		return &r, err
 	}
@@ -51,12 +51,24 @@ func Reconcile(ctx context.Context, v *vault.Vault, recipient string, port int) 
 	if err != nil {
 		return &r, err
 	}
+	if status == "requires_action" {
+		r.Status = status
+		if err = save(v, &r); err != nil {
+			return &r, err
+		}
+		if err = markAuthenticationRequired(v, &r); err != nil {
+			return &r, err
+		}
+	}
 	if status != "succeeded" {
 		return &r, errors.New("payment is not yet confirmed successful")
 	}
 	r.Status = "succeeded"
 	r.LastError = nil
-	return &r, save(v, &r)
+	if err = save(v, &r); err != nil {
+		return &r, err
+	}
+	return &r, paymentOutcome(v, &r)
 }
 
 func verifySubmission(v *vault.Vault, r *Record, plan Plan) error {
@@ -75,6 +87,28 @@ func verifySubmission(v *vault.Vault, r *Record, plan Plan) error {
 	}
 	// Legacy records were produced by the same guard-before-confirm flow, but did
 	// not retain a separate snapshot. Never manufacture historical Stripe evidence.
+	if r.ManualRecovery {
+		b, err := v.Get(manualProofKey(r))
+		if err != nil {
+			return err
+		}
+		defer clear(b)
+		var proof manualProof
+		if err = json.Unmarshal(b, &proof); err != nil {
+			return err
+		}
+		if err = proof.guard(r, plan); err != nil {
+			return err
+		}
+		var page paymentPage
+		if err = json.Unmarshal(proof.Page, &page); err != nil {
+			return err
+		}
+		if page.Checksum != f.Get("init_checksum") {
+			return errors.New("manual preflight checksum mismatch")
+		}
+		return nil
+	}
 	if r.PreflightSaved {
 		raw, err := v.Get("stripe-preflight:" + r.SessionID)
 		if err != nil {

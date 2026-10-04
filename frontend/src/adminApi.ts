@@ -24,3 +24,23 @@ export type AdminStatsDetail = {
 export function stats() {
   return adminApi<AdminStatsDetail>("/api/admin/stats");
 }
+export type AdminCode = {
+  copyable: boolean;
+  folder: string;
+  id: string;
+  hint: string;
+  batch: string;
+  months: number;
+  status: string;
+  username: string;
+  message: string;
+  created: number;
+  updated?: number;
+  progress?: number;
+};
+// 全站统一的时间呈现:YYYY-MM-DD HH:mm:ss(与统计表日期风格一致)。
+export function formatTime(seconds: number): string {
+  const d = new Date(seconds * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}

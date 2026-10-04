@@ -6,7 +6,6 @@ import {
   Alert,
   Box,
   Button,
-  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -26,11 +25,12 @@ import {
 import ArrowForwardRounded from "@mui/icons-material/ArrowForwardRounded";
 import ArrowOutwardRounded from "@mui/icons-material/ArrowOutwardRounded";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
-import FactCheckRounded from "@mui/icons-material/FactCheckRounded";
 import ShieldOutlined from "@mui/icons-material/ShieldOutlined";
 import HistoryRounded from "@mui/icons-material/HistoryRounded";
 import { mount, request, Shell } from "./shared";
 import { AppearanceMenu } from "./AppearanceMenu";
+import { ManualPaymentPanel } from "./ManualPaymentPanel";
+import { EligibilityCard } from "./EligibilityCard";
 
 type Result = {
   status?: string;
@@ -38,6 +38,7 @@ type Result = {
   progress?: number;
   months?: number;
   rechecking?: boolean;
+  payment_declined?: boolean;
 };
 type Input = { code: string; username: string };
 const steps = ["核对账号", "核验订单", "付款处理", "兑换完成"];
@@ -50,6 +51,7 @@ function App() {
   >("loading");
   const [busy, setBusy] = useState(false);
   const [confirmation, setConfirmation] = useState(false);
+  const [pauseNotice, setPauseNotice] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const [severity, setSeverity] = useState<
     "info" | "success" | "warning" | "error"
@@ -58,26 +60,26 @@ function App() {
   const [locked, setLocked] = useState(false);
   const [exhausted, setExhausted] = useState(false);
   const [validation, setValidation] = useState(false);
-  const [checking, setChecking] = useState(false);
-  const [checkResult, setCheckResult] = useState<{
-    severity: "success" | "warning" | "info";
-    message: string;
-  } | null>(null);
+  // 本次会话的进度来自「兑换」还是「查询」,驱动进度区标题与区域命名。
+  const fromRedeem = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const controller = useRef<AbortController | null>(null);
   const inFlight = useRef(false);
   const progressPanel = useRef<HTMLDivElement>(null);
+  const progressHeading = useRef<HTMLParagraphElement>(null);
+  const resultAlert = useRef<HTMLDivElement>(null);
   const form = useRef<HTMLFormElement>(null);
   const current = useRef<Input>({ code: "", username: "" });
   const attempt = useRef(0);
-  const cleanCode = code.trim().toUpperCase();
+  const cleanCode = code.replace(/\s+/g, "").toUpperCase();
   const cleanUser = username.trim().replace(/^@/, "").toLowerCase();
   const codeValid = /^XG-[A-F0-9]{48}$/.test(cleanCode);
   const userValid = /^[a-z0-9_]{1,15}$/.test(cleanUser);
 
   useEffect(() => {
     const health = new AbortController();
-    request<{ payments_enabled: boolean }>(
+    const refreshService = () =>
+      request<{ payments_enabled: boolean }>(
       "/healthz",
       undefined,
       AbortSignal.any([health.signal, AbortSignal.timeout(10000)]),
@@ -90,12 +92,22 @@ function App() {
       .catch(() => {
         if (!health.signal.aborted) setService("unknown");
       });
+    void refreshService();
+    const refreshTimer = setInterval(refreshService, 30000);
+    window.addEventListener("focus", refreshService);
     return () => {
       health.abort();
+      clearInterval(refreshTimer);
+      window.removeEventListener("focus", refreshService);
       clearTimeout(timer.current);
       controller.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    setPauseNotice(service === "paused");
+    if (service !== "enabled") setConfirmation(false);
+  }, [service]);
 
   function finish() {
     inFlight.current = false;
@@ -112,6 +124,11 @@ function App() {
     );
   }
   function apply(ok: boolean, data: Result) {
+    if (data.status === "paused") setService("paused");
+    // If focus sits in the progress panel and this update unmounts it
+    // (terminal states), hand focus to the result alert instead of <body>.
+    const refocus =
+      progressPanel.current?.contains(document.activeElement) ?? false;
     setResult({
       ...data,
       message:
@@ -127,11 +144,16 @@ function App() {
         ? "error"
         : data.status === "succeeded"
           ? "success"
-          : data.status === "review" || data.status === "revoked"
-            ? "warning"
-            : "info",
+          : data.status === "revoked"
+            ? "error"
+            : data.status === "review"
+              ? "warning"
+              : "info",
     );
-    if (["processing", "review", "succeeded"].includes(data.status ?? "")) {
+    if (data.payment_declined) {
+      setProgress(null);
+      setLocked(false);
+    } else if (["processing", "review", "succeeded"].includes(data.status ?? "")) {
       setLocked(data.status !== "review");
       setProgress((previous) =>
         data.status === "succeeded"
@@ -145,6 +167,11 @@ function App() {
       setProgress(null);
       if (ok && data.status === "active") setLocked(false);
     }
+    if (refocus)
+      requestAnimationFrame(() => {
+        if (!progressPanel.current?.contains(document.activeElement))
+          resultAlert.current?.focus();
+      });
   }
   async function send(path: string) {
     controller.current = new AbortController();
@@ -197,7 +224,7 @@ function App() {
     }
     return form.current!.reportValidity();
   }
-  function start() {
+  function start(keepProgress = false) {
     if (inFlight.current) return false;
     clearTimeout(timer.current);
     current.current = { code: cleanCode, username: cleanUser };
@@ -206,12 +233,18 @@ function App() {
     setBusy(true);
     setExhausted(false);
     setSeverity("info");
-    setProgress(5);
+    // 继续查询保留已显示的进度,避免进度条倒退(apply 维持单调不降)。
+    if (!keepProgress) setProgress(5);
     scroll();
+    // The submit/query buttons disable themselves; park focus on the progress
+    // heading so keyboard and screen-reader users are not dropped to <body>.
+    requestAnimationFrame(() => progressHeading.current?.focus());
     return true;
   }
   async function redeem() {
     setConfirmation(false);
+    if (service !== "enabled" || result?.payment_declined) return;
+    fromRedeem.current = true;
     if (!start()) return;
     setResult({ status: "processing", message: "正在核实 X 账号和赠送资格…" });
     try {
@@ -234,53 +267,37 @@ function App() {
   }
   function edit(field: "code" | "username", value: string) {
     if (field === "code") setCode(value);
-    else {
-      setUsername(value);
-      setCheckResult(null);
-    }
+    else setUsername(value);
+    // 与已提交的键值对比较（同一套清洗规则）:只在真正变化时解锁并清空
+    // 结果;空白位置等外观编辑保留当前展示(锁定也继续生效)。
+    const differs =
+      field === "code"
+        ? value.replace(/\s+/g, "").toUpperCase() !== current.current.code
+        : value.trim().replace(/^@/, "").toLowerCase() !==
+          current.current.username;
+    if (!differs) return;
+    if (locked) setLocked(false);
     setResult(null);
     setProgress(null);
     setExhausted(false);
-    // A lost response stays query-only until the server returns a known state.
-  }
-  // Advisory only: the result never blocks or alters the redemption flow.
-  async function runCheck() {
-    if (checking || busy || !userValid) return;
-    setChecking(true);
-    setCheckResult(null);
-    try {
-      const { ok, data } = await request<{
-        eligible?: boolean;
-        message?: string;
-      }>("/api/check", { username: cleanUser }, AbortSignal.timeout(45000));
-      if (ok && typeof data.eligible === "boolean") {
-        setCheckResult(
-          data.eligible
-            ? { severity: "success", message: "该账号当前可以接收赠送。" }
-            : {
-                severity: "warning",
-                message: `该账号当前无法接收赠送：${data.message || "原因未知。"}`,
-              },
-        );
-      } else {
-        setCheckResult({
-          severity: "info",
-          message: data.message || "暂时无法检测，请稍后再试。",
-        });
-      }
-    } catch {
-      setCheckResult({ severity: "info", message: "暂时无法检测，请稍后再试。" });
-    } finally {
-      setChecking(false);
-    }
   }
 
   return (
-    <Shell>
-      <Paper
-        variant="outlined"
-        sx={{ p: { xs: 2.5, sm: 4 }, borderRadius: "28px" }}
+    <Shell maxWidth="md">
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: {
+            xs: "1fr",
+            md: "minmax(0, 7fr) minmax(0, 5fr)",
+          },
+          gap: 3,
+        }}
       >
+        <Paper
+          variant="outlined"
+          sx={{ p: { xs: 2.5, sm: 4 }, borderRadius: "28px" }}
+        >
         <Stack
           direction="row"
           alignItems="center"
@@ -297,8 +314,8 @@ function App() {
           输入兑换码和 X 用户名，套餐时长以兑换码为准。
         </Typography>
         {service === "paused" && (
-          <Alert severity="info" sx={{ mb: 3 }}>
-            充值暂未开放。你可以先核实赠送资格，兑换码不会被使用。
+          <Alert severity="warning" sx={{ mb: 3 }}>
+            充值暂时暂停，恢复时间待定。请保留兑换码，已有订单仍可查询进度。
           </Alert>
         )}
         {service === "unknown" && (
@@ -311,7 +328,8 @@ function App() {
           ref={form}
           onSubmit={(event) => {
             event.preventDefault();
-            if (valid() && !locked && !busy) setConfirmation(true);
+            if (service === "enabled" && !result?.payment_declined && result?.status !== "revoked" && valid() && !locked && !busy)
+              setConfirmation(true);
           }}
           noValidate
         >
@@ -329,12 +347,13 @@ function App() {
               error={validation && !codeValid}
               helperText={
                 validation && !codeValid
-                  ? "请输入 XG- 开头、后接 48 位字母或数字的完整兑换码。"
+                  ? "请输入 XG- 开头、后接 48 位十六进制字符（0-9、A-F）的完整兑换码。"
                   : "请保留兑换码，后续查询仍需使用。"
               }
               slotProps={{
                 htmlInput: { maxLength: 80, spellCheck: false },
-                input: { sx: { fontFamily: "monospace", fontSize: 14 } },
+                input: { sx: { fontFamily: "monospace", fontSize: 16 } },
+                inputLabel: { shrink: true },
               }}
             />
             <TextField
@@ -364,46 +383,27 @@ function App() {
                 },
               }}
             />
-            <Box>
-              <Button
-                variant="text"
-                size="small"
-                disabled={!userValid || busy || checking}
-                onClick={() => void runCheck()}
-                startIcon={
-                  checking ? (
-                    <CircularProgress size={16} aria-hidden="true" />
-                  ) : (
-                    <FactCheckRounded />
-                  )
-                }
-              >
-                {checking ? "正在检测…" : "检测可否接收赠送"}
-              </Button>
-              {checkResult && (
-                <Alert
-                  severity={checkResult.severity}
-                  role="status"
-                  aria-live="polite"
-                  sx={{ mt: 1 }}
-                >
-                  {checkResult.message}
-                </Alert>
-              )}
-            </Box>
             <Button
               type="submit"
               variant="contained"
               size="large"
-              disabled={busy || locked || service === "loading"}
+              disabled={busy || locked || service !== "enabled" || result?.payment_declined || result?.status === "revoked"}
               endIcon={<ArrowForwardRounded />}
             >
-              {busy
-                ? "正在处理，请稍候"
-                : locked
-                  ? "请查询原订单进度"
+              {service === "loading"
+                ? "正在检查服务状态…"
+                : service === "unknown"
+                  ? "服务状态未知，请稍后再试"
                   : service === "paused"
-                    ? "核实赠送资格"
+                ? "充值已暂停"
+                : result?.payment_declined
+                  ? "付款被拒，请联系管理员"
+                : result?.status === "revoked"
+                  ? "兑换码已停用"
+                : busy
+                  ? "正在处理，请稍候"
+                  : locked
+                    ? "请查询原订单进度"
                     : result?.status === "review"
                       ? "重新检查并继续兑换"
                       : "兑换 Premium"}
@@ -414,6 +414,7 @@ function App() {
               disabled={busy}
               startIcon={<HistoryRounded />}
               onClick={() => {
+                fromRedeem.current = false;
                 if (valid() && start()) {
                   setResult({ message: "正在查询原订单，不会再次扣款…" });
                   void query();
@@ -428,7 +429,7 @@ function App() {
           {progress !== null && (
             <Box
               component="section"
-              aria-label="兑换进度"
+              aria-labelledby="progress-heading"
               sx={{
                 mt: 3,
                 p: 2,
@@ -442,10 +443,16 @@ function App() {
                 spacing={1}
                 sx={{ mb: 1.5 }}
               >
-                <Typography variant="body2" fontWeight={600}>
+                <Typography
+                  ref={progressHeading}
+                  id="progress-heading"
+                  tabIndex={-1}
+                  variant="body2"
+                  fontWeight={600}
+                >
                   {result?.status === "succeeded"
                     ? "兑换完成"
-                    : busy
+                    : fromRedeem.current
                       ? "兑换进度"
                       : "原订单进度"}
                 </Typography>
@@ -456,7 +463,7 @@ function App() {
               <LinearProgress
                 variant="determinate"
                 value={progress}
-                aria-label="兑换阶段进度"
+                aria-label="流程阶段进度"
                 color={result?.status === "succeeded" ? "success" : "primary"}
                 sx={{ height: 6, borderRadius: 3 }}
               />
@@ -489,12 +496,18 @@ function App() {
                 component="p"
                 sx={{ mt: 2 }}
               >
-                百分比表示流程阶段，不是预计耗时。请勿重复提交。
+                {result?.status === "succeeded"
+                  ? "百分比表示流程阶段，不是预计耗时。请保留兑换码备查。"
+                  : result?.status === "review"
+                    ? "百分比表示流程阶段，不是预计耗时。"
+                    : "百分比表示流程阶段，不是预计耗时。请勿重复提交。"}
               </Typography>
             </Box>
           )}
           {result && (
             <Alert
+              ref={resultAlert}
+              tabIndex={-1}
               severity={severity}
               role="status"
               aria-live="polite"
@@ -511,7 +524,8 @@ function App() {
               sx={{ mt: 2 }}
               onClick={() => {
                 // Resume status polling only; never re-submits the redemption.
-                if (valid() && start()) {
+                fromRedeem.current = false;
+                if (valid() && start(true)) {
                   setResult({
                     status: result.status,
                     message: "正在继续查询原订单，不会再次扣款…",
@@ -525,9 +539,10 @@ function App() {
           )}
           {result?.status === "succeeded" && (
             <Button
-              href="https://x.com/"
+              href="https://x.com/i/premium"
               target="_blank"
               rel="noopener noreferrer"
+              variant="contained"
               endIcon={<ArrowOutwardRounded />}
               fullWidth
               sx={{ mt: 2 }}
@@ -545,6 +560,8 @@ function App() {
           </Typography>
         </Stack>
       </Paper>
+      <EligibilityCard />
+      </Box>
       <Box component="section" aria-labelledby="faq-title" sx={{ mt: 4 }}>
         <Typography id="faq-title" variant="h3" component="h2" sx={{ mb: 1 }}>
           常见问题
@@ -556,7 +573,7 @@ function App() {
           ],
           [
             "账号暂时无法接收赠送怎么办？",
-            "X 会根据账号情况决定是否允许接收 Premium 赠送。兑换前可先点击用户名旁的「检测可否接收赠送」确认当前资格。首次建单前资格未通过，兑换码不会使用；已有待核实订单时，请使用原兑换码和账号重新检查，符合条件且尚未付款时会继续兑换。",
+            "X 会根据账号情况决定是否允许接收 Premium 赠送。兑换前可先用本页的「检测赠送资格」确认账号当前状态。首次建单前资格未通过，兑换码不会使用；已有待核实订单时，请使用原兑换码和账号重新检查，符合条件且尚未付款时会继续兑换。",
           ],
           [
             "等待较久或关闭页面后，如何查询？",
@@ -581,44 +598,79 @@ function App() {
             >
               <Typography fontWeight={500}>{title}</Typography>
             </AccordionSummary>
-            <AccordionDetails sx={{ px: 0, pb: 3 }}>
+            <AccordionDetails id={`faq-content-${index}`} sx={{ px: 0, pb: 3 }}>
               <Typography variant="body2" color="text.secondary">
                 {text}
               </Typography>
             </AccordionDetails>
           </Accordion>
         ))}
+        <Accordion disableGutters slotProps={{ transition: { unmountOnExit: true } }} sx={{ bgcolor: "transparent", borderBottom: 1, borderColor: "divider", "&:before": { display: "none" } }}>
+          <AccordionSummary expandIcon={<ExpandMoreRounded />} id="faq-manual-link" aria-controls="faq-manual-link-content" sx={{ px: 0, minHeight: 64 }}>
+            <Typography fontWeight={500}>没有兑换码，可以为某个用户生成 Stripe 付款链接吗？</Typography>
+          </AccordionSummary>
+          <AccordionDetails id="faq-manual-link-content" sx={{ px: 0, pb: 3 }}>
+            <ManualPaymentPanel publicMode />
+          </AccordionDetails>
+        </Accordion>
       </Box>
+      <Dialog
+        open={pauseNotice && service === "paused"}
+        onClose={() => setPauseNotice(false)}
+        aria-labelledby="pause-dialog-title"
+        aria-describedby="pause-dialog-description"
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle id="pause-dialog-title">充值暂时暂停</DialogTitle>
+        <DialogContent>
+          <DialogContentText id="pause-dialog-description">
+            当前充值服务暂时不可用，正在处理中，恢复时间待定。
+            暂停期间无法提交新的兑换，请保留兑换码。
+            已提交的订单可继续查询进度，请勿重复提交。
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            variant="contained"
+            onClick={() => setPauseNotice(false)}
+            autoFocus
+          >
+            我知道了
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Dialog
         open={confirmation}
         onClose={() => setConfirmation(false)}
         aria-labelledby="redeem-dialog-title"
+        aria-describedby="redeem-dialog-description"
         fullWidth
         maxWidth="xs"
       >
         <DialogTitle id="redeem-dialog-title">
-          {service === "paused"
-            ? "核实这个账号的赠送资格？"
-            : result?.status === "review"
-              ? "重新检查并继续这笔兑换？"
-              : "确认接收 Premium 的账号"}
+          {result?.status === "review"
+            ? "重新检查并继续这笔兑换？"
+            : "确认接收 Premium 的账号"}
         </DialogTitle>
         <DialogContent>
-          <DialogContentText>
+          <DialogContentText id="redeem-dialog-description">
             接收账号为 <strong>@{cleanUser}</strong>。
-            {service === "paused"
-              ? "服务暂停期间只核实资格，兑换码不会使用。"
-              : result?.status === "review"
-                ? "将重新核对账号资格和原订单；符合条件且尚未付款时继续付款，已提交过付款的订单只核实结果。"
-                : "提交后将开始兑换，具体时长以兑换码为准。赠送成功后无法更换账号。"}
+            {result?.status === "review"
+              ? "将重新核对账号资格和原订单；符合条件且尚未付款时继续付款，已提交过付款的订单只核实结果。"
+              : "提交后将开始兑换，具体时长以兑换码为准。赠送成功后无法更换账号。"}
           </DialogContentText>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setConfirmation(false)} autoFocus>
             返回核对
           </Button>
-          <Button variant="contained" onClick={() => void redeem()}>
-            {service === "paused" ? "确认核实" : "确认兑换"}
+          <Button
+            variant="contained"
+            disabled={service !== "enabled"}
+            onClick={() => void redeem()}
+          >
+            {result?.status === "review" ? "继续兑换" : "确认兑换"}
           </Button>
         </DialogActions>
       </Dialog>

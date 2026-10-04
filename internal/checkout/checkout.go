@@ -14,10 +14,14 @@ import (
 )
 
 type Record struct {
+	ReplacementCount  int          `json:"replacement_count,omitempty"`
+	PreviousSession   string       `json:"previous_session,omitempty"`
+	ManualRecovery    bool         `json:"manual_recovery,omitempty"`
 	CreationRetryable bool         `json:"creation_retryable,omitempty"`
 	CreationAttempts  int          `json:"creation_attempts,omitempty"`
 	PreflightSaved    bool         `json:"preflight_saved,omitempty"`
 	PaymentMethod     string       `json:"payment_method,omitempty"`
+	CardFingerprint   string       `json:"card_fingerprint,omitempty"`
 	ConfirmParameters string       `json:"confirm_parameters,omitempty"`
 	ConfirmKey        string       `json:"confirm_key,omitempty"`
 	SubmittedAt       int64        `json:"submitted_at,omitempty"`
@@ -63,6 +67,15 @@ func RunForRecipient(ctx context.Context, v *vault.Vault, user, expectedRecipien
 }
 
 func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pay bool, port, months int) (*Record, error) {
+	if pay {
+		paused, err := PaymentPaused(v)
+		if err != nil {
+			return nil, err
+		}
+		if paused {
+			return nil, ErrPaymentPaused
+		}
+	}
 	user = strings.ToLower(strings.TrimPrefix(user, "@"))
 	if !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(user) {
 		return nil, errors.New("invalid username")
@@ -87,6 +100,13 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	}
 	if expectedRecipient != "" && recipient != expectedRecipient {
 		return nil, errors.New("recipient identity changed; refusing to create or pay an order")
+	}
+	// Public manual checkouts must never be taken over by saved-card payment.
+	if raw, err := v.Get("public-checkout:" + recipient); err == nil {
+		clear(raw)
+		return nil, ErrPublicLinkConflict
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
 	}
 	// Fail closed on legacy records rather than silently bypassing an earlier attempt.
 	if _, e = v.Get("checkout:" + user); e == nil {
@@ -168,7 +188,11 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 			return &r, e
 		}
 	}
-	s, e := newStripe(v, port)
+	paymentFlow := paymentRead
+	if pay {
+		paymentFlow = paymentPay
+	}
+	s, e := newStripe(ctx, v, r.RecipientID, paymentFlow)
 	if e != nil {
 		return &r, e
 	}
@@ -191,13 +215,19 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	if !pay {
 		return &r, nil
 	}
-	c, e := readCard(v)
+	c, e := s.paymentCard()
 	if e != nil {
 		return &r, e
 	}
+	r.CardFingerprint = cardFingerprint(c)
 	progress(ctx, 70, "正在准备付款，请勿重复提交…")
 	method, e := s.tokenize(ctx, &r, c)
 	if e != nil {
+		if cardTokenizationRejected(e) {
+			// The card itself was rejected before any submit: end the batch so the
+			// next attempt rotates to another card instead of retrying this one.
+			_ = markPaymentDecline(v, r.RecipientID)
+		}
 		return &r, e
 	}
 	// Refresh after card creation; confirmation also pins the expected amount server-side.
@@ -214,6 +244,9 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 func submitAndObserve(ctx context.Context, v *vault.Vault, r *Record, s *stripeClient, page *paymentPage, method string, plan Plan, status string) (*Record, error) {
 	if len(page.raw) == 0 {
 		return r, errors.New("missing original preflight response")
+	}
+	if err := reservePaymentSlot(ctx, v, r); err != nil {
+		return r, err
 	}
 	if err := v.Put("stripe-preflight:"+r.SessionID, page.raw); err != nil {
 		return r, err
@@ -240,6 +273,14 @@ func confirmAndObserve(ctx context.Context, v *vault.Vault, r *Record, s *stripe
 		if errors.As(confirmErr, &se) {
 			r.LastError = se
 		}
+		if IsPaymentDeclined(r) {
+			r.Status = "declined"
+		}
+		// Save the response before any polling so interruptions cannot erase a
+		// definite decline or leave it falsely labelled as still submitting.
+		if e = save(v, r); e != nil {
+			return r, e
+		}
 	}
 	// Poll the result endpoint: init is no longer available once a session completes.
 	// This loop only reads status; confirmation is never resubmitted.
@@ -257,15 +298,31 @@ observe:
 			if state == "succeeded" {
 				r.Status = "succeeded"
 				r.LastError = nil
-				return r, save(v, r)
+				if e = save(v, r); e != nil {
+					return r, e
+				}
+				return r, paymentOutcome(v, r)
 			}
 			if state == "requires_action" {
 				r.Status = "requires_action"
 				if e = save(v, r); e != nil {
 					return r, e
 				}
+				if e = markAuthenticationRequired(v, r); e != nil {
+					return r, e
+				}
 				return r, errors.New("bank authentication is required; use this existing checkout")
 			}
+		}
+		if IsPaymentDeclined(r) {
+			r.Status = "declined"
+			if e = save(v, r); e != nil {
+				return r, e
+			}
+			if e = paymentOutcome(v, r); e != nil {
+				return r, e
+			}
+			return r, confirmErr
 		}
 		if ctx.Err() != nil {
 			break

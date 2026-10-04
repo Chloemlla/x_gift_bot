@@ -46,7 +46,7 @@ createServer(async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader(
     "Content-Security-Policy",
-    `default-src 'none'; script-src 'self'; style-src 'self' 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+    `default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
   );
   res.setHeader("X-Content-Type-Options", "nosniff");
   const url = new URL(req.url, `http://127.0.0.1:${port}`);
@@ -55,6 +55,12 @@ createServer(async (req, res) => {
     res.end(JSON.stringify(data));
   }
   try {
+    if (url.pathname === "/api/security") {
+      return json(200, { turnstile_enabled: process.env.PREVIEW_TURNSTILE === "true", turnstile_site_key: process.env.PREVIEW_TURNSTILE === "true" ? "1x00000000000000000000AA" : "" });
+    }
+    if (process.env.PREVIEW_TURNSTILE === "true" && req.method === "POST" && ["/api/check", "/api/redeem", "/api/manual-link"].includes(url.pathname) && !req.headers["x-turnstile-token"]) {
+      return json(403, { message: "请完成人机验证后重试。" });
+    }
     if (req.method === "GET" && files[url.pathname]) {
       const [file, type] = files[url.pathname];
       let data = await readFile(
@@ -72,6 +78,10 @@ createServer(async (req, res) => {
       }
       res.writeHead(200, { "Content-Type": type });
       res.end(data);
+      return;
+    }
+    if (req.method === "GET" && ["/api/admin/manual-link/plans", "/api/manual-link/plans"].includes(url.pathname)) {
+      json(200, { plans: [{months: 3, amount: 30000, currency: "BDT"}, {months: 6, amount: 60000, currency: "BDT"}] });
       return;
     }
     if (req.method === "GET" && url.pathname === "/healthz") {
@@ -121,6 +131,71 @@ createServer(async (req, res) => {
       return;
     }
     if (req.method !== "POST") {
+      if (req.method === "GET" && url.pathname === "/api/admin/recovery") {
+        // PREVIEW_NETWORK=direct 可预览直连模式;默认节点池。
+        const direct = process.env.PREVIEW_NETWORK === "direct";
+        json(200, {
+          batch: null,
+          network: direct
+            ? { mode: "direct", nodes: 0 }
+            : { mode: "pool", nodes: 12, available: 9, cooling: 3 },
+          cards: [
+            { last4: "4242", usable: true },
+            { last4: "1881", usable: true, cooling_seconds: 1500 },
+            {
+              last4: "0005",
+              usable: true,
+              blocked: "do_not_try_again",
+              pair_cooling: 2,
+            },
+            { last4: "9917", usable: false, problem: "card has expired" },
+          ],
+          rotation: {
+            batch_size: 3,
+            used: 2,
+            card_last4: "4242",
+            node: direct ? "direct" : "node-1a2b3c4d5e6f",
+          },
+          paused: false,
+          summary: {
+            review: codes.filter((code) => code.status === "review").length,
+            processing: codes.filter((code) => code.status === "processing")
+              .length,
+          },
+        });
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/api/admin/customer") {
+        const key = url.searchParams.get("id") || "";
+        const user = (url.searchParams.get("username") || "")
+          .replace(/^@/, "")
+          .toLowerCase();
+        const found = codes.find(
+          (code) =>
+            (key && code.id === key) || (user && code.username === user),
+        );
+        if (!found) {
+          json(404, { message: "没有找到对应的订单，请核对后重试。" });
+          return;
+        }
+        json(200, {
+          order: {
+            id: found.id,
+            username: found.username,
+            hint: found.hint,
+            months: found.months,
+            status: found.status,
+            message: found.message,
+            batch: found.batch,
+          },
+          code: plaintext.get(found.id) || "",
+          checkout_url: "",
+          previous_checkout_url: "",
+          can_recover: false,
+          replacement_count: 0,
+        });
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/api/admin/stats") {
         const daily = [];
         for (let offset = 29; offset >= 0; offset--) {
@@ -174,8 +249,21 @@ createServer(async (req, res) => {
       }
     }
     const body = JSON.parse(raw);
-    if (
-      url.pathname === "/api/admin/folders" ||
+    if (["/api/admin/manual-link", "/api/manual-link"].includes(url.pathname)) {
+      if (![3, 6].includes(body.months) || !/^[a-z0-9_]{1,15}$/.test(body.username || "")) {
+        json(400, {message: "请填写正确用户名和套餐。"}); return;
+      }
+      if (body.username === "expired_demo" && !body.verified_unpaid) {
+        json(409, {message: "原付款链接已失效，请核实原订单未付款后再重新生成。", needs_unpaid_verification: true}); return;
+      }
+      json(200, {username: body.username, months: body.months, amount: body.months === 3 ? 30000 : 60000, currency: "BDT", status: "created", checkout_url: "https://checkout.stripe.com/c/pay/cs_test_ManualPreviewOnly"});
+      return;
+    }
+    if (url.pathname.startsWith("/api/admin/recovery/")) {
+      json(503, { message: "本地模拟预览不提供补单操作。" });
+      return;
+    }
+    if (url.pathname === "/api/admin/folders" ||
       url.pathname === "/api/admin/folders/rename"
     ) {
       const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -302,6 +390,30 @@ createServer(async (req, res) => {
         months: body.months,
         folder: body.folder || "",
       });
+      return;
+    }
+    if (url.pathname === "/api/admin/lookup") {
+      const full =
+        typeof body.code === "string" ? body.code.trim().toUpperCase() : "";
+      if (!/^XG-[A-F0-9]{48}$/.test(full)) {
+        json(400, { message: "请填写 XG- 开头、后接 48 位字符的完整兑换码。" });
+        return;
+      }
+      // Fixed demo hit so a found result can be previewed without generating.
+      if (full === "XG-" + "5".repeat(48)) {
+        json(200, { ...codes[2], progress: 100, updated: now });
+        return;
+      }
+      const entry = [...plaintext.entries()].find(
+        ([, value]) => value === full,
+      );
+      const found = entry && codes.find((code) => code.id === entry[0]);
+      json(
+        found ? 200 : 404,
+        found
+          ? { ...found, updated: found.created, progress: 0 }
+          : { message: "没有找到这个兑换码，请核对后重试。" },
+      );
       return;
     }
     if (url.pathname === "/api/admin/codes/copy") {

@@ -36,24 +36,24 @@ import ConfirmationNumberOutlined from "@mui/icons-material/ConfirmationNumberOu
 import { mount, Shell } from "./shared";
 import { AppearanceMenu } from "./AppearanceMenu";
 import { CopyableCodes } from "./CopyableCodes";
-import { adminApi as api, type AdminStats, type Folder } from "./adminApi";
+import {
+  adminApi as api,
+  formatTime,
+  type AdminCode,
+  type AdminStats,
+  type Folder,
+} from "./adminApi";
+import { codeStatus as statuses } from "./codeStatus";
 import { FolderPanel } from "./FolderPanel";
 import { FilterBar } from "./FilterBar";
 import { parseFilter } from "./filter";
+import { CustomerPanel, type RecoverySelection } from "./CustomerPanel";
+import { LookupPanel } from "./LookupPanel";
+import { RecoveryPanel } from "./RecoveryPanel";
 import { StatsPanel } from "./StatsPanel";
+import { ManualPaymentPanel } from "./ManualPaymentPanel";
 
-type Code = {
-  copyable: boolean;
-  folder: string;
-  id: string;
-  hint: string;
-  batch: string;
-  months: number;
-  status: string;
-  username: string;
-  message: string;
-  created: number;
-};
+type Code = AdminCode;
 type Listing = {
   folder: string;
   folders: Folder[];
@@ -70,17 +70,13 @@ type Generated = {
   folder: string;
 };
 type Confirmation = { kind: "revoke"; code: Code } | null;
-const statuses: Record<
-  string,
-  { label: string; color: "default" | "primary" | "success" | "warning" }
-> = {
-  active: { label: "可使用", color: "primary" },
-  processing: { label: "处理中", color: "primary" },
-  succeeded: { label: "已完成", color: "success" },
-  review: { label: "待核实", color: "warning" },
-  revoked: { label: "已停用", color: "default" },
-};
 function Admin() {
+  const [customerSelection, setCustomerSelection] = useState<{
+    id: string;
+    seq: number;
+  } | null>(null);
+  const [recoverySelection, setRecoverySelection] =
+    useState<RecoverySelection | null>(null);
   const [listing, setListing] = useState<Listing | null>(null);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState("");
@@ -89,6 +85,8 @@ function Admin() {
   const [count, setCount] = useState("10");
   const [batch, setBatch] = useState("");
   const [copyNotice, setCopyNotice] = useState("");
+  // 连续复制时重置 Snackbar 的自动隐藏计时，避免第二条提示一闪而过。
+  const [copySeq, setCopySeq] = useState(0);
   const copying = useRef(false);
   const [selectedIDs, setSelectedIDs] = useState<string[]>([]);
   const [moveOpen, setMoveOpen] = useState(false);
@@ -113,7 +111,7 @@ function Admin() {
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [batchError, setBatchError] = useState(false);
   const [countError, setCountError] = useState(false);
-  const [focusTarget, setFocusTarget] = useState<"form" | "list" | null>(null);
+  const [focusTarget, setFocusTarget] = useState<"list" | null>(null);
   const [statsSignal, setStatsSignal] = useState(0);
   const listSequence = useRef(0);
   const mutation = useRef(false);
@@ -123,6 +121,8 @@ function Admin() {
   const refresh = useCallback(
     async (page: number, folder = filterRef.current) => {
       const sequence = ++listSequence.current;
+      // 跨页翻页保留选择；只有切换批次时才清空（筛选模式的进出单独管理）。
+      const switchingFolder = folder !== filterRef.current;
       setLoading(true);
       setListError("");
       try {
@@ -132,7 +132,7 @@ function Admin() {
         if (sequence === listSequence.current) {
           setListing(data);
           filterRef.current = data.folder;
-          setSelectedIDs([]);
+          if (switchingFolder) setSelectedIDs([]);
           // The panel fetches on mount; only nudge it for later refreshes.
           if (sequence > 1) setStatsSignal((value) => value + 1);
         }
@@ -152,7 +152,7 @@ function Admin() {
   // Filter mode: parse the expression, fetch every page client-side, then
   // evaluate the predicate locally. Shares listSequence with refresh() so
   // overlapping loads from either mode cancel each other.
-  const applyFilter = useCallback(async (source: string) => {
+  const applyFilter = useCallback(async (source: string, keepPage = false) => {
     let match: (code: Code) => boolean;
     try {
       match = parseFilter(source);
@@ -177,7 +177,7 @@ function Admin() {
       setAllCodes(codes);
       setActiveFilter({ source, match });
       setApplySeq((value) => value + 1);
-      setFilterPage(0);
+      if (!keepPage) setFilterPage(0);
       setSelectedIDs([]);
     } catch (error) {
       if (sequence === listSequence.current)
@@ -194,12 +194,18 @@ function Admin() {
     setFilterError("");
     setFilterPage(0);
     setSelectedIDs([]);
-    if (reload) void refresh(0);
+    if (reload) void refresh(0, "");
   }
 
+  // After any mutation, reload the current view and keep stats/lookup panels
+  // in sync (applyFilter does not touch statsSignal on its own; refresh does).
   function reloadCurrent() {
-    if (activeFilter) void applyFilter(activeFilter.source);
-    else void refresh(listing?.page ?? 0);
+    if (activeFilter) {
+      void applyFilter(activeFilter.source, true);
+      setStatsSignal((value) => value + 1);
+    } else {
+      void refresh(listing?.page ?? 0);
+    }
   }
 
   useEffect(() => {
@@ -207,7 +213,6 @@ function Admin() {
     // Restore to a surviving control after the dialog's exit transition.
     const timer = setTimeout(() => {
       if (focusTarget === "list") refreshButton.current?.focus();
-      else form.current?.querySelector<HTMLElement>("[role=combobox]")?.focus();
       setFocusTarget(null);
     }, 250);
     return () => clearTimeout(timer);
@@ -216,6 +221,7 @@ function Admin() {
   async function copyRow(code: Code) {
     if (!code.copyable) {
       setCopyNotice("历史兑换码未保存完整内容，请使用原先下载的 TXT。");
+      setCopySeq((value) => value + 1);
       return;
     }
     if (copying.current) return;
@@ -240,6 +246,7 @@ function Admin() {
     } catch {
       setCopyNotice("复制失败，请检查剪贴板权限或稍后重试。");
     } finally {
+      setCopySeq((value) => value + 1);
       copying.current = false;
     }
   }
@@ -282,6 +289,7 @@ function Admin() {
     try {
       await api("/api/admin/revoke", { id: confirmation.code.id });
       setNotice({ text: "兑换码已停用。", error: false });
+      setSelectedIDs([]);
       setFocusTarget("list");
       setConfirmation(null);
       reloadCurrent();
@@ -307,6 +315,7 @@ function Admin() {
         text: `已移动 ${selectedIDs.length} 枚兑换码。`,
         error: false,
       });
+      setSelectedIDs([]);
       setMoveOpen(false);
       setFocusTarget("list");
       reloadCurrent();
@@ -343,6 +352,8 @@ function Admin() {
   const visibleCodes = matched
     ? matched.slice(safeFilterPage * 100, safeFilterPage * 100 + 100)
     : (listing?.codes ?? []);
+  const pageIDs = visibleCodes.map((code) => code.id);
+  const pageSelected = pageIDs.filter((id) => selectedIDs.includes(id));
 
   return (
     <Shell admin>
@@ -372,20 +383,47 @@ function Admin() {
               listing
                 ? listing.payments_enabled
                   ? "充值已开放"
-                  : "充值暂停 · 不会付款"
+                  : "用户充值入口已暂停"
                 : "正在获取服务状态"
             }
           />
           <AppearanceMenu />
         </Stack>
       </Stack>
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: {
+            xs: "1fr",
+            md: "minmax(0, 1fr) minmax(0, 1fr)",
+          },
+          gap: 3,
+          mb: 3,
+          alignItems: "stretch",
+        }}
+      >
+        <CustomerPanel
+          selected={customerSelection}
+          onPrepare={(id, mode) =>
+            setRecoverySelection({ id, mode, seq: Date.now() })
+          }
+        />
+        <LookupPanel
+          disabled={busy || loading}
+          refreshSignal={statsSignal}
+          onCopy={(code) => void copyRow(code)}
+          onViewCustomer={(id) => setCustomerSelection({ id, seq: Date.now() })}
+          onRevoke={(code) => setConfirmation({ kind: "revoke", code })}
+        />
+      </Box>
+      <ManualPaymentPanel />
+      <RecoveryPanel selection={recoverySelection} />
       <StatsPanel refreshSignal={statsSignal} />
       <FolderPanel
         folders={listing?.folders ?? []}
         stats={listing?.stats}
         filter={listing?.folder ?? ""}
         disabled={busy || loading}
-        muted={!!activeFilter}
         onSelect={(folder) => {
           // Clicking a folder chip while the expression filter is active
           // exits filter mode and returns to normal folder filtering.
@@ -410,8 +448,7 @@ function Admin() {
           mutation.current = value;
           setBusy(value);
         }}
-        onChanged={async (deleted) => {
-          if (deleted === filterRef.current) filterRef.current = "";
+        onChanged={async () => {
           if (activeFilter) reloadCurrent();
           else await refresh(0);
         }}
@@ -504,7 +541,10 @@ function Admin() {
               type="number"
               required
               value={count}
-              onChange={(event) => setCount(event.target.value)}
+              onChange={(event) => {
+                setCount(event.target.value);
+                if (countError) setCountError(false);
+              }}
               disabled={busy}
               error={countError}
               helperText={
@@ -516,7 +556,10 @@ function Admin() {
               label="批次名称（可选）"
               placeholder="例如：十月赠礼"
               value={batch}
-              onChange={(event) => setBatch(event.target.value)}
+              onChange={(event) => {
+                setBatch(event.target.value);
+                if (batchError) setBatchError(false);
+              }}
               disabled={busy}
               error={batchError}
               helperText={
@@ -541,6 +584,8 @@ function Admin() {
         <Alert
           severity={notice.error ? "error" : "success"}
           role="status"
+          closeText="关闭"
+          onClose={notice.error ? undefined : () => setNotice(null)}
           sx={{ mb: 3 }}
         >
           {notice.text}
@@ -622,7 +667,7 @@ function Admin() {
         </Stack>
         {loading && <LinearProgress aria-label="正在加载兑换码" />}
         {listError && (
-          <Alert severity="error" sx={{ m: 2 }}>
+          <Alert severity="error" role="alert" sx={{ m: 2 }}>
             {listError}
             {(listing || allCodes) && " 以下保留上次加载的数据。"}
             <Button onClick={() => reloadCurrent()}>重新加载</Button>
@@ -678,18 +723,17 @@ function Admin() {
                       busy || loading || !!listError || !visibleCodes.length
                     }
                     checked={
-                      !!visibleCodes.length &&
-                      selectedIDs.length === visibleCodes.length
+                      !!pageIDs.length && pageSelected.length === pageIDs.length
                     }
                     indeterminate={
-                      selectedIDs.length > 0 &&
-                      selectedIDs.length < visibleCodes.length
+                      pageSelected.length > 0 &&
+                      pageSelected.length < pageIDs.length
                     }
                     onChange={(event) =>
-                      setSelectedIDs(
+                      setSelectedIDs((ids) =>
                         event.target.checked
-                          ? visibleCodes.map((code) => code.id)
-                          : [],
+                          ? [...new Set([...ids, ...pageIDs])]
+                          : ids.filter((id) => !pageIDs.includes(id)),
                       )
                     }
                   />
@@ -791,18 +835,25 @@ function Admin() {
                   </TableCell>
                   <TableCell>
                     <Typography variant="body2" sx={{ whiteSpace: "nowrap" }}>
-                      {new Date(code.created * 1000).toLocaleDateString(
-                        "zh-CN",
-                      )}
+                      {formatTime(code.created).slice(0, 10)}
                     </Typography>
                     <Typography variant="caption" color="text.secondary">
-                      {new Date(code.created * 1000).toLocaleTimeString(
-                        "zh-CN",
-                      )}
+                      {formatTime(code.created).slice(11)}
                     </Typography>
                   </TableCell>
                   <TableCell onClick={(e) => e.stopPropagation()}>
                     <Stack direction="row" spacing={1}>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        disabled={busy || loading}
+                        onClick={() =>
+                          setCustomerSelection({ id: code.id, seq: Date.now() })
+                        }
+                        sx={{ whiteSpace: "nowrap", flexShrink: 0 }}
+                      >
+                        查看兑换码 / 补单
+                      </Button>
                       <Tooltip
                         describeChild
                         title={
@@ -917,7 +968,9 @@ function Admin() {
                   上一页
                 </Button>
                 <Button
-                  disabled={loading || busy || safeFilterPage >= filterPages - 1}
+                  disabled={
+                    loading || busy || safeFilterPage >= filterPages - 1
+                  }
                   onClick={() => setFilterPage(safeFilterPage + 1)}
                   sx={{ px: 1.5 }}
                 >
@@ -928,9 +981,16 @@ function Admin() {
           ) : (
             <>
               <Typography variant="body2" color="text.secondary">
-                {listing?.folder
-                  ? `第 ${listing.page + 1} 页`
-                  : `共 ${listing?.stats.total ?? 0} 条 · 第 ${(listing?.page ?? 0) + 1} / ${Math.max(1, Math.ceil((listing?.stats.total ?? 0) / 100))} 页`}
+                {(() => {
+                  const total = listing?.folder
+                    ? listing.folder === "unfiled"
+                      ? (listing?.stats.unfiled ?? 0)
+                      : (listing?.folders.find(
+                          (folder) => folder.id === listing.folder,
+                        )?.count ?? 0)
+                    : (listing?.stats.total ?? 0);
+                  return `共 ${total} 条 · 第 ${(listing?.page ?? 0) + 1} / ${Math.max(1, Math.ceil(total / 100))} 页`;
+                })()}
               </Typography>
               <Stack direction="row" spacing={1}>
                 <Button
@@ -961,6 +1021,7 @@ function Admin() {
         fullWidth
         maxWidth="xs"
         aria-labelledby="move-dialog-title"
+        aria-describedby="move-dialog-description"
       >
         <DialogTitle id="move-dialog-title">
           移动 {selectedIDs.length} 枚兑换码
@@ -972,6 +1033,10 @@ function Admin() {
             value={moveTarget}
             disabled={busy}
             onChange={(event) => setMoveTarget(event.target.value)}
+            slotProps={{
+              select: { displayEmpty: true },
+              inputLabel: { shrink: true },
+            }}
             sx={{ mt: 1 }}
           >
             <MenuItem value="">未分类</MenuItem>
@@ -985,7 +1050,7 @@ function Admin() {
               </MenuItem>
             ))}
           </TextField>
-          <DialogContentText sx={{ mt: 2 }}>
+          <DialogContentText id="move-dialog-description" sx={{ mt: 2 }}>
             只修改归属分类，不改变兑换码、账号和订单状态。
           </DialogContentText>
         </DialogContent>
@@ -1008,13 +1073,15 @@ function Admin() {
         onClose={() => {
           if (!busy) setConfirmation(null);
         }}
+        role="alertdialog"
         aria-labelledby="admin-dialog-title"
+        aria-describedby="admin-dialog-description"
         maxWidth="xs"
         fullWidth
       >
         <DialogTitle id="admin-dialog-title">停用这枚兑换码？</DialogTitle>
         <DialogContent>
-          <DialogContentText>
+          <DialogContentText id="admin-dialog-description">
             {`尾号 ${confirmation?.code.hint ?? ""} 的兑换码将无法使用。此操作不可撤销。`}
           </DialogContentText>
         </DialogContent>
@@ -1037,10 +1104,12 @@ function Admin() {
         </DialogActions>
       </Dialog>
       <Snackbar
+        key={copySeq}
         open={!!copyNotice}
         autoHideDuration={4000}
         onClose={() => setCopyNotice("")}
         message={copyNotice}
+        slotProps={{ content: { role: "status" } }}
       />
     </Shell>
   );

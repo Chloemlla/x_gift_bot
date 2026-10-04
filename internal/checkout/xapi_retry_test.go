@@ -59,6 +59,7 @@ func TestXQuery403Recovery(t *testing.T) {
 				}
 				return &http.Response{StatusCode: code, Header: http.Header{"Retry-After": {tt.retryAfter}, "Content-Type": {"application/json"}, "X-Request-Id": {"fixture-request"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 			})}}
+			c.regionalHTTP = c.http
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			var out json.RawMessage

@@ -14,16 +14,27 @@ import {
 } from "@mui/material";
 import GitHubIcon from "@mui/icons-material/GitHub";
 import { theme } from "./theme";
+import { humanToken, HumanVerification } from "./HumanVerification";
 
 export async function request<T>(
   path: string,
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<{ ok: boolean; data: T }> {
+  const actions: Record<string, string> = { "/api/redeem": "redeem", "/api/check": "check", "/api/manual-link": "manual_link" };
+  let token = "";
+  if (body !== undefined && actions[path]) {
+    try {
+      token = await humanToken(actions[path], signal);
+      signal?.throwIfAborted();
+    } catch (error) {
+      return { ok: false, data: { status: "verification_required", message: error instanceof Error && error.name !== "TimeoutError" && error.name !== "AbortError" ? error.message : "人机验证已超时，本次操作尚未提交，请重试。" } as T };
+    }
+  }
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
     headers:
-      body === undefined ? undefined : { "Content-Type": "application/json" },
+      body === undefined ? undefined : { "Content-Type": "application/json", ...(token ? { "X-Turnstile-Token": token } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",
     signal: signal ?? AbortSignal.timeout(45000),
@@ -46,17 +57,21 @@ class ErrorBoundary extends Component<
     return { failed: true };
   }
   render() {
-    if (this.state.failed)
+    if (this.state.failed) {
+      const admin = window.location.pathname.startsWith("/admin");
       return (
         <Container sx={{ py: 8 }}>
           <Alert severity="error">
-            页面暂时无法显示。若已提交兑换，请保留兑换码，重新打开页面后查询原订单；不要重复兑换。
+            {admin
+              ? "管理页暂时无法显示。进行中的兑换不受影响，请重新打开后继续核实。"
+              : "页面暂时无法显示。若已提交兑换，请保留兑换码，重新打开页面后查询原订单；不要重复兑换。"}
           </Alert>
-          <Button href="/" sx={{ mt: 2 }}>
-            重新打开兑换页
+          <Button href={admin ? "/admin" : "/"} sx={{ mt: 2 }}>
+            {admin ? "重新打开管理页" : "重新打开兑换页"}
           </Button>
         </Container>
       );
+    }
     return this.props.children;
   }
 }
@@ -76,7 +91,7 @@ export function mount(node: ReactNode) {
         modeStorageKey="xgift-mode"
       >
         <CssBaseline />
-        <ErrorBoundary>{node}</ErrorBoundary>
+        <ErrorBoundary>{node}<HumanVerification /></ErrorBoundary>
       </ThemeProvider>
     </CacheProvider>,
   );
@@ -84,18 +99,45 @@ export function mount(node: ReactNode) {
 
 export function Shell({
   admin = false,
+  maxWidth,
   children,
 }: {
   admin?: boolean;
+  maxWidth?: "xs" | "sm" | "md" | "lg";
   children: ReactNode;
 }) {
   return (
-    <Container
-      id="main"
-      component="main"
-      maxWidth={admin ? "lg" : "sm"}
-      sx={{ py: { xs: 3, sm: 6 } }}
-    >
+    <>
+      <Link
+        href="#main"
+        sx={{
+          position: "absolute",
+          left: 16,
+          top: -64,
+          zIndex: (theme) => theme.zIndex.tooltip,
+          px: 2,
+          py: 1,
+          borderRadius: 1,
+          bgcolor: "background.paper",
+          color: "text.primary",
+          fontWeight: 600,
+          transition: "top 160ms ease",
+          "&:focus-visible": { top: 16 },
+          "@media (prefers-reduced-motion: reduce)": { transition: "none" },
+        }}
+      >
+        跳转到主要内容
+      </Link>
+      <Container
+        id="main"
+        component="main"
+        tabIndex={-1}
+        maxWidth={maxWidth ?? (admin ? "lg" : "sm")}
+        sx={{
+          py: { xs: 3, sm: 6 },
+          "&:focus-visible": { outline: "none" },
+        }}
+      >
       {children}
       <Box
         component="footer"
@@ -144,6 +186,7 @@ export function Shell({
           GitHub
         </Link>
       </Box>
-    </Container>
+      </Container>
+    </>
   );
 }

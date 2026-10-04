@@ -40,18 +40,23 @@ var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{1,15}$`)
 var codePattern = regexp.MustCompile(`^XG-[A-F0-9]{48}$`)
 
 type server struct {
-	db        *sql.DB
-	vault     *vault.Vault
-	origin    string
-	adminHash [32]byte
-	payments  bool
-	port      int
-	lockPath  string
-	work      chan struct{}
-	jobs      sync.WaitGroup
-	ctx       context.Context
-	limitsMu  sync.Mutex
-	limits    map[string]limit
+	turnstileSiteKey string
+	turnstileSecret  string
+	turnstileHTTP    *http.Client
+	db               *sql.DB
+	vault            *vault.Vault
+	origin           string
+	adminHash        [32]byte
+	payments         bool
+	port             int
+	lockPath         string
+	work             chan struct{}
+	checks           chan struct{}
+	jobs             sync.WaitGroup
+	ctx              context.Context
+	recoveryMu       sync.Mutex
+	limitsMu         sync.Mutex
+	limits           map[string]limit
 }
 type limit struct {
 	start time.Time
@@ -107,13 +112,20 @@ func Run(ctx context.Context) error {
 	if len(admin) < 32 {
 		return errors.New("admin password must contain at least 32 characters")
 	}
-	s := &server{origin: origin, adminHash: sha256.Sum256(admin), payments: os.Getenv("XGIFT_PAYMENTS_ENABLED") == "true", lockPath: filepath.Join(dir, "checkout.lock"), work: make(chan struct{}, 1), ctx: ctx, limits: map[string]limit{}}
+	s := &server{origin: origin, adminHash: sha256.Sum256(admin), payments: os.Getenv("XGIFT_PAYMENTS_ENABLED") == "true", lockPath: filepath.Join(dir, "checkout.lock"), work: make(chan struct{}, 1), checks: make(chan struct{}, 4), ctx: ctx, limits: map[string]limit{}}
 	clear(admin)
+	if err = s.configureTurnstile(); err != nil {
+		return err
+	}
 	v, err := vault.Open(filepath.Join(dir, "vault.db"), os.Getenv("XGIFT_PASSWORD_FILE"), false)
 	if err != nil {
 		return err
 	}
 	s.vault = v
+	if err = s.initRecovery(); err != nil {
+		v.Close()
+		return err
+	}
 	defer v.Close()
 	if s.payments {
 		if err = checkout.CheckPaymentConfiguration(v); err != nil {
@@ -210,15 +222,31 @@ func Run(ctx context.Context) error {
 			reply(w, 503, map[string]any{"ok": false})
 			return
 		}
-		reply(w, 200, map[string]any{"ok": true, "payments_enabled": s.payments})
+		ready, err := s.paymentsAvailable()
+		if err != nil {
+			reply(w, 503, map[string]any{"ok": false, "payments_enabled": false})
+			return
+		}
+		reply(w, 200, map[string]any{"ok": true, "payments_enabled": ready})
 	})
-	mux.HandleFunc("POST /api/redeem", s.redeem)
+	mux.HandleFunc("GET /api/security", s.securityConfig)
+	mux.HandleFunc("POST /api/redeem", s.human("redeem", s.redeem))
+	mux.HandleFunc("GET /api/manual-link/plans", s.publicLinkPlans)
+	mux.HandleFunc("POST /api/manual-link", s.human("manual_link", s.publicLink))
 	mux.HandleFunc("POST /api/status", s.status)
-	mux.HandleFunc("POST /api/check", s.check)
+	mux.HandleFunc("POST /api/check", s.human("check", s.check))
 	mux.HandleFunc("GET /admin", s.admin(s.asset("admin.html", "text/html; charset=utf-8")))
 	mux.HandleFunc("GET /admin.js", s.admin(s.asset("admin.js", "application/javascript; charset=utf-8")))
 	mux.HandleFunc("GET /api/admin/codes", s.admin(s.list))
+	mux.HandleFunc("POST /api/admin/lookup", s.admin(s.lookup))
 	mux.HandleFunc("GET /api/admin/stats", s.admin(s.stats))
+	mux.HandleFunc("GET /api/admin/customer", s.admin(s.customerOrder))
+	mux.HandleFunc("GET /api/admin/manual-link/plans", s.admin(s.manualLinkPlans))
+	mux.HandleFunc("POST /api/admin/manual-link", s.admin(s.manualLink))
+	mux.HandleFunc("GET /api/admin/recovery", s.admin(s.recoveryStatus))
+	mux.HandleFunc("POST /api/admin/recovery/preview", s.admin(s.recoveryPreview))
+	mux.HandleFunc("POST /api/admin/recovery/start", s.admin(s.recoveryStart))
+	mux.HandleFunc("POST /api/admin/recovery/stop", s.admin(s.recoveryStop))
 	mux.HandleFunc("POST /api/admin/codes", s.admin(s.generate))
 	mux.HandleFunc("POST /api/admin/revoke", s.admin(s.revoke))
 	mux.HandleFunc("POST /api/admin/folders", s.admin(s.createFolder))
@@ -380,7 +408,7 @@ func (s *server) middleware(next http.Handler) http.Handler {
 		nonce := token(16)
 		r = r.WithContext(context.WithValue(r.Context(), nonceContextKey{}, nonce))
 		// Emotion style elements use a fresh nonce. MUI also sets dynamic style attributes.
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'nonce-"+nonce+"'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'nonce-"+nonce+"'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -400,6 +428,9 @@ func (s *server) middleware(next http.Handler) http.Handler {
 			if r.URL.Path == "/api/redeem" {
 				max = 8
 				bucket = "redeem:"
+			} else if r.URL.Path == "/api/manual-link" {
+				max = 4
+				bucket = "manual-link:"
 			} else if r.URL.Path == "/api/check" {
 				max = 8
 				bucket = "check:"
@@ -459,14 +490,15 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	if c.Status == "review" {
 		s.reconcileStatus(r.Context(), &c)
 	}
-	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message, "progress": c.Progress, "rechecking": s.autoChecking(&c)})
+	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message, "progress": c.Progress, "rechecking": s.autoChecking(&c), "payment_declined": s.paymentDeclined(&c)})
 }
+
 // eligibilityCheck is the read-only X pre-check; tests substitute a fake.
 var eligibilityCheck = checkout.Eligibility
 
 // check is a read-only eligibility probe: no code lookup, no checkout, no writes.
-// It stays available while payments are paused and shares the single X worker
-// slot with redemptions, but never queues behind one.
+// It stays available while payments are paused or running. Read-only checks
+// have their own bounded concurrency and never occupy the payment worker.
 func (s *server) check(w http.ResponseWriter, r *http.Request) {
 	var q struct {
 		Username string `json:"username"`
@@ -480,10 +512,10 @@ func (s *server) check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	select {
-	case s.work <- struct{}{}:
-		defer func() { <-s.work }()
+	case s.checks <- struct{}{}:
+		defer func() { <-s.checks }()
 	default:
-		message(w, 503, "正在处理其他请求，请稍后重试检测。")
+		message(w, 503, "当前检测人数较多，请稍后重试检测。")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
@@ -503,6 +535,11 @@ func (s *server) check(w http.ResponseWriter, r *http.Request) {
 	reply(w, 200, map[string]any{"eligible": true, "message": "该账号当前可以接收赠送。"})
 }
 func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
+	ready, availabilityErr := s.paymentsAvailable()
+	if !ready || availabilityErr != nil {
+		reply(w, http.StatusServiceUnavailable, map[string]any{"status": "paused", "message": "充值暂时暂停，恢复时间待定。请保留兑换码，已有订单可继续查询进度。"})
+		return
+	}
 	code, user, ok := readInput(w, r)
 	if !ok {
 		return
@@ -553,14 +590,6 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-	}
-	if !s.payments {
-		if resuming {
-			reply(w, 503, map[string]any{"status": "review", "months": c.Months, "progress": c.Progress, "message": "充值服务暂未开放，原订单已保留，请稍后重新检查并继续兑换。"})
-		} else {
-			reply(w, 503, map[string]any{"status": "paused", "eligible": true, "months": c.Months, "message": "这个账号可以接收赠送，但充值服务暂未开放。兑换码未使用，请稍后再来。"})
-		}
-		return
 	}
 	// The same lock is used by the CLI. Keep it until the final database write.
 	lock, e := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
@@ -658,6 +687,12 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		}
 		if record != nil && record.Status == "requires_action" {
 			msg = "付款需要持卡人完成银行验证，请联系管理员。请勿重复兑换。"
+		}
+		if checkout.IsPaymentDeclined(record) {
+			msg = "付款被支付机构拒绝，本次兑换未完成。请联系管理员处理，请勿重复提交。"
+		}
+		if errors.Is(err, checkout.ErrPaymentPaused) {
+			msg = "充值已自动暂停，原订单已保留。请联系管理员处理付款方式。"
 		}
 		updated, e := s.db.Exec("UPDATE codes SET status=?,message=?,updated=?,progress=CASE WHEN ?='succeeded' THEN 100 ELSE progress END WHERE id=? AND status='processing'", status, msg, time.Now().Unix(), status, c.ID)
 		if e != nil {

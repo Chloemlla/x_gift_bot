@@ -48,6 +48,7 @@ type server struct {
 	port       int
 	lockPath   string
 	work       chan struct{}
+	checks     chan struct{}
 	jobs       sync.WaitGroup
 	ctx        context.Context
 	recoveryMu sync.Mutex
@@ -108,7 +109,7 @@ func Run(ctx context.Context) error {
 	if len(admin) < 32 {
 		return errors.New("admin password must contain at least 32 characters")
 	}
-	s := &server{origin: origin, adminHash: sha256.Sum256(admin), payments: os.Getenv("XGIFT_PAYMENTS_ENABLED") == "true", lockPath: filepath.Join(dir, "checkout.lock"), work: make(chan struct{}, 1), ctx: ctx, limits: map[string]limit{}}
+	s := &server{origin: origin, adminHash: sha256.Sum256(admin), payments: os.Getenv("XGIFT_PAYMENTS_ENABLED") == "true", lockPath: filepath.Join(dir, "checkout.lock"), work: make(chan struct{}, 1), checks: make(chan struct{}, 4), ctx: ctx, limits: map[string]limit{}}
 	clear(admin)
 	v, err := vault.Open(filepath.Join(dir, "vault.db"), os.Getenv("XGIFT_PASSWORD_FILE"), false)
 	if err != nil {
@@ -228,6 +229,7 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("GET /admin", s.admin(s.asset("admin.html", "text/html; charset=utf-8")))
 	mux.HandleFunc("GET /admin.js", s.admin(s.asset("admin.js", "application/javascript; charset=utf-8")))
 	mux.HandleFunc("GET /api/admin/codes", s.admin(s.list))
+	mux.HandleFunc("POST /api/admin/lookup", s.admin(s.lookup))
 	mux.HandleFunc("GET /api/admin/stats", s.admin(s.stats))
 	mux.HandleFunc("GET /api/admin/customer", s.admin(s.customerOrder))
 	mux.HandleFunc("GET /api/admin/recovery", s.admin(s.recoveryStatus))
@@ -481,8 +483,8 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 var eligibilityCheck = checkout.Eligibility
 
 // check is a read-only eligibility probe: no code lookup, no checkout, no writes.
-// It stays available while payments are paused and shares the single X worker
-// slot with redemptions, but never queues behind one.
+// It stays available while payments are paused or running. Read-only checks
+// have their own bounded concurrency and never occupy the payment worker.
 func (s *server) check(w http.ResponseWriter, r *http.Request) {
 	var q struct {
 		Username string `json:"username"`
@@ -496,10 +498,10 @@ func (s *server) check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	select {
-	case s.work <- struct{}{}:
-		defer func() { <-s.work }()
+	case s.checks <- struct{}{}:
+		defer func() { <-s.checks }()
 	default:
-		message(w, 503, "正在处理其他请求，请稍后重试检测。")
+		message(w, 503, "当前检测人数较多，请稍后重试检测。")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)

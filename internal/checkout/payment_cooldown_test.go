@@ -211,7 +211,7 @@ func TestNoAvailableExitAndCanceledRequestDoNotReplay(t *testing.T) {
 	raw := `[{"type":"direct","tag":"direct"}]`
 	v.Put("payment-outbounds", []byte(raw))
 	v.Put("stripe-key", []byte("pk_live_Test"))
-	s, e := newStripe(context.Background(), v, "1234")
+	s, e := newStripe(context.Background(), v, "1234", paymentRead)
 	if e != nil {
 		t.Fatal(e)
 	}

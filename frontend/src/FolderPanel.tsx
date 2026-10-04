@@ -22,17 +22,15 @@ type Props = {
   stats?: AdminStats;
   filter: string;
   disabled: boolean;
-  muted?: boolean;
   onSelect: (id: string) => void;
   onBusyChange: (value: boolean) => void;
-  onChanged: (deleted?: string) => Promise<void>;
+  onChanged: () => Promise<void>;
 };
 export function FolderPanel({
   folders,
   stats,
   filter,
   disabled,
-  muted = false,
   onSelect,
   onBusyChange,
   onChanged,
@@ -84,12 +82,10 @@ export function FolderPanel({
         useFlexGap
         gap={1}
         sx={{
-          height: 80,
+          minHeight: 80,
           overflowX: "auto",
           alignItems: "center",
           pb: 1,
-          opacity: muted ? 0.55 : 1,
-          transition: "opacity 160ms ease",
         }}
         role="region"
         aria-label="批次文件夹，可横向滚动"
@@ -164,28 +160,34 @@ export function FolderPanel({
         fullWidth
         maxWidth="xs"
         aria-labelledby="batch-rename-title"
+        aria-describedby="batch-rename-content"
       >
         <Box
           component="form"
+          noValidate
           onSubmit={(e) => {
             e.preventDefault();
             void save();
           }}
         >
           <DialogTitle id="batch-rename-title">重命名批次</DialogTitle>
-          <DialogContent>
+          <DialogContent id="batch-rename-content">
             <TextField
               autoFocus
               label="批次名称"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value);
+                if (error) setError("");
+              }}
               disabled={pending}
               required
+              error={!!error}
               sx={{ mt: 1 }}
               helperText="该批次内的兑换码会同步更新名称"
             />
             {error && (
-              <Alert severity="error" sx={{ mt: 2 }}>
+              <Alert severity="error" role="alert" sx={{ mt: 2 }}>
                 {error}
               </Alert>
             )}

@@ -18,10 +18,10 @@ import { stats as fetchStats, type AdminStatsDetail } from "./adminApi";
 
 const visuallyHidden = {
   position: "absolute",
-  width: 1,
-  height: 1,
+  width: "1px",
+  height: "1px",
   p: 0,
-  m: -1,
+  m: "-1px",
   overflow: "hidden",
   clip: "rect(0 0 0 0)",
   whiteSpace: "nowrap",
@@ -241,7 +241,8 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
     1,
     ...(data?.review_stages ?? []).map((stage) => stage.count),
   );
-  const remainder = theme.vars.palette.primary.light;
+  // Neutral track color that stays calm on dark surfaces (primary.light does not).
+  const remainder = theme.vars.palette.divider;
   return (
     <Paper variant="outlined" sx={{ mb: 3, overflow: "hidden" }}>
       <Button
@@ -282,8 +283,12 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
           aria-label="统计概览"
           sx={{ px: { xs: 2.5, sm: 3 }, pb: 3, pt: 1 }}
         >
+          {/* 折叠按钮内的标题是 span，补一个隐藏的 h2 让小节 h3 有父级。 */}
+          <Typography variant="h2" sx={visuallyHidden}>
+            统计概览
+          </Typography>
           {loading && (
-            <Stack spacing={2} aria-label="正在加载统计数据">
+            <Stack spacing={2} role="status" aria-label="正在加载统计数据">
               <Box
                 sx={{
                   display: "grid",
@@ -302,7 +307,7 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
             </Stack>
           )}
           {!loading && error && (
-            <Alert severity="error">
+            <Alert severity="error" role="alert">
               {error}
               {data && " 以下保留上次加载的数据。"}
               <Button onClick={() => void load()}>重新加载</Button>
@@ -336,9 +341,9 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
                   value={String(data.codes.succeeded)}
                   hint={`成功率 ${successRate}`}
                 />
-                <StatCard label="待处理" value={String(data.codes.processing)} />
-                <StatCard label="待审核" value={String(data.codes.review)} />
-                <StatCard label="已撤销" value={String(data.codes.revoked)} />
+                <StatCard label="处理中" value={String(data.codes.processing)} />
+                <StatCard label="待核实" value={String(data.codes.review)} />
+                <StatCard label="已停用" value={String(data.codes.revoked)} />
               </Box>
               {data.daily.length > 0 && (
                 <Box component="section" aria-labelledby="stats-daily-title">
@@ -445,7 +450,7 @@ export function StatsPanel({ refreshSignal }: { refreshSignal: number }) {
               {data.review_stages.length > 0 && (
                 <Box component="section" aria-labelledby="stats-stages-title">
                   <Typography id="stats-stages-title" variant="h3" sx={{ mb: 1.5 }}>
-                    待审核阶段分布
+                    待核实阶段分布
                   </Typography>
                   <Stack spacing={1.5}>
                     {[...data.review_stages]

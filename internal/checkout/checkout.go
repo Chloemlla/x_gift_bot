@@ -21,6 +21,7 @@ type Record struct {
 	CreationAttempts  int          `json:"creation_attempts,omitempty"`
 	PreflightSaved    bool         `json:"preflight_saved,omitempty"`
 	PaymentMethod     string       `json:"payment_method,omitempty"`
+	CardFingerprint   string       `json:"card_fingerprint,omitempty"`
 	ConfirmParameters string       `json:"confirm_parameters,omitempty"`
 	ConfirmKey        string       `json:"confirm_key,omitempty"`
 	SubmittedAt       int64        `json:"submitted_at,omitempty"`
@@ -180,7 +181,11 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 			return &r, e
 		}
 	}
-	s, e := newStripe(ctx, v, r.RecipientID)
+	paymentFlow := paymentRead
+	if pay {
+		paymentFlow = paymentPay
+	}
+	s, e := newStripe(ctx, v, r.RecipientID, paymentFlow)
 	if e != nil {
 		return &r, e
 	}
@@ -203,13 +208,19 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	if !pay {
 		return &r, nil
 	}
-	c, e := readCard(v)
+	c, e := s.paymentCard()
 	if e != nil {
 		return &r, e
 	}
+	r.CardFingerprint = cardFingerprint(c)
 	progress(ctx, 70, "正在准备付款，请勿重复提交…")
 	method, e := s.tokenize(ctx, &r, c)
 	if e != nil {
+		if cardTokenizationRejected(e) {
+			// The card itself was rejected before any submit: end the batch so the
+			// next attempt rotates to another card instead of retrying this one.
+			_ = markPaymentDecline(v, r.RecipientID)
+		}
 		return &r, e
 	}
 	// Refresh after card creation; confirmation also pins the expected amount server-side.

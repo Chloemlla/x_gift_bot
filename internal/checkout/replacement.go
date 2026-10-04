@@ -59,7 +59,7 @@ func PrepareRecoveryLinkForRecipient(ctx context.Context, v *vault.Vault, user, 
 	if !sessionURL(r.URL, r.SessionID) {
 		return &r, errors.New("untrusted original checkout")
 	}
-	s, err := newStripe(ctx, v, r.RecipientID)
+	s, err := newStripe(ctx, v, r.RecipientID, paymentRead)
 	if err != nil {
 		return &r, err
 	}

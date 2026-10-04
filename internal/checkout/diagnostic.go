@@ -56,7 +56,7 @@ func inspect(ctx context.Context, v *vault.Vault, user string, port, months int,
 	if !sessionURL(r.URL, r.SessionID) {
 		return errors.New("untrusted recorded checkout")
 	}
-	s, e := newStripe(ctx, v, r.RecipientID)
+	s, e := newStripe(ctx, v, r.RecipientID, paymentRead)
 	if e != nil {
 		return e
 	}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Alert, Box, Button, Stack, Typography } from "@mui/material";
 import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
 import CheckRounded from "@mui/icons-material/CheckRounded";
@@ -6,6 +6,12 @@ import CheckRounded from "@mui/icons-material/CheckRounded";
 export function CopyableCodes({ codes }: { codes: string[] }) {
   const [copied, setCopied] = useState<number | "all" | null>(null);
   const [error, setError] = useState(false);
+  // The ✓ marks a recent copy; clear it so a later visit does not read as fresh.
+  useEffect(() => {
+    if (copied === null) return;
+    const timer = setTimeout(() => setCopied(null), 5000);
+    return () => clearTimeout(timer);
+  }, [copied]);
   async function copy(index: number | "all") {
     try {
       await navigator.clipboard.writeText(
@@ -43,6 +49,7 @@ export function CopyableCodes({ codes }: { codes: string[] }) {
       <Box
         component="ul"
         aria-label="新生成的兑换码"
+        tabIndex={0}
         sx={{
           m: 0,
           p: 0,

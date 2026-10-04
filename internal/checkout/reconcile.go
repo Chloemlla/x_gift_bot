@@ -42,7 +42,7 @@ func Reconcile(ctx context.Context, v *vault.Vault, recipient string, port int) 
 	if err = verifySubmission(v, &r, plan); err != nil {
 		return &r, err
 	}
-	s, err := newStripe(ctx, v, r.RecipientID)
+	s, err := newStripe(ctx, v, r.RecipientID, paymentRead)
 	if err != nil {
 		return &r, err
 	}

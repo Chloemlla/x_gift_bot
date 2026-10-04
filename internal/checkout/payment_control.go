@@ -2,9 +2,7 @@ package checkout
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,12 +51,11 @@ func readPaymentControl(v *vault.Vault) (paymentControl, error) {
 	return state, nil
 }
 func paymentCardFingerprint(v *vault.Vault) (string, error) {
-	c, err := readCard(v)
+	cards, err := readCards(v)
 	if err != nil {
 		return "", err
 	}
-	digest := sha256.Sum256([]byte(c.Number + ":" + c.Month + ":" + c.Year))
-	return hex.EncodeToString(digest[:]), nil
+	return cardSetFingerprint(cards), nil
 }
 func savePaymentControl(v *vault.Vault, state paymentControl) error {
 	b, err := json.Marshal(state)
@@ -138,16 +135,48 @@ func paymentOutcome(v *vault.Vault, r *Record) error {
 	} else if IsPaymentDeclined(r) {
 		state.ConsecutiveDeclines++
 		state.Outcome = "declined"
+		// The declined order keeps its evidence; the running card+node batch is
+		// expired so the next attempt rotates to another pair.
+		if err = markPaymentDecline(v, r.RecipientID); err != nil {
+			return err
+		}
 		// Ordinary card declines stay local to the failed order. Only an explicit
-		// provider instruction pauses this card globally.
+		// provider no-retry instruction blocks that one card; with other cards
+		// configured the site keeps paying through the remaining rotation and
+		// pauses only when there is nothing left to try.
 		if r.LastError != nil && r.LastError.AdviceCode == "do_not_try_again" {
-			state.Paused = true
-			state.Reason = "do_not_try_again"
+			fingerprint := declinedCardFingerprint(v, r.RecipientID)
+			if fingerprint == "" {
+				state.Paused = true
+				state.Reason = "do_not_try_again"
+			} else {
+				if err = blockPaymentCard(v, fingerprint, "do_not_try_again"); err != nil {
+					return err
+				}
+				remaining, e := hasUsableCard(v)
+				if e != nil {
+					return e
+				}
+				if !remaining {
+					state.Paused = true
+					state.Reason = "do_not_try_again"
+				}
+			}
 		}
 	} else {
 		return nil
 	}
 	return savePaymentControl(v, state)
+}
+
+// declinedCardFingerprint resolves the card bound to a declined order without
+// selecting, rotating or contacting any node.
+func declinedCardFingerprint(v *vault.Vault, recipient string) string {
+	route, err := readPaymentRoute(v, recipient)
+	if err != nil || route.Card == "" {
+		return ""
+	}
+	return route.Card
 }
 func IsPaymentDeclined(r *Record) bool {
 	return r != nil && r.Status != "succeeded" && r.Status != "requires_action" && (r.Status == "declined" || r.LastError != nil && r.LastError.HTTP == 402 && r.LastError.Type == "card_error")

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"xgift/internal/checkout"
 	"xgift/internal/vault"
 )
@@ -26,7 +27,7 @@ func checkFixture(t *testing.T) *server {
 		t.Fatal(e)
 	}
 	t.Cleanup(func() { v.Close() })
-	return &server{vault: v, origin: "https://example.test", work: make(chan struct{}, 1), limits: map[string]limit{}}
+	return &server{vault: v, origin: "https://example.test", work: make(chan struct{}, 1), checks: make(chan struct{}, 4), limits: map[string]limit{}}
 }
 
 func fakeEligibility(t *testing.T, calls *int, id string, err error) {
@@ -67,7 +68,7 @@ func TestEligibilityCheck(t *testing.T) {
 		if w.Code != 200 || body["eligible"] != true || calls != 1 {
 			t.Fatalf("status=%d body=%s calls=%d", w.Code, w.Body.String(), calls)
 		}
-		if len(s.work) != 0 {
+		if len(s.work) != 0 || len(s.checks) != 0 {
 			t.Fatal("worker slot leaked")
 		}
 	})
@@ -102,7 +103,7 @@ func TestEligibilityCheck(t *testing.T) {
 		if w.Code != 503 || !strings.Contains(msg, "检测") {
 			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 		}
-		if len(s.work) != 0 {
+		if len(s.work) != 0 || len(s.checks) != 0 {
 			t.Fatal("worker slot leaked")
 		}
 	})
@@ -119,7 +120,7 @@ func TestEligibilityCheck(t *testing.T) {
 			t.Fatalf("X called %d times for invalid input", calls)
 		}
 	})
-	t.Run("busy worker returns 503 instead of queueing", func(t *testing.T) {
+	t.Run("busy payment worker does not block checks", func(t *testing.T) {
 		s := checkFixture(t)
 		calls := 0
 		fakeEligibility(t, &calls, "1234", nil)
@@ -127,7 +128,7 @@ func TestEligibilityCheck(t *testing.T) {
 		defer func() { <-s.work }()
 		w := submitCheck(s, "someone")
 		msg, _ := checkBody(t, w)["message"].(string)
-		if w.Code != 503 || !strings.Contains(msg, "检测") || calls != 0 {
+		if w.Code != 200 || !strings.Contains(msg, "可以") || calls != 1 || len(s.work) != 1 || len(s.checks) != 0 {
 			t.Fatalf("status=%d body=%s calls=%d", w.Code, w.Body.String(), calls)
 		}
 	})
@@ -156,4 +157,60 @@ func TestEligibilityCheck(t *testing.T) {
 			t.Fatalf("status after check limit: status=%d", code)
 		}
 	})
+}
+
+func TestEligibilityChecksRunConcurrently(t *testing.T) {
+	s := checkFixture(t)
+	started := make(chan struct{}, cap(s.checks))
+	release := make(chan struct{})
+	done := make(chan *httptest.ResponseRecorder, cap(s.checks))
+	original := eligibilityCheck
+	eligibilityCheck = func(context.Context, *vault.Vault, string, int) (string, error) {
+		started <- struct{}{}
+		<-release
+		return "1234", nil
+	}
+	t.Cleanup(func() { eligibilityCheck = original })
+	released := false
+	launched := 0
+	defer func() {
+		if !released {
+			close(release)
+		}
+		for i := 0; i < launched; i++ {
+			<-done
+		}
+	}()
+	for i := 0; i < cap(s.checks); i++ {
+		launched++
+		go func() { done <- submitCheck(s, "someone") }()
+	}
+	for i := 0; i < cap(s.checks); i++ {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("checks did not start concurrently")
+		}
+	}
+	if len(s.work) != 0 {
+		t.Fatal("checks occupied the payment worker")
+	}
+	if w := submitCheck(s, "someone"); w.Code != 503 {
+		t.Fatalf("unbounded checks: %d", w.Code)
+	}
+	close(release)
+	released = true
+	for launched > 0 {
+		w := <-done
+		launched--
+		if w.Code != 200 {
+			t.Errorf("check failed: %d", w.Code)
+		}
+	}
+	if len(s.checks) != 0 {
+		t.Fatal("check slot leaked")
+	}
+	if w := submitCheck(s, "someone"); w.Code != 200 {
+		t.Fatalf("slot not reusable: %d", w.Code)
+	}
 }

@@ -13,6 +13,8 @@ import {
   Typography,
 } from "@mui/material";
 import { adminApi } from "./adminApi";
+import { codeStatus } from "./codeStatus";
+import PersonSearchRounded from "@mui/icons-material/PersonSearchRounded";
 
 type Detail = {
   order: {
@@ -81,9 +83,9 @@ export function CustomerPanel({
   async function copy() {
     try {
       await navigator.clipboard.writeText(detail?.code || "");
-      setNotice("完整卡密已复制。");
+      setNotice("完整兑换码已复制。");
     } catch {
-      setNotice("复制失败，请选中下方完整卡密手动复制。");
+      setNotice("复制失败，请选中下方完整兑换码手动复制。");
     }
   }
   function prepare(mode: "links" | "pay") {
@@ -94,10 +96,22 @@ export function CustomerPanel({
   }
   return (
     <>
-      <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, mb: 3 }}>
-        <Typography variant="h2" sx={{ fontSize: 21 }}>
-          按客户查卡密 / 单独补单
-        </Typography>
+      <Paper
+        variant="outlined"
+        component="section"
+        aria-labelledby="customer-panel-title"
+        sx={{ p: { xs: 2, sm: 3 }, height: "100%" }}
+      >
+        <Stack direction="row" spacing={1} alignItems="center">
+          <PersonSearchRounded color="primary" aria-hidden="true" />
+          <Typography
+            id="customer-panel-title"
+            variant="h2"
+            sx={{ fontSize: 21 }}
+          >
+            按客户查询
+          </Typography>
+        </Stack>
         <Box
           component="form"
           onSubmit={(e) => {
@@ -115,6 +129,7 @@ export function CustomerPanel({
               size="small"
               fullWidth
               autoComplete="off"
+              slotProps={{ htmlInput: { maxLength: 16, spellCheck: false } }}
             />
             <Button
               type="submit"
@@ -127,7 +142,7 @@ export function CustomerPanel({
           </Stack>
         </Box>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          直接查看客户对应的完整卡密和付款链接，无需按批次翻页。
+          直接查看客户对应的完整兑换码和付款链接，无需按批次翻页。
         </Typography>
       </Paper>
       <Dialog
@@ -136,34 +151,35 @@ export function CustomerPanel({
         fullWidth
         maxWidth="sm"
         aria-labelledby="customer-title"
+        aria-describedby="customer-dialog-description"
       >
         <DialogTitle id="customer-title">
-          {detail ? `@${detail.order.username} 的订单` : "客户订单详情"}
+          {detail
+            ? detail.order.username
+              ? `@${detail.order.username} 的订单`
+              : "兑换码详情"
+            : error
+              ? "查询结果"
+              : "客户订单详情"}
         </DialogTitle>
-        <DialogContent>
+        <DialogContent id="customer-dialog-description">
           {busy && <Typography>正在读取订单…</Typography>}
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && <Alert severity="error" role="alert">{error}</Alert>}
           {detail && (
             <Stack spacing={2}>
               <Typography>
                 {detail.order.months} 个月 · {detail.order.batch || "未分类"} ·{" "}
-                {(
-                  {
-                    review: "待处理",
-                    succeeded: "已完成",
-                    processing: "处理中",
-                    active: "未使用",
-                    revoked: "已停用",
-                  } as Record<string, string>
-                )[detail.order.status] || detail.order.status}
+                {codeStatus[detail.order.status]?.label || detail.order.status}
               </Typography>
-              <Typography variant="body2" color="text.secondary">
-                {detail.order.message}
-              </Typography>
+              {detail.order.message && (
+                <Typography variant="body2" color="text.secondary">
+                  {detail.order.message}
+                </Typography>
+              )}
               {detail.code ? (
                 <>
                   <TextField
-                    label="客户对应的完整卡密"
+                    label="客户对应的完整兑换码"
                     multiline
                     value={detail.code}
                     slotProps={{ input: { readOnly: true } }}
@@ -175,15 +191,16 @@ export function CustomerPanel({
                     }}
                   />
                   <Button variant="outlined" onClick={() => void copy()}>
-                    复制完整卡密
+                    复制完整兑换码
                   </Button>
                 </>
               ) : (
                 <Alert severity="info">
-                  此历史卡密仅保存了校验值，无法还原。仍可按此客户订单单独补单。
+                  此历史兑换码仅保存了校验值，无法还原完整内容。
+                  {detail.can_recover && "仍可按此客户订单单独补单。"}
                 </Alert>
               )}
-              {notice && <Alert severity="info">{notice}</Alert>}
+              {notice && <Alert severity="info" role="status">{notice}</Alert>}
               {detail.checkout_url && (
                 <>
                   <TextField
@@ -210,7 +227,7 @@ export function CustomerPanel({
               )}
               {detail.can_recover && (
                 <Alert severity="info">
-                  “仅生成链接”不会付款；“单独补单”会先展示这一笔订单，确认后才尝试付款。
+                  「仅生成补单链接」不会付款；「单独补单」会先展示这一笔订单，确认后才尝试付款。
                 </Alert>
               )}
             </Stack>

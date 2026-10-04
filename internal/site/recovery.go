@@ -37,6 +37,7 @@ type recoveryBatch struct {
 	Created        int64          `json:"created"`
 	Updated        int64          `json:"updated"`
 	Last4          string         `json:"last4"`
+	Cards          int            `json:"cards"`
 	Binding        string         `json:"binding,omitempty"`
 	Paused         bool           `json:"paused"`
 	Message        string         `json:"message"`
@@ -207,7 +208,7 @@ func (s *server) recoveryPreview(w http.ResponseWriter, r *http.Request) {
 		message(w, 409, "已有补单任务运行中，请先查看或停止。")
 		return
 	}
-	last4, binding, err := checkout.CardSummary(s.vault)
+	last4, cardCount, binding, err := checkout.CardSummary(s.vault)
 	if err != nil {
 		message(w, 503, "付款方式配置无法读取。")
 		return
@@ -243,7 +244,7 @@ func (s *server) recoveryPreview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	q := &recoveryBatch{Mode: in.Mode, ID: token(16), State: "preview", Created: time.Now().Unix(), Last4: last4, Binding: binding, Paused: paused, Items: []recoveryItem{}}
+	q := &recoveryBatch{Mode: in.Mode, ID: token(16), State: "preview", Created: time.Now().Unix(), Last4: last4, Cards: cardCount, Binding: binding, Paused: paused, Items: []recoveryItem{}}
 	for _, id := range ids {
 		item, e := s.recoveryCandidate(id)
 		if e != nil {
@@ -319,7 +320,7 @@ func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 			release()
 		}
 	}()
-	_, binding, err := checkout.CardSummary(s.vault)
+	_, _, binding, err := checkout.CardSummary(s.vault)
 	if err != nil || binding != q.Binding {
 		message(w, 409, "付款方式已变化，请重新预览。")
 		return
@@ -506,7 +507,7 @@ func (s *server) recoverOne(item recoveryItem, binding string) (state, detail st
 	return s.recoverOneOptions(item, binding, "pay", false)
 }
 func (s *server) recoverOneOptions(item recoveryItem, binding, mode string, verified bool) (state, detail string, stop bool) {
-	_, current, err := checkout.CardSummary(s.vault)
+	_, _, current, err := checkout.CardSummary(s.vault)
 	if err != nil || current != binding {
 		return "blocked", "付款方式配置变化，已停止", true
 	}

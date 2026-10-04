@@ -25,8 +25,21 @@ type stripeClient struct {
 	vault      *vault.Vault
 	closeRoute func()
 	route      *paymentRoute
+	card       card
+	hasCard    bool
 	openRoute  func(context.Context, json.RawMessage) (*http.Client, func(), error)
 }
+
+// paymentMode separates read-only Stripe traffic from payment submissions so a
+// card+node pair is consumed exactly when a card is about to be tokenized.
+type paymentMode int
+
+const (
+	paymentRead paymentMode = iota
+	paymentPay
+	paymentRetry
+)
+
 type stripeError struct {
 	Code, Type                            string
 	Message, Param, RequestID             string
@@ -59,7 +72,7 @@ type stripeAPIError struct {
 	Intent                     *stripeIntentEvidence `json:"payment_intent"`
 }
 
-func newStripe(ctx context.Context, v *vault.Vault, recipient string) (*stripeClient, error) {
+func newStripe(ctx context.Context, v *vault.Vault, recipient string, mode paymentMode) (*stripeClient, error) {
 	key, e := v.Get("stripe-key")
 	if e != nil {
 		return nil, e
@@ -68,9 +81,21 @@ func newStripe(ctx context.Context, v *vault.Vault, recipient string) (*stripeCl
 	if !regexp.MustCompile(`^pk_live_[A-Za-z0-9]+$`).Match(key) {
 		return nil, errors.New("invalid Stripe merchant publishable key")
 	}
-	route, e := selectPaymentRoute(v, recipient)
-	if e != nil {
-		return nil, e
+	var route *paymentRoute
+	var bound card
+	switch mode {
+	case paymentPay:
+		if route, bound, e = assignPaymentRoute(v, recipient, false); e != nil {
+			return nil, e
+		}
+	case paymentRetry:
+		if route, bound, e = assignPaymentRoute(v, recipient, true); e != nil {
+			return nil, e
+		}
+	default:
+		if route, e = selectPaymentRoute(v, recipient); e != nil {
+			return nil, e
+		}
 	}
 	// Missing/empty pool is direct; an assigned order never silently falls back.
 	client := &http.Client{Transport: &http.Transport{Proxy: nil, TLSHandshakeTimeout: 15 * time.Second}, Timeout: 35 * time.Second}
@@ -83,7 +108,20 @@ func newStripe(ctx context.Context, v *vault.Vault, recipient string) (*stripeCl
 		}
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errStripeRedirect }
-	return &stripeClient{http: client, key: string(key), vault: v, closeRoute: closeRoute, route: route, openRoute: proxy.OpenOutbound}, nil
+	s := &stripeClient{http: client, key: string(key), vault: v, closeRoute: closeRoute, route: route, openRoute: proxy.OpenOutbound}
+	if mode != paymentRead {
+		s.card, s.hasCard = bound, true
+	}
+	return s, nil
+}
+
+// paymentCard returns the card bound to this payment attempt. Legacy callers
+// and fixtures fall back to the first configured card.
+func (s *stripeClient) paymentCard() (card, error) {
+	if s.hasCard {
+		return s.card, nil
+	}
+	return readCard(s.vault)
 }
 func (s *stripeClient) close() {
 	if s.closeRoute != nil {
@@ -354,50 +392,15 @@ type card struct {
 	State   string `json:"billing_state"`
 }
 
-func readCard(v *vault.Vault) (card, error) {
-	raw, e := v.Get("card")
-	if e != nil {
-		return card{}, e
-	}
-	defer clear(raw)
-	var c card
-	if json.Unmarshal(raw, &c) != nil {
-		return c, errors.New("invalid card record")
-	}
-	if !regexp.MustCompile(`^[0-9]{12,19}$`).MatchString(c.Number) || !regexp.MustCompile(`^(0[1-9]|1[0-2])$`).MatchString(c.Month) || !regexp.MustCompile(`^[0-9]{4}$`).MatchString(c.Year) || !regexp.MustCompile(`^[0-9]{3,4}$`).MatchString(c.CVC) || strings.TrimSpace(c.Name) == "" || !strings.Contains(c.Email, "@") {
-		return c, errors.New("card, cardholder name or email is incomplete")
-	}
-	sum := 0
-	for i, n := range c.Number {
-		d := int(n - '0')
-		if (len(c.Number)-i)%2 == 0 {
-			d *= 2
-			if d > 9 {
-				d -= 9
-			}
-		}
-		sum += d
-	}
-	if sum%10 != 0 {
-		return c, errors.New("card number checksum is invalid")
-	}
-	year, _ := strconv.Atoi(c.Year)
-	month, _ := strconv.Atoi(c.Month)
-	if !time.Now().Before(time.Date(year, time.Month(month)+1, 1, 0, 0, 0, 0, time.UTC)) {
-		return c, errors.New("card has expired")
-	}
-	if c.Country == "" {
-		return c, errors.New("Stripe requires a billing address; supply the card billing country and applicable address fields")
-	}
-	if !regexp.MustCompile(`^[A-Z]{2}$`).MatchString(c.Country) {
-		return c, errors.New("invalid supplied billing country")
-	}
-	return c, nil
-}
-
 func CheckPaymentConfiguration(v *vault.Vault) error {
-	_, err := readCard(v)
-	return err
+	cards, err := readCards(v)
+	if err != nil {
+		return err
+	}
+	if len(usableCards(cards)) == 0 {
+		return ErrNoUsableCard
+	}
+	return nil
 }
 func (s *stripeClient) tokenize(ctx context.Context, r *Record, c card) (string, error) {
 	form := url.Values{"type": {"card"}, "card[number]": {c.Number}, "card[exp_month]": {c.Month}, "card[exp_year]": {c.Year}, "card[cvc]": {c.CVC}, "billing_details[name]": {c.Name}, "billing_details[email]": {c.Email}}

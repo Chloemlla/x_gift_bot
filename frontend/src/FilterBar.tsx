@@ -152,7 +152,7 @@ function conditionLabel(token: Extract<Token, { kind: "condition" }>): string {
   const op = token.negate ? "≠" : ":";
   switch (token.field) {
     case "folder":
-      return token.value === "-"
+      return token.value === "-" && !token.literal
         ? `批次${op}未分类`
         : `批次${op}${token.value}`;
     case "status":
@@ -160,7 +160,7 @@ function conditionLabel(token: Extract<Token, { kind: "condition" }>): string {
     case "months":
       return `时长${op}${token.value} 个月`;
     case "username":
-      return token.value === "-"
+      return token.value === "-" && !token.literal
         ? `账号${op}未绑定`
         : `账号${op}${token.value}`;
   }
@@ -183,8 +183,15 @@ function tokenLabel(token: Token): string {
   }
 }
 
-function quoteValue(name: string) {
-  return /[\s()":=!≠]/.test(name) ? `"${name}"` : name;
+function quoteValue(name: string, literal = false) {
+  // 批次名/账号可含任意字符；保留字、引号与反斜杠特殊处理，保证序列化结果
+  // 可被 tokenizer 还原。哨兵值 "-"（未分类/未绑定）保持裸写；仅当名称本身
+  // 就叫 "-" 时才加引号（literal，与 parse 的哨兵分支互逆）。
+  if (/^(and|or|not|非|&&|\|\|)$/i.test(name) || (name === "-" && literal))
+    return `"${name}"`;
+  return /[\s()":=!≠\\：（）！＝＂“”]/.test(name)
+    ? `"${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[＂“”]/g, "\\$&")}"`
+    : name;
 }
 
 function serializeTokens(tokens: Token[]): string {
@@ -196,8 +203,8 @@ function serializeTokens(tokens: Token[]): string {
         case "condition": {
           const op = token.negate ? "!=" : ":";
           text =
-            token.field === "folder"
-              ? `folder${op}${quoteValue(token.value)}`
+            token.field === "folder" || token.field === "username"
+              ? `${token.field}${op}${quoteValue(token.value, token.literal)}`
               : `${token.field}${op}${token.value}`;
           break;
         }
@@ -297,7 +304,10 @@ export function FilterBar({
 }: Props) {
   const [tokens, setTokens] = useState<Token[]>([]);
   const [mode, setMode] = useState<"palette" | "text">("palette");
-  const [announce, setAnnounce] = useState("");
+  // seq 递增保证相同文案重复播报时 live region 仍会重建触发朗读。
+  const [announce, setAnnounce] = useState({ seq: 0, text: "" });
+  const speak = (text: string) =>
+    setAnnounce((current) => ({ seq: current.seq + 1, text }));
   const [desyncWarning, setDesyncWarning] = useState("");
   const [username, setUsername] = useState("");
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -312,7 +322,7 @@ export function FilterBar({
       // 文本无法解析：恢复为调色板内容并提示，保证画布与表达式永不脱节。
       const note = "无法解析文本表达式，已恢复为调色板中的条件。";
       setDesyncWarning(note);
-      setAnnounce(note);
+      speak(note);
       onChange(serializeTokens(tokens));
     }
     // tokens 刻意不作为依赖：只在 value / mode 变化时同步。
@@ -328,7 +338,7 @@ export function FilterBar({
   useEffect(() => {
     if (applySeq > lastApplySeq.current) {
       lastApplySeq.current = applySeq;
-      setAnnounce(
+      speak(
         resultCount == null
           ? "筛选已应用"
           : `筛选已应用，共 ${resultCount} 条结果`,
@@ -340,14 +350,14 @@ export function FilterBar({
         lastNoticeSeq.current = clearNotice.seq;
         note = clearNotice.text;
       }
-      setAnnounce(note);
+      speak(note);
     }
     wasApplied.current = applied;
   }, [applied, applySeq, resultCount, clearNotice]);
 
   function commit(next: Token[], note: string) {
     setTokens(next);
-    setAnnounce(note);
+    speak(note);
     setDesyncWarning("");
     onChange(serializeTokens(next));
     // 激活的调色板按钮可能在提交后被禁用，导致焦点跌回 <body>；
@@ -400,17 +410,6 @@ export function FilterBar({
     );
     const updated = next[index];
     commit(next, `已切换为 ${tokenLabel(updated)}`);
-  }
-
-  // 条件 chip：Enter/Space（与点击一致）切换 = / ≠。
-  function conditionChipKeyDown(index: number) {
-    return (event: KeyboardEvent) => {
-      if (disabled) return;
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        toggleNegate(index);
-      }
-    };
   }
 
   // 其他词元 chip 暴露 role="button"，Enter/Space 与 Delete/Backspace 一样触发删除。
@@ -493,7 +492,7 @@ export function FilterBar({
         sx={{ mb: 0.5, flexWrap: "wrap", rowGap: 0.5 }}
       >
         <FilterAltOutlined color="primary" sx={{ flexShrink: 0 }} />
-        <Typography variant="h3" sx={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+        <Typography variant="h2" sx={{ whiteSpace: "nowrap", flexShrink: 0, fontSize: 21 }}>
           高级筛选
         </Typography>
         {applied && (
@@ -511,7 +510,6 @@ export function FilterBar({
           variant="text"
           size="small"
           startIcon={mode === "palette" ? <CodeOutlined /> : <PaletteOutlined />}
-          aria-pressed={mode === "text"}
           aria-label={
             mode === "palette" ? "切换到文本模式" : "切换到调色板模式"
           }
@@ -567,7 +565,7 @@ export function FilterBar({
                 event.preventDefault();
                 if (!applyDisabled) onApply();
                 // 表达式无效时 Enter 不再静默，播报当前不可应用的原因。
-                else if (invalidReason) setAnnounce(invalidReason);
+                else if (invalidReason) speak(invalidReason);
               }
             }}
             sx={(theme) => ({
@@ -617,7 +615,6 @@ export function FilterBar({
                       aria-label={`${tokenLabel(token)}，按 Enter 或点击切换 = / ≠，按 Delete 或 Backspace 删除`}
                       onClick={disabled ? undefined : () => toggleNegate(index)}
                       onDelete={disabled ? undefined : () => removeAt(index)}
-                      onKeyDown={conditionChipKeyDown(index)}
                       sx={[
                         chipSizeSx,
                         conditionTint(tokenTone(token)),
@@ -727,6 +724,8 @@ export function FilterBar({
                       field: "folder",
                       value: folder.name,
                       negate: false,
+                      // 批次名恰为哨兵值 "-" 时保持字法语义。
+                      literal: folder.name === "-" ? true : undefined,
                     })
                   }
                   ariaLabel={`添加批次条件 ${folder.name}`}
@@ -805,7 +804,9 @@ export function FilterBar({
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
                     event.preventDefault();
-                    addUsername();
+                    if (username.trim() && !usernameValid)
+                      speak("账号名需为字母、数字或下划线。");
+                    else addUsername();
                   }
                 }}
                 slotProps={{
@@ -984,11 +985,12 @@ export function FilterBar({
       </Stack>
       <Box
         component="span"
+        key={announce.seq}
         role="status"
         aria-live="polite"
         sx={visuallyHidden}
       >
-        {announce}
+        {announce.text}
       </Box>
     </Paper>
   );

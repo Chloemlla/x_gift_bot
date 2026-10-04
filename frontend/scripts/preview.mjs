@@ -121,6 +121,49 @@ createServer(async (req, res) => {
       return;
     }
     if (req.method !== "POST") {
+      if (req.method === "GET" && url.pathname === "/api/admin/recovery") {
+        json(200, {
+          batch: null,
+          network: { mode: "direct", nodes: 1 },
+          summary: {
+            review: codes.filter((code) => code.status === "review").length,
+            processing: codes.filter((code) => code.status === "processing")
+              .length,
+          },
+        });
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/api/admin/customer") {
+        const key = url.searchParams.get("id") || "";
+        const user = (url.searchParams.get("username") || "")
+          .replace(/^@/, "")
+          .toLowerCase();
+        const found = codes.find(
+          (code) =>
+            (key && code.id === key) || (user && code.username === user),
+        );
+        if (!found) {
+          json(404, { message: "没有找到对应的订单，请核对后重试。" });
+          return;
+        }
+        json(200, {
+          order: {
+            id: found.id,
+            username: found.username,
+            hint: found.hint,
+            months: found.months,
+            status: found.status,
+            message: found.message,
+            batch: found.batch,
+          },
+          code: plaintext.get(found.id) || "",
+          checkout_url: "",
+          previous_checkout_url: "",
+          can_recover: false,
+          replacement_count: 0,
+        });
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/api/admin/stats") {
         const daily = [];
         for (let offset = 29; offset >= 0; offset--) {
@@ -174,8 +217,11 @@ createServer(async (req, res) => {
       }
     }
     const body = JSON.parse(raw);
-    if (
-      url.pathname === "/api/admin/folders" ||
+    if (url.pathname.startsWith("/api/admin/recovery/")) {
+      json(503, { message: "本地模拟预览不提供补单操作。" });
+      return;
+    }
+    if (url.pathname === "/api/admin/folders" ||
       url.pathname === "/api/admin/folders/rename"
     ) {
       const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -302,6 +348,30 @@ createServer(async (req, res) => {
         months: body.months,
         folder: body.folder || "",
       });
+      return;
+    }
+    if (url.pathname === "/api/admin/lookup") {
+      const full =
+        typeof body.code === "string" ? body.code.trim().toUpperCase() : "";
+      if (!/^XG-[A-F0-9]{48}$/.test(full)) {
+        json(400, { message: "请填写 XG- 开头、后接 48 位字符的完整兑换码。" });
+        return;
+      }
+      // Fixed demo hit so a found result can be previewed without generating.
+      if (full === "XG-" + "5".repeat(48)) {
+        json(200, { ...codes[2], progress: 100, updated: now });
+        return;
+      }
+      const entry = [...plaintext.entries()].find(
+        ([, value]) => value === full,
+      );
+      const found = entry && codes.find((code) => code.id === entry[0]);
+      json(
+        found ? 200 : 404,
+        found
+          ? { ...found, updated: found.created, progress: 0 }
+          : { message: "没有找到这个兑换码，请核对后重试。" },
+      );
       return;
     }
     if (url.pathname === "/api/admin/codes/copy") {

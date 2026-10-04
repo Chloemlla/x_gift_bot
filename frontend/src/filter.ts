@@ -31,13 +31,42 @@ type Token =
 
 function tokenize(src: string): Token[] {
   // 中文输入法容错：全角括号、冒号、引号、叹号、等号统一归一为半角。
-  src = src
-    .replace(/（/g, "(")
-    .replace(/）/g, ")")
-    .replace(/：/g, ":")
-    .replace(/！/g, "!")
-    .replace(/＝/g, "=")
-    .replace(/[＂“”]/g, '"');
+  // 引号内的字面内容保持原样（批次名可能本身含全角标点）。
+  let normalized = "";
+  let inString = false;
+  let escaped = false;
+  for (const raw of src) {
+    if (inString) {
+      if (escaped) {
+        normalized += raw;
+        escaped = false;
+        continue;
+      }
+      if (raw === "\\") {
+        normalized += raw;
+        escaped = true;
+        continue;
+      }
+      // 未转义的全角引号在字符串内视为闭合（中文输入法自动配对场景）；
+      // 名称字面的全角引号由 quoteValue 转义为 \” 绕过。
+      if (raw === '"' || /[＂“”]/.test(raw)) {
+        normalized += '"';
+        inString = false;
+        continue;
+      }
+      normalized += raw;
+      continue;
+    }
+    const char = /[＂“”]/.test(raw) ? '"' : raw;
+    if (char === '"') inString = true;
+    normalized += char
+      .replace(/（/g, "(")
+      .replace(/）/g, ")")
+      .replace(/：/g, ":")
+      .replace(/！/g, "!")
+      .replace(/＝/g, "=");
+  }
+  src = normalized;
   const tokens: Token[] = [];
   let index = 0;
   while (index < src.length) {
@@ -82,10 +111,22 @@ function tokenize(src: string): Token[] {
       continue;
     }
     if (char === '"') {
-      const end = src.indexOf('"', index + 1);
-      if (end === -1)
-        throw new Error("引号不匹配：批次名称的英文双引号没有闭合。");
-      tokens.push({ kind: "string", text: src.slice(index + 1, end) });
+      // 支持 \" 与 \\ 转义，与 quoteValue 的序列化互逆。
+      let end = index + 1;
+      let text = "";
+      for (;;) {
+        if (end >= src.length)
+          throw new Error("引号不匹配：批次名称的英文双引号没有闭合。");
+        if (src[end] === "\\" && end + 1 < src.length) {
+          text += src[end + 1];
+          end += 2;
+          continue;
+        }
+        if (src[end] === '"') break;
+        text += src[end];
+        end++;
+      }
+      tokens.push({ kind: "string", text });
       index = end + 1;
       continue;
     }
@@ -108,11 +149,13 @@ type Node =
   | { type: "or"; left: Node; right: Node }
   | { type: "and"; left: Node; right: Node }
   | { type: "not"; operand: Node }
-  | { type: "condition"; field: Field; value: string; negate: boolean };
+  // literal: 值来自引号串,哨兵值("-")按字面名称处理。
+  | { type: "condition"; field: Field; value: string; negate: boolean; literal?: boolean };
 
 // 调色板模式使用的扁平词元，按表达式中的出现顺序记录。
+// condition.literal: 值来自引号串（序列化时保持引号，哨兵 "-" 按字面名称处理）。
 export type ExpressionToken =
-  | { kind: "condition"; field: Field; value: string; negate: boolean }
+  | { kind: "condition"; field: Field; value: string; negate: boolean; literal?: boolean }
   | { kind: "not" }
   | { kind: "and" }
   | { kind: "or" }
@@ -193,8 +236,16 @@ function parse(src: string): { root: Node; flat: ExpressionToken[] } {
       throw new Error(`「${field.text}」后缺少 : 或 !=。`);
     next();
     const value = peek();
-    if (!value || (value.kind !== "word" && value.kind !== "string"))
+    if (!value || (value.kind !== "word" && value.kind !== "string")) {
+      if (
+        value &&
+        (value.kind === "and" || value.kind === "or" || value.kind === "not")
+      )
+        throw new Error(
+          `「${field.text}:」后遇到逻辑运算符；如果名称本身含 and / or / not / 非，请用英文引号包裹，如 ${field.text}:"非"。`,
+        );
       throw new Error(`「${field.text}:」后缺少值。`);
+    }
     next();
     let normalized = value.text;
     if (name === "status") {
@@ -214,14 +265,30 @@ function parse(src: string): { root: Node; flat: ExpressionToken[] } {
     } else if (!value.text) {
       throw new Error("「username:」后需要账号名；未绑定请使用 username:-。");
     }
-    flat.push({ kind: "condition", field: name, value: normalized, negate });
-    return { type: "condition", field: name, value: normalized, negate };
+    flat.push({
+      kind: "condition",
+      field: name,
+      value: normalized,
+      negate,
+      literal: value.kind === "string",
+    });
+    return {
+      type: "condition",
+      field: name,
+      value: normalized,
+      negate,
+      literal: value.kind === "string",
+    };
   }
 
   const root = parseExpr();
   if (position < tokens.length) {
     const rest = tokens[position];
     if (rest.kind === "rparen") throw new Error("括号不匹配：多余的右括号。");
+    if (rest.kind === "colon" || rest.kind === "eq" || rest.kind === "neq")
+      throw new Error(
+        '值中包含 : 或 = 等特殊字符；请用英文引号包裹名称，如 folder:"国庆:活动"。',
+      );
     if (rest.kind === "lparen")
       throw new Error("「（」前缺少逻辑运算符（and / or）。");
     if (rest.kind === "word" || rest.kind === "string") {
@@ -259,7 +326,7 @@ export function parseFilter(src: string): (code: CodeRow) => boolean {
             break;
           case "folder":
             matched =
-              node.value === "-"
+              node.value === "-" && !node.literal
                 ? !code.batch
                 : code.batch.toLowerCase() === node.value.toLowerCase();
             break;
@@ -268,7 +335,7 @@ export function parseFilter(src: string): (code: CodeRow) => boolean {
             break;
           case "username":
             matched =
-              node.value === "-"
+              node.value === "-" && !node.literal
                 ? !code.username
                 : (code.username ?? "").toLowerCase() ===
                   node.value.toLowerCase();
@@ -287,4 +354,4 @@ export function parseExpressionTokens(src: string): ExpressionToken[] {
 }
 
 export const FILTER_HINT =
-  "条件：folder:批次名、status:状态、months:时长、username:账号；逻辑：and、or、not、括号；!= 取反；folder:- 未分类、username:- 未绑定。";
+  "条件：folder:批次名、status:状态、months:时长、username:账号；逻辑：and、or、not、括号；!= 取反；folder:- 未分类、username:- 未绑定；名称含空格、冒号或保留字时用英文引号包裹，如 folder:\"and\"。";

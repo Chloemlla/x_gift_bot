@@ -12,14 +12,24 @@ import (
 	"xgift/internal/vault"
 )
 
-// CardSummary exposes only a display suffix and an opaque configuration binding.
-func CardSummary(v *vault.Vault) (last4, binding string, err error) {
-	c, err := readCard(v)
+// CardSummary exposes only a display suffix, the configured card count and an
+// opaque set binding. Rotation inside the same set does not change the binding.
+func CardSummary(v *vault.Vault) (last4 string, count int, binding string, err error) {
+	cards, err := readCards(v)
 	if err != nil {
-		return "", "", err
+		return "", 0, "", err
 	}
-	binding, err = paymentCardFingerprint(v)
-	return c.Number[len(c.Number)-4:], binding, err
+	usable := usableCards(cards)
+	if len(usable) == 0 {
+		return "", len(cards), "", ErrNoUsableCard
+	}
+	display := usable[0]
+	if rotation, e := readPaymentRotation(v); e == nil && rotation != nil && rotation.CardFingerprint != "" {
+		if c, ok := cardByFingerprint(cards, rotation.CardFingerprint); ok && validateCard(c) == nil {
+			display = c
+		}
+	}
+	return cardTail(display), len(cards), cardSetFingerprint(cards), nil
 }
 
 // ManualRetryBlocked deliberately treats bank instructions as a stop condition.
@@ -145,7 +155,7 @@ func ManualRecoverForRecipient(ctx context.Context, v *vault.Vault, user, recipi
 	if err = verifySubmission(v, &r, plan); err != nil {
 		return &r, err
 	}
-	s, err := newStripe(ctx, v, r.RecipientID)
+	s, err := newStripe(ctx, v, r.RecipientID, paymentRetry)
 	if err != nil {
 		return &r, err
 	}
@@ -204,14 +214,18 @@ func manualRecoverDeclined(ctx context.Context, v *vault.Vault, r *Record, s *st
 	if err = v.Put(fmt.Sprintf("manual-previous:%s:%d", r.SessionID, next.RecoveryAttempts), old); err != nil {
 		return r, err
 	}
-	c, err := readCard(v)
+	c, err := s.paymentCard()
 	if err != nil {
 		return r, err
 	}
 	method, err := s.tokenize(ctx, &next, c)
 	if err != nil {
+		if cardTokenizationRejected(err) {
+			_ = markPaymentDecline(v, r.RecipientID)
+		}
 		return r, err
 	}
+	next.CardFingerprint = cardFingerprint(c)
 	page, proof, err := s.manualPreflight(ctx, r, plan)
 	if err != nil {
 		return r, err
@@ -261,6 +275,8 @@ func ManualRecoveryErrorMessage(err error) string {
 		return replacementMessage(err)
 	case errors.Is(err, ErrPaymentPaused):
 		return "银行卡付款保护已暂停，未继续提交。"
+	case errors.Is(err, ErrNoUsableCard):
+		return "没有可用的付款卡（可能全部在冷却或被封锁），未提交补单付款；请用 cards list 查看卡池状态。"
 	case strings.Contains(text, "checkout_not_active_session"):
 		return "原账单已失效，未提交补单付款；需要单独核实。"
 	case strings.Contains(text, "unpaid"), strings.Contains(text, "payment intent"), strings.Contains(text, "payment_intent"):

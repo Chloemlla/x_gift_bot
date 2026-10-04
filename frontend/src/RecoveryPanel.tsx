@@ -24,7 +24,7 @@ import {
   Typography,
 } from "@mui/material";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
-import { adminApi } from "./adminApi";
+import { adminApi, formatTime } from "./adminApi";
 import type { RecoverySelection } from "./CustomerPanel";
 
 type Item = {
@@ -47,6 +47,7 @@ type Batch = {
   created: number;
   updated?: number;
   last4: string;
+  cards?: number;
   paused: boolean;
   message: string;
   items: Item[];
@@ -83,13 +84,13 @@ function resultSummary(items: Item[]) {
   return [`共 ${items.length} 笔`, ...parts.filter(([, n]) => n > 0).map(([label, n]) => `${label} ${n} 笔`)].join(" · ");
 }
 function taskTime(seconds?: number) {
-  return seconds ? new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false }) : "时间未记录";
+  return seconds ? formatTime(seconds) : "时间未记录";
 }
 function BatchDetails({ batch }: { batch: Batch }) {
   return <>
     <Stack direction="row" flexWrap="wrap" gap={1} alignItems="center">
       <Chip size="small" label={labels[batch.state] || batch.state} />
-      <Typography variant="body2">{batch.mode === "links" ? "仅生成链接" : `付款卡尾号 ${batch.last4}`} · {resultSummary(batch.items)}</Typography>
+      <Typography variant="body2">{batch.mode === "links" ? "仅生成补单链接" : batch.cards && batch.cards > 1 ? `付款卡 ${batch.cards} 张随机轮换（当前尾号 ${batch.last4}）` : `付款卡尾号 ${batch.last4}`} · {resultSummary(batch.items)}</Typography>
     </Stack>
     <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
       创建于 {taskTime(batch.created)} · 更新于 {taskTime(batch.updated || batch.created)}
@@ -123,7 +124,7 @@ function Orders({ items }: { items: Item[] }) {
               fontWeight={600}
               sx={{ overflowWrap: "anywhere" }}
             >
-              @{item.username} · 卡密尾号 {item.hint}
+              @{item.username} · 兑换码尾号 {item.hint}
             </Typography>
             {item.payment_node && (
               <Typography variant="caption">付款节点 {item.payment_node}</Typography>
@@ -157,6 +158,9 @@ function Orders({ items }: { items: Item[] }) {
         ))}
       </Stack>
       <TableContainer
+        tabIndex={0}
+        role="region"
+        aria-label="补单订单清单，可滚动查看"
         sx={{ maxHeight: 380, display: { xs: "none", sm: "block" } }}
       >
         <Table size="small" stickyHeader aria-label="补单订单清单">
@@ -173,7 +177,7 @@ function Orders({ items }: { items: Item[] }) {
                 <TableCell sx={{ verticalAlign: "top", minWidth: 140 }}>
                   <Typography variant="body2">@{item.username}</Typography>
                   <Typography variant="caption" display="block">
-                    卡密尾号 {item.hint}
+                    兑换码尾号 {item.hint}
                     {item.payment_node && ` · 付款节点 ${item.payment_node}`}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
@@ -232,6 +236,8 @@ export function RecoveryPanel({
   const linksOnly = batch?.mode === "links";
   const mutating = useRef(false);
   const sequence = useRef(0);
+  // 上一个补单操作在途时到达的 selection 先暂存,完成后补发,避免"点了没反应"。
+  const pendingSelection = useRef<RecoverySelection | null>(null);
   const active = batch?.state === "running" || batch?.state === "stopping";
   const pending =
     batch?.items.filter((item) => item.state === "pending").length || 0;
@@ -264,7 +270,10 @@ export function RecoveryPanel({
     };
   }, []);
   useEffect(() => {
-    if (selection) void act("preview", selection);
+    if (selection) {
+      if (mutating.current) pendingSelection.current = selection;
+      else void act("preview", selection);
+    }
   }, [selection]);
   async function act(
     action: "preview" | "start" | "stop",
@@ -303,6 +312,11 @@ export function RecoveryPanel({
       mutating.current = false;
       sequence.current++;
       setBusy(false);
+      const queued = pendingSelection.current;
+      if (queued) {
+        pendingSelection.current = null;
+        void act("preview", queued);
+      }
     }
   }
   return (
@@ -341,7 +355,7 @@ export function RecoveryPanel({
             disabled={busy || active}
             onClick={() => void act("preview", { mode: "links" })}
           >
-            仅生成链接
+            仅生成补单链接
           </Button>
           <Button
             variant="contained"
@@ -363,20 +377,20 @@ export function RecoveryPanel({
         </Stack>
       </Stack>
       {error && !open && (
-        <Alert severity="error" sx={{ mt: 2 }}>
+        <Alert severity="error" role="alert" sx={{ mt: 2 }}>
           {error}
         </Alert>
       )}
-      {statusError && <Alert severity="error" sx={{ mt: 2 }}>当前状态读取失败：{statusError}</Alert>}
-      <Box sx={{ mt: 2 }} aria-live="polite">
-        <Typography variant="body2" fontWeight={600}>
+      {statusError && <Alert severity="error" role="alert" sx={{ mt: 2 }}>当前状态读取失败：{statusError}</Alert>}
+      <Box sx={{ mt: 2 }}>
+        <Typography variant="body2" fontWeight={600} aria-live="polite">
           {statusError ? "当前状态暂不可用" : active ? "当前有补单任务运行中" : summary ? "当前没有运行中的补单任务" : "正在读取当前状态…"}
         </Typography>
         {summary && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
           当前订单：待核实 {summary.review} 笔 · 充值处理中 {summary.processing} 笔
         </Typography>}
       </Box>
-      {batch && active && (
+      {batch && active && !statusError && (
         <Box sx={{ mt: 2 }}>
           <BatchDetails batch={batch} />
         </Box>
@@ -393,7 +407,7 @@ export function RecoveryPanel({
               </Typography>
             </Box>
           </AccordionSummary>
-          <AccordionDetails>
+          <AccordionDetails id="recovery-history-content">
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
               以下为这次任务保存的处理结果。当前订单数量显示在上方；刷新页面不会重新执行此任务。
             </Typography>
@@ -417,13 +431,14 @@ export function RecoveryPanel({
           },
         }}
         aria-labelledby="recovery-title"
+        aria-describedby="recovery-dialog-description"
       >
         <DialogTitle id="recovery-title">
           {linksOnly ? "确认生成补单链接（不付款）" : "确认手动补单"}
         </DialogTitle>
-        <DialogContent>
+        <DialogContent id="recovery-dialog-description">
           {error && (
-            <Alert severity="error" sx={{ mb: 2 }}>
+            <Alert severity="error" role="alert" sx={{ mb: 2 }}>
               {error}
             </Alert>
           )}
@@ -432,7 +447,7 @@ export function RecoveryPanel({
               "只生成或更新付款链接，不提交银行卡付款；核验并处理"
             ) : (
               <>
-                使用银行卡尾号 <strong>{batch?.last4}</strong>，核验并处理
+                {batch?.cards && batch.cards > 1 ? <>使用 <strong>{batch.cards}</strong> 张银行卡随机轮换（当前尾号 <strong>{batch?.last4}</strong>）</> : <>使用银行卡尾号 <strong>{batch?.last4}</strong></>}，核验并处理
               </>
             )}{" "}
             <strong>{pending}</strong> 笔订单，账单总额{" "}
@@ -478,7 +493,7 @@ export function RecoveryPanel({
             }
             label={
               linksOnly
-                ? "我已核对客户和套餐，确认仅生成链接，不付款。"
+                ? "我已核对客户和套餐，确认仅生成补单链接，不付款。"
                 : "我已核对客户、套餐、账单金额和银行卡，确认启动本批次付款。"
             }
           />

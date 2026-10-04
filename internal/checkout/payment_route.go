@@ -21,6 +21,7 @@ type paymentRoute struct {
 	Recipient  string          `json:"recipient"`
 	NodeID     string          `json:"node_id"`
 	Outbound   json.RawMessage `json:"outbound"`
+	Card       string          `json:"card,omitempty"`
 	SelectedAt int64           `json:"selected_at"`
 }
 
@@ -74,6 +75,9 @@ func readPaymentRoute(v *vault.Vault, recipient string) (*paymentRoute, error) {
 	var route paymentRoute
 	if json.Unmarshal(raw, &route) != nil || route.Recipient != recipient || route.SelectedAt <= 0 || len(route.Outbound) == 0 || route.NodeID != outboundID(route.Outbound) {
 		return nil, errors.New("saved payment route is invalid; refusing to select another node")
+	}
+	if route.Card != "" && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(route.Card) {
+		return nil, errors.New("saved payment route card binding is invalid")
 	}
 	if _, err = proxy.ParseOutboundPool(append(append([]byte{'['}, route.Outbound...), ']')); err != nil {
 		return nil, errors.New("saved payment outbound is invalid")
@@ -229,7 +233,7 @@ func rotateCoolingRouteLocked(v *vault.Vault, old *paymentRoute) (*paymentRoute,
 	if err != nil {
 		return nil, err
 	}
-	next := &paymentRoute{Recipient: old.Recipient, NodeID: outboundID(node), Outbound: node, SelectedAt: time.Now().Unix()}
+	next := &paymentRoute{Recipient: old.Recipient, NodeID: outboundID(node), Outbound: node, Card: old.Card, SelectedAt: time.Now().Unix()}
 	b, err := json.Marshal(next)
 	if err != nil {
 		return nil, err

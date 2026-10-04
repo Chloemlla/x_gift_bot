@@ -34,7 +34,7 @@ func TestStripeDirectAndXProxyStaySeparate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s, err := newStripe(context.Background(), v, "1234")
+	s, err := newStripe(context.Background(), v, "1234", paymentRead)
 	if err != nil {
 		t.Fatal(err)
 	}

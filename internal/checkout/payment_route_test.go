@@ -124,7 +124,7 @@ func TestStripePoolUsesPinnedProxyAndDoesNotFallback(t *testing.T) {
 	v := controlFixture(t)
 	v.Put("payment-outbounds", nodes)
 	v.Put("stripe-key", []byte("pk_live_Test"))
-	s, err := newStripe(context.Background(), v, "1234")
+	s, err := newStripe(context.Background(), v, "1234", paymentRead)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestStripePoolUsesPinnedProxyAndDoesNotFallback(t *testing.T) {
 	pinned, _ := v.Get("stripe-route:1234")
 	upstream.Close()
 	v.Put("payment-outbounds", []byte(`[]`))
-	s, err = newStripe(context.Background(), v, "1234")
+	s, err = newStripe(context.Background(), v, "1234", paymentRead)
 	if err != nil {
 		t.Fatal(err)
 	}

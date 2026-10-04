@@ -14,16 +14,27 @@ import {
 } from "@mui/material";
 import GitHubIcon from "@mui/icons-material/GitHub";
 import { theme } from "./theme";
+import { humanToken, HumanVerification } from "./HumanVerification";
 
 export async function request<T>(
   path: string,
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<{ ok: boolean; data: T }> {
+  const actions: Record<string, string> = { "/api/redeem": "redeem", "/api/check": "check", "/api/manual-link": "manual_link" };
+  let token = "";
+  if (body !== undefined && actions[path]) {
+    try {
+      token = await humanToken(actions[path], signal);
+      signal?.throwIfAborted();
+    } catch (error) {
+      return { ok: false, data: { status: "verification_required", message: error instanceof Error && error.name !== "TimeoutError" && error.name !== "AbortError" ? error.message : "人机验证已超时，本次操作尚未提交，请重试。" } as T };
+    }
+  }
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
     headers:
-      body === undefined ? undefined : { "Content-Type": "application/json" },
+      body === undefined ? undefined : { "Content-Type": "application/json", ...(token ? { "X-Turnstile-Token": token } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",
     signal: signal ?? AbortSignal.timeout(45000),
@@ -80,7 +91,7 @@ export function mount(node: ReactNode) {
         modeStorageKey="xgift-mode"
       >
         <CssBaseline />
-        <ErrorBoundary>{node}</ErrorBoundary>
+        <ErrorBoundary>{node}<HumanVerification /></ErrorBoundary>
       </ThemeProvider>
     </CacheProvider>,
   );

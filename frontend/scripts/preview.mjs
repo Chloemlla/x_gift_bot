@@ -46,7 +46,7 @@ createServer(async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader(
     "Content-Security-Policy",
-    `default-src 'none'; script-src 'self'; style-src 'self' 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+    `default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
   );
   res.setHeader("X-Content-Type-Options", "nosniff");
   const url = new URL(req.url, `http://127.0.0.1:${port}`);
@@ -55,6 +55,12 @@ createServer(async (req, res) => {
     res.end(JSON.stringify(data));
   }
   try {
+    if (url.pathname === "/api/security") {
+      return json(200, { turnstile_enabled: process.env.PREVIEW_TURNSTILE === "true", turnstile_site_key: process.env.PREVIEW_TURNSTILE === "true" ? "1x00000000000000000000AA" : "" });
+    }
+    if (process.env.PREVIEW_TURNSTILE === "true" && req.method === "POST" && ["/api/check", "/api/redeem", "/api/manual-link"].includes(url.pathname) && !req.headers["x-turnstile-token"]) {
+      return json(403, { message: "请完成人机验证后重试。" });
+    }
     if (req.method === "GET" && files[url.pathname]) {
       const [file, type] = files[url.pathname];
       let data = await readFile(

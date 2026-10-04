@@ -40,20 +40,23 @@ var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{1,15}$`)
 var codePattern = regexp.MustCompile(`^XG-[A-F0-9]{48}$`)
 
 type server struct {
-	db         *sql.DB
-	vault      *vault.Vault
-	origin     string
-	adminHash  [32]byte
-	payments   bool
-	port       int
-	lockPath   string
-	work       chan struct{}
-	checks     chan struct{}
-	jobs       sync.WaitGroup
-	ctx        context.Context
-	recoveryMu sync.Mutex
-	limitsMu   sync.Mutex
-	limits     map[string]limit
+	turnstileSiteKey string
+	turnstileSecret  string
+	turnstileHTTP    *http.Client
+	db               *sql.DB
+	vault            *vault.Vault
+	origin           string
+	adminHash        [32]byte
+	payments         bool
+	port             int
+	lockPath         string
+	work             chan struct{}
+	checks           chan struct{}
+	jobs             sync.WaitGroup
+	ctx              context.Context
+	recoveryMu       sync.Mutex
+	limitsMu         sync.Mutex
+	limits           map[string]limit
 }
 type limit struct {
 	start time.Time
@@ -111,6 +114,9 @@ func Run(ctx context.Context) error {
 	}
 	s := &server{origin: origin, adminHash: sha256.Sum256(admin), payments: os.Getenv("XGIFT_PAYMENTS_ENABLED") == "true", lockPath: filepath.Join(dir, "checkout.lock"), work: make(chan struct{}, 1), checks: make(chan struct{}, 4), ctx: ctx, limits: map[string]limit{}}
 	clear(admin)
+	if err = s.configureTurnstile(); err != nil {
+		return err
+	}
 	v, err := vault.Open(filepath.Join(dir, "vault.db"), os.Getenv("XGIFT_PASSWORD_FILE"), false)
 	if err != nil {
 		return err
@@ -223,11 +229,12 @@ func Run(ctx context.Context) error {
 		}
 		reply(w, 200, map[string]any{"ok": true, "payments_enabled": ready})
 	})
-	mux.HandleFunc("POST /api/redeem", s.redeem)
+	mux.HandleFunc("GET /api/security", s.securityConfig)
+	mux.HandleFunc("POST /api/redeem", s.human("redeem", s.redeem))
 	mux.HandleFunc("GET /api/manual-link/plans", s.publicLinkPlans)
-	mux.HandleFunc("POST /api/manual-link", s.publicLink)
+	mux.HandleFunc("POST /api/manual-link", s.human("manual_link", s.publicLink))
 	mux.HandleFunc("POST /api/status", s.status)
-	mux.HandleFunc("POST /api/check", s.check)
+	mux.HandleFunc("POST /api/check", s.human("check", s.check))
 	mux.HandleFunc("GET /admin", s.admin(s.asset("admin.html", "text/html; charset=utf-8")))
 	mux.HandleFunc("GET /admin.js", s.admin(s.asset("admin.js", "application/javascript; charset=utf-8")))
 	mux.HandleFunc("GET /api/admin/codes", s.admin(s.list))
@@ -401,7 +408,7 @@ func (s *server) middleware(next http.Handler) http.Handler {
 		nonce := token(16)
 		r = r.WithContext(context.WithValue(r.Context(), nonceContextKey{}, nonce))
 		// Emotion style elements use a fresh nonce. MUI also sets dynamic style attributes.
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'nonce-"+nonce+"'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'nonce-"+nonce+"'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")

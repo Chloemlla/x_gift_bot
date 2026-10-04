@@ -51,6 +51,15 @@ func Reconcile(ctx context.Context, v *vault.Vault, recipient string, port int) 
 	if err != nil {
 		return &r, err
 	}
+	if status == "requires_action" {
+		r.Status = status
+		if err = save(v, &r); err != nil {
+			return &r, err
+		}
+		if err = markAuthenticationRequired(v, &r); err != nil {
+			return &r, err
+		}
+	}
 	if status != "succeeded" {
 		return &r, errors.New("payment is not yet confirmed successful")
 	}

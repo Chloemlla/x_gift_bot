@@ -1,6 +1,7 @@
 package checkout
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
@@ -286,6 +287,18 @@ func continueOrRotate(v *vault.Vault, cards []card, nodes []json.RawMessage, rot
 // records it on the order. rotate forces a fresh pair (used after a decline).
 // Read-only Stripe calls keep using selectPaymentRoute and never rotate cards.
 func assignPaymentRoute(v *vault.Vault, recipient string, rotate bool) (*paymentRoute, card, error) {
+	return assignPaymentRouteCard(v, recipient, rotate, "")
+}
+
+type paymentCardSelectionKey struct{}
+
+// WithPaymentCard restricts an explicitly authorized payment to one unique
+// card suffix. It never bypasses card or node cooldowns and never falls back.
+func WithPaymentCard(ctx context.Context, last4 string) context.Context {
+	return context.WithValue(ctx, paymentCardSelectionKey{}, last4)
+}
+
+func assignPaymentRouteCard(v *vault.Vault, recipient string, rotate bool, last4 string) (*paymentRoute, card, error) {
 	if !regexp.MustCompile(`^[0-9]{1,32}$`).MatchString(recipient) {
 		return nil, card{}, errors.New("payment route requires a bound recipient")
 	}
@@ -294,6 +307,18 @@ func assignPaymentRoute(v *vault.Vault, recipient string, rotate bool) (*payment
 	cards, err := readCards(v)
 	if err != nil {
 		return nil, card{}, err
+	}
+	if last4 != "" {
+		var selected []card
+		for _, c := range cards {
+			if cardTail(c) == last4 {
+				selected = append(selected, c)
+			}
+		}
+		if !regexp.MustCompile(`^[0-9]{4}$`).MatchString(last4) || len(selected) != 1 {
+			return nil, card{}, errors.New("requested payment card is missing or ambiguous")
+		}
+		cards = selected
 	}
 	rotation, err := readPaymentRotation(v)
 	if err != nil {

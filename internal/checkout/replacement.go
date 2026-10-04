@@ -128,6 +128,9 @@ func prepareRecoveryLink(ctx context.Context, v *vault.Vault, r *Record, s *stri
 				if err = save(v, r); err != nil {
 					return r, err
 				}
+				if err = markAuthenticationRequired(v, r); err != nil {
+					return r, err
+				}
 				return r, errors.New("bank authentication required")
 			}
 			if !IsPaymentDeclined(r) {

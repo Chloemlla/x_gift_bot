@@ -309,3 +309,24 @@ func TestTwoCardRotationAlternatesBatches(t *testing.T) {
 		t.Fatal("consecutive forced rotations reused the same card")
 	}
 }
+
+func TestExplicitCardSelectionNeverFallsBack(t *testing.T) {
+	v := rotationSetup(t, testCardOne, testCardTwo)
+	route, c, err := assignPaymentRouteCard(v, "991", false, "4242")
+	if err != nil || cardTail(c) != "4242" || route.Card != cardFingerprint(c) {
+		t.Fatal("requested card was not bound", err)
+	}
+	_, c, err = assignPaymentRouteCard(v, "991", false, "5556")
+	if err != nil || cardTail(c) != "5556" {
+		t.Fatal("explicit selection did not replace the prior route card", err)
+	}
+	if err = coolPaymentCard(v, cardFingerprint(c), "requires_action"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = assignPaymentRouteCard(v, "992", false, "5556"); err == nil {
+		t.Fatal("cooled requested card fell back to another card")
+	}
+	if _, _, err = assignPaymentRouteCard(v, "993", false, "9999"); err == nil {
+		t.Fatal("missing requested card fell back")
+	}
+}

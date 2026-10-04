@@ -301,6 +301,9 @@ observe:
 				if e = save(v, r); e != nil {
 					return r, e
 				}
+				if e = markAuthenticationRequired(v, r); e != nil {
+					return r, e
+				}
 				return r, errors.New("bank authentication is required; use this existing checkout")
 			}
 		}

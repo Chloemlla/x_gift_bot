@@ -41,6 +41,7 @@ const reasons: Record<string, string> = {
   "invalid supplied billing country": "账单国家无效",
   do_not_try_again: "银行要求停止重试",
   declined_multi_node: "多个节点拒付",
+  requires_action: "需要银行验证",
 };
 function reasonText(raw: string) {
   return reasons[raw] || raw;

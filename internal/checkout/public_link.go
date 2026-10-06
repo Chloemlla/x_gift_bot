@@ -16,10 +16,10 @@ import (
 
 var ErrPublicLinkConflict = errors.New("existing checkout requires private review")
 var ErrPublicLinkPrivateOrder = fmt.Errorf("%w: private order exists", ErrPublicLinkConflict)
-var ErrPublicLinkOtherBrowser = fmt.Errorf("%w: browser ownership mismatch", ErrPublicLinkConflict)
-var ErrPublicLinkPlan = fmt.Errorf("%w: another plan exists", ErrPublicLinkConflict)
 var ErrPublicLinkRetryLimit = fmt.Errorf("%w: unpublished creation retry budget exhausted", ErrPublicLinkConflict)
 var ErrPublicLinkPending = errors.New("public checkout creation returned no usable link")
+
+const publicLinkTTL = 15 * time.Minute
 
 type publicLinkRecord struct {
 	Owner string `json:"owner"`
@@ -27,7 +27,8 @@ type publicLinkRecord struct {
 }
 
 // PublicLinkForUsername never uses a saved card or an automatic-payment record.
-// Caller must hold checkout.lock. Ownership is an opaque, browser-bound cookie.
+// Caller must hold checkout.lock. The browser cookie identifies queue requests;
+// verified public links may be retrieved across browsers for the same recipient.
 func PublicLinkForUsername(ctx context.Context, v *vault.Vault, user, owner string, port, months int, verifiedUnpaid ...bool) (*Record, error) {
 	user = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(user), "@"))
 	if !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(user) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(owner) {
@@ -57,7 +58,7 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 	}
 	sum := sha256.Sum256([]byte(owner))
 	ownerHash := hex.EncodeToString(sum[:])
-	existing, err := publicLinkExisting(v, user, recipient, ownerHash, plan)
+	existing, err := publicLinkExisting(v, user, recipient, plan)
 	if err != nil {
 		return nil, err
 	}
@@ -66,13 +67,19 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 	}
 	replace := false
 	if existing != nil && existing.Status == "created" {
-		err = verifyPublicCheckout(ctx, v, x, existing, plan)
+		// Validate the old session against its original product, even when the
+		// visitor selected a different plan. Never return that link for a new plan.
+		oldPlan := Plan{Months: existing.Months, Minor: existing.Amount, Currency: strings.ToLower(existing.Currency), ProductID: existing.ProductID, Merchant: plan.Merchant}
+		err = verifyPublicCheckout(ctx, v, x, existing, oldPlan)
 		if err == nil && existing.Status == "succeeded" {
 			b, _ := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: *existing})
 			return existing, v.Put("public-checkout:"+recipient, b)
 		}
 		if err != nil && (!errors.Is(err, ErrVerifyUnpaid) || len(verifiedUnpaid) == 0 || !verifiedUnpaid[0]) {
 			return nil, err
+		}
+		if err == nil && publicLinkMatches(existing, plan) && publicLinkFresh(existing, time.Now()) {
+			return existing, nil
 		}
 		replace = true
 	}
@@ -139,12 +146,19 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 		}
 		return nil, ErrPublicLinkPending
 	}
+	if existing != nil && existing.SessionID == r.SessionID {
+		// An upstream replay cannot reset the old session's TTL or become a
+		// newly published link on a later request.
+		r = *existing
+		if err = persist(); err != nil {
+			return nil, err
+		}
+		return nil, ErrPublicLinkPending
+	}
 	r.Status = "created"
+	r.Created = time.Now().Unix()
 	if err = persist(); err != nil {
 		return nil, err
-	}
-	if existing != nil && existing.SessionID == r.SessionID {
-		return nil, ErrPublicLinkPending
 	}
 	if err = verifyPublicCheckout(ctx, v, x, &r, plan); err != nil {
 		return nil, err
@@ -189,13 +203,13 @@ func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Re
 		r.Status = "succeeded"
 		return nil
 	}
-	if p.Status == "expired" && p.PaymentStatus == "unpaid" {
+	if p.Status == "expired" && p.PaymentStatus == "unpaid" && p.IntentPresent && p.IntentNull && p.Intent == nil {
 		return ErrVerifyUnpaid
 	}
 	return p.guard(r, plan, true)
 }
 
-func publicLinkExisting(v *vault.Vault, user, recipient, owner string, plan Plan) (*Record, error) {
+func publicLinkExisting(v *vault.Vault, user, recipient string, plan Plan) (*Record, error) {
 	for _, key := range []string{"checkout:" + recipient, "checkout:" + user} {
 		b, e := v.Get(key)
 		clear(b)
@@ -219,16 +233,10 @@ func publicLinkExisting(v *vault.Vault, user, recipient, owner string, plan Plan
 		return nil, ErrPublicLinkConflict
 	}
 	r := saved.Order
-	if saved.Owner != owner {
-		return nil, ErrPublicLinkOtherBrowser
-	}
 	if r.Username != user || r.RecipientID != recipient || !unsubmitted(&r) || r.CardFingerprint != "" {
 		return nil, ErrPublicLinkConflict
 	}
-	if r.Months != plan.Months {
-		return nil, ErrPublicLinkPlan
-	}
-	if r.Amount != plan.Minor || r.Currency != strings.ToUpper(plan.Currency) || r.ProductID != plan.ProductID {
+	if r.Months < 1 || r.Months > 24 || r.Amount <= 0 || !catalogCurrencyPattern.MatchString(strings.ToLower(r.Currency)) || !catalogProductPattern.MatchString(r.ProductID) {
 		return nil, ErrPublicLinkConflict
 	}
 	switch r.Status {
@@ -237,6 +245,9 @@ func publicLinkExisting(v *vault.Vault, user, recipient, owner string, plan Plan
 			return nil, ErrPublicLinkConflict
 		}
 	case "creating":
+		// An unpublished request has no payable session to verify. Keep its
+		// retry budget, but allow the current request to choose the product.
+		r.Months, r.Amount, r.Currency, r.ProductID = plan.Months, plan.Minor, strings.ToUpper(plan.Currency), plan.ProductID
 		if r.URL != "" || r.SessionID != "" || r.PreviousSession != "" || r.ReplacementCount != 0 || r.RecoveryAttempts != 0 || r.ManualRecovery || r.LastError != nil {
 			return nil, ErrPublicLinkConflict
 		}
@@ -247,4 +258,13 @@ func publicLinkExisting(v *vault.Vault, user, recipient, owner string, plan Plan
 		return nil, ErrPublicLinkConflict
 	}
 	return &r, nil
+}
+
+func publicLinkMatches(r *Record, plan Plan) bool {
+	return r.Months == plan.Months && r.Amount == plan.Minor && r.Currency == strings.ToUpper(plan.Currency) && r.ProductID == plan.ProductID
+}
+
+func publicLinkFresh(r *Record, now time.Time) bool {
+	created := time.Unix(r.Created, 0)
+	return r.Created > 0 && !now.Before(created) && now.Sub(created) < publicLinkTTL
 }

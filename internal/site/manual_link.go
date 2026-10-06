@@ -128,14 +128,10 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 			message(w, 429, "正在等待处理，请稍候。")
 		case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):
 			message(w, 409, "该账号已有兑换或后台订单，请使用原付款链接或联系管理员；主页不会重复创建订单。")
-		case errors.Is(err, checkout.ErrPublicLinkOtherBrowser):
-			message(w, 409, "该账号已有手动付款链接，请在最初生成链接的浏览器中使用相同套餐重试，或联系管理员。")
-		case errors.Is(err, checkout.ErrPublicLinkPlan):
-			message(w, 409, "该账号已有其他时长的付款链接，请选择原套餐取回链接，或联系管理员。")
 		case errors.Is(err, checkout.ErrPublicLinkRetryLimit):
 			message(w, 409, "创建链接已连续失败，请联系管理员检查；系统没有提交付款。")
 		case errors.Is(err, checkout.ErrPublicLinkPending):
-			message(w, 502, "暂未取得付款链接，系统没有提交付款。请在同一浏览器用相同账号和套餐重试；请勿同时使用其他入口重复建单。")
+			message(w, 502, "暂未取得付款链接，系统没有提交付款。请用相同账号和套餐重试；请勿同时使用其他入口重复建单。")
 		case errors.Is(err, checkout.ErrPublicLinkConflict):
 			message(w, 409, "该账号暂时无法生成新链接，请使用原付款页面或联系管理员核实。")
 		case errors.Is(err, checkout.ErrVerifyUnpaid):
@@ -170,7 +166,7 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 		}
 		result["checkout_url"] = link
 		if publicOwner != "" {
-			log.Printf("public link ready: username=%s months=%d fresh=true stripe_verified=true", record.Username, record.Months)
+			log.Printf("public link ready: username=%s months=%d stripe_verified=true", record.Username, record.Months)
 		}
 	}
 	reply(w, 200, result)
@@ -182,10 +178,6 @@ func manualLinkFailureReason(err error) string {
 		return "creation_rate_limited"
 	case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):
 		return "private_order"
-	case errors.Is(err, checkout.ErrPublicLinkOtherBrowser):
-		return "browser_mismatch"
-	case errors.Is(err, checkout.ErrPublicLinkPlan):
-		return "plan_mismatch"
 	case errors.Is(err, checkout.ErrPublicLinkRetryLimit):
 		return "creation_retry_limit"
 	case errors.Is(err, checkout.ErrPublicLinkPending):

@@ -74,7 +74,7 @@ func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
 		// A delayed poll must never deliver an old success after a later checkout
 		// may have invalidated it. A new submission always performs fresh checks.
 		if job.code == 200 && time.Since(job.finished) >= 15*time.Second {
-			message(w, 409, "本次链接未及时领取，请重新生成新链接；若已付款，请勿重复支付。")
+			message(w, 409, "本次链接需要重新核验，请重新获取付款链接；若已付款，请勿重复支付。")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

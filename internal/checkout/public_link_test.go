@@ -24,12 +24,12 @@ func TestPublicLinkOwnershipAndPaymentIsolation(t *testing.T) {
 		allowed bool
 	}{
 		{"own public link", "owner", func(r *Record) {}, false, true},
-		{"other browser", "other", func(r *Record) {}, false, false},
+		{"other browser", "other", func(r *Record) {}, false, true},
 		{"stored card", "owner", func(r *Record) { r.CardFingerprint = "private-card" }, false, false},
 		{"payment method", "owner", func(r *Record) { r.PaymentMethod = "pm_private" }, false, false},
 		{"submitted", "owner", func(r *Record) { r.SubmittedAt = 123 }, false, false},
 		{"ambiguous creation", "owner", func(r *Record) { r.Status = "creating" }, false, false},
-		{"different plan", "owner", func(r *Record) { r.Months = 3 }, false, false},
+		{"different plan to verify before replacement", "owner", func(r *Record) { r.Months = 3 }, false, true},
 		{"admin order", "owner", func(r *Record) {}, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,7 +41,7 @@ func TestPublicLinkOwnershipAndPaymentIsolation(t *testing.T) {
 			if tc.private {
 				v.Put("checkout:1234", []byte(`{"status":"requires_action","payment_method":"pm_private"}`))
 			}
-			got, err := publicLinkExisting(v, "recipient", "1234", tc.owner, plan)
+			got, err := publicLinkExisting(v, "recipient", "1234", plan)
 			if tc.allowed {
 				if err != nil || got == nil {
 					t.Fatal(err)
@@ -112,12 +112,12 @@ func TestPublicLinkExplicitRetryAfterUnpublishedTimeout(t *testing.T) {
 			original := r.URL
 			resetCreationClock(t, v)
 			r, e = publicLinkForClient(context.Background(), v, "recipient", owner, plan, x)
-			if e != nil || r.URL == original || calls != 3 {
-				t.Fatal("explicit generation reused a cached checkout")
+			if e != nil || r.URL != original || calls != 2 {
+				t.Fatal("fresh verified checkout was not reused")
 			}
-			_, e = publicLinkForClient(context.Background(), v, "recipient", strings.Repeat("b", 64), plan, x)
-			if !errors.Is(e, ErrPublicLinkOtherBrowser) || calls != 3 {
-				t.Fatal("another browser accessed the order")
+			other, e := publicLinkForClient(context.Background(), v, "recipient", strings.Repeat("b", 64), plan, x)
+			if e != nil || other.URL != original || calls != 2 {
+				t.Fatal("another browser could not retrieve verified public order")
 			}
 			// A closed session is not evidence of non-payment. Never replace it
 			// without the visitor's explicit confirmation, nor return its old URL.
@@ -130,11 +130,11 @@ func TestPublicLinkExplicitRetryAfterUnpublishedTimeout(t *testing.T) {
 			}
 			resetCreationClock(t, v)
 			got, err := publicLinkForClient(context.Background(), v, "recipient", owner, plan, x)
-			if got != nil || !errors.Is(err, ErrVerifyUnpaid) || calls != 3 {
+			if got != nil || !errors.Is(err, ErrVerifyUnpaid) || calls != 2 {
 				t.Fatal("closed session was reused or replaced without confirmation", err)
 			}
 			got, err = publicLinkForClient(context.Background(), v, "recipient", owner, plan, x, true)
-			if err != nil || got == nil || got.SessionID == oldID || calls != 4 {
+			if err != nil || got == nil || got.SessionID == oldID || calls != 3 {
 				t.Fatal("confirmed closed session did not get a new verified checkout", err)
 			}
 		}
@@ -194,5 +194,155 @@ func TestPublicCheckoutVerificationRejectsWrongOrInactiveOrders(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestPublicLinkTTLAndPlanReplacement(t *testing.T) {
+	plan := Plan{Months: 6, Minor: 60000, Currency: "usd", ProductID: "prod_TEST6MO"}
+	for _, tc := range []struct {
+		name       string
+		age        time.Duration
+		changePlan bool
+		state      string
+		creates    int
+		wantErr    bool
+	}{
+		{"cross browser cache", time.Minute, false, "open", 0, false},
+		{"stored unverified session", time.Minute, false, "wrong_session", 0, true},
+		{"expired TTL", 15 * time.Minute, false, "open", 1, false},
+		{"unknown creation time", 0, false, "open", 1, false},
+		{"changed plan", time.Minute, true, "open", 1, false},
+		{"processing within TTL", time.Minute, false, "processing", 0, true},
+		{"processing beyond TTL", 16 * time.Minute, false, "processing", 0, true},
+		{"expired with processing intent", 16 * time.Minute, false, "expired_processing", 0, true},
+		{"inactive beyond TTL", 16 * time.Minute, false, "inactive", 0, true},
+		{"paid beyond TTL", 16 * time.Minute, true, "paid", 0, false},
+		{"upstream repeats expired session", 16 * time.Minute, false, "replay", 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := controlFixture(t)
+			old := Record{Username: "recipient", RecipientID: "1234", Months: plan.Months, Amount: plan.Minor, Currency: "USD", ProductID: plan.ProductID, Status: "created", SessionID: "cs_live_Original", URL: "https://checkout.stripe.com/c/pay/cs_live_Original", Created: time.Now().Add(-tc.age).Unix()}
+			if tc.age == 0 {
+				old.Created = 0
+			}
+			b, _ := json.Marshal(publicLinkRecord{Owner: "old-browser", Order: old})
+			if err := v.Put("public-checkout:1234", b); err != nil {
+				t.Fatal(err)
+			}
+			requested := plan
+			if tc.changePlan {
+				requested.Months = 3
+				requested.Minor = 30000
+				requested.ProductID = "prod_TEST3MO"
+			}
+			creates, reads := 0, 0
+			transport := mockXTransport(func(req *http.Request) (*http.Response, error) {
+				body := ""
+				switch {
+				case strings.HasSuffix(req.URL.Path, "/PremiumGiftingQuery"):
+					body = `{"data":{"user":{"result":{"rest_id":"1234","premium_gifting_eligible":true,"core":{"screen_name":"recipient"}}}}}`
+				case strings.HasSuffix(req.URL.Path, "/useSubscriptionProductDetailsByRestIdQuery"):
+					body = fmt.Sprintf(`{"data":{"web_subscription_product_details_by_rest_id":{"rest_id":%q,"prices":[{"amount_local_micro":%d,"currency_code":"usd","price_type":"OneTime"}]}}}`, requested.ProductID, requested.Minor*10000)
+				case strings.HasSuffix(req.URL.Path, "/useOneTimePurchaseGiftMutation"):
+					creates++
+					id := "cs_live_Replacement"
+					if tc.state == "replay" {
+						id = old.SessionID
+					}
+					body = fmt.Sprintf(`{"data":{"onetimepurchase_gift":{"session_id":%q,"session_url":%q,"session_status":"Unpaid"}}}`, id, "https://checkout.stripe.com/c/pay/"+id)
+				default:
+					t.Fatalf("unexpected request %s", req.URL.Path)
+				}
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})
+			client := &http.Client{Transport: transport}
+			x := &xClient{vault: v, headers: make(http.Header), http: client, regionalHTTP: client}
+			x.readCheckout = func(_ context.Context, r *Record) (*paymentPage, error) {
+				reads++
+				if r.SessionID != old.SessionID {
+					return publicPageFixture(r, requested), nil
+				}
+				p := publicPageFixture(r, plan)
+				switch tc.state {
+				case "wrong_session":
+					p.SessionID = "cs_live_WrongRecipientSession"
+				case "inactive":
+					return nil, &stripeError{Code: "checkout_not_active_session"}
+				case "processing", "expired_processing":
+					if tc.state == "expired_processing" {
+						p.Status = "expired"
+					}
+					p.IntentNull = false
+					if err := json.Unmarshal([]byte(fmt.Sprintf(`{"currency":%q,"amount":%d,"status":"processing"}`, plan.Currency, plan.Minor)), &p.Intent); err != nil {
+						t.Fatal(err)
+					}
+				case "paid":
+					p.Status = "complete"
+					p.PaymentStatus = "paid"
+				}
+				return p, nil
+			}
+			// A cache hit must work even while the global creation clock is busy.
+			if tc.creates == 0 {
+				clock, _ := json.Marshal(time.Now().UnixMilli())
+				v.Put("checkout-creation:last", clock)
+			}
+			beforeClock, _ := v.Get("checkout-creation:last")
+			got, err := publicLinkForClient(context.Background(), v, "recipient", strings.Repeat("b", 64), requested, x, tc.state == "processing" || tc.state == "expired_processing")
+			if (err != nil) != tc.wantErr || creates != tc.creates || reads < 1 {
+				t.Fatalf("got error=%v creates=%d reads=%d", err, creates, reads)
+			}
+			if tc.wantErr {
+				if got != nil {
+					t.Fatal("unsafe link returned")
+				}
+				if tc.state == "replay" {
+					raw, _ := v.Get("public-checkout:1234")
+					var stored publicLinkRecord
+					json.Unmarshal(raw, &stored)
+					if stored.Order.SessionID != old.SessionID || stored.Order.Created != old.Created {
+						t.Fatal("upstream replay became cache")
+					}
+				}
+				return
+			}
+			if tc.state == "paid" {
+				if got.Status != "succeeded" {
+					t.Fatal("paid order not preserved")
+				}
+				return
+			}
+			if !publicLinkMatches(got, requested) {
+				t.Fatal("returned wrong plan")
+			}
+			if tc.creates == 0 {
+				if got.SessionID != old.SessionID || got.Created != old.Created {
+					t.Fatal("cache hit changed session or extended TTL")
+				}
+				after, _ := v.Get("public-checkout:1234")
+				if string(after) != string(b) {
+					t.Fatal("cache hit rewrote record")
+				}
+				afterClock, _ := v.Get("checkout-creation:last")
+				if string(afterClock) != string(beforeClock) {
+					t.Fatal("cache consumed creation rate limit")
+				}
+			} else if got.SessionID == old.SessionID || !publicLinkFresh(got, time.Now()) {
+				t.Fatal("replacement did not start a new TTL")
+			}
+		})
+	}
+}
+
+func TestPublicLinkTTLBoundary(t *testing.T) {
+	created := time.Unix(1700000000, 0)
+	r := Record{Created: created.Unix()}
+	for _, tc := range []struct {
+		offset time.Duration
+		fresh  bool
+	}{{-time.Second, false}, {0, true}, {15*time.Minute - time.Nanosecond, true}, {15 * time.Minute, false}, {16 * time.Minute, false}} {
+		if got := publicLinkFresh(&r, created.Add(tc.offset)); got != tc.fresh {
+			t.Fatalf("age %v: fresh=%t", tc.offset, got)
+		}
 	}
 }

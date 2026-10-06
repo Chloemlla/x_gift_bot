@@ -151,6 +151,9 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
 			message(w, 429, "正在等待处理，请稍候。")
+		case errors.Is(err, checkout.ErrPublicPaymentDeclined):
+			w.Header().Set("X-Checkout-Requeue", "declined")
+			message(w, 409, "上游拒绝了本次付款，通道已让给下一位。重试需要重新排队。")
 		case errors.Is(err, checkout.ErrPublicPaymentInProgress):
 			message(w, 409, "该订单正在付款或银行验证中，请先完成当前付款。")
 		case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):

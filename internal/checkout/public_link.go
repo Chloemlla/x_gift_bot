@@ -17,6 +17,7 @@ import (
 var ErrPublicLinkConflict = errors.New("existing checkout requires private review")
 var ErrPublicLinkPrivateOrder = fmt.Errorf("%w: private order exists", ErrPublicLinkConflict)
 var ErrPublicLinkPending = errors.New("public checkout creation returned no usable link")
+var ErrPublicPaymentDeclined = errors.New("public payment declined; rejoin queue")
 var ErrPublicPaymentInProgress = errors.New("public checkout payment is in progress")
 
 // PublicLinkTTL is the fixed payment window, measured from order creation.
@@ -80,14 +81,26 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 			b, _ := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: *existing})
 			return existing, v.Put("public-checkout:"+recipient, b)
 		}
-		if err != nil && !errors.Is(err, ErrVerifyUnpaid) {
+		declined := errors.Is(err, ErrPublicPaymentDeclined)
+		if declined {
+			released, releaseErr := releaseDeclinedCheckout(v, existing.SessionID)
+			if releaseErr != nil {
+				return nil, releaseErr
+			}
+			if released {
+				return nil, ErrPublicPaymentDeclined
+			}
+		}
+		if err != nil && !errors.Is(err, ErrVerifyUnpaid) && !declined {
 			return nil, err
 		}
 		if err == nil && publicLinkMatches(existing, plan) && publicLinkFresh(existing, time.Now()) {
 			return existing, holdPublicCheckout(v, existing, plan, time.Now())
 		}
 		replace = true
-		x.publicReplacement = existing.SessionID
+		if !declined {
+			x.publicReplacement = existing.SessionID
+		}
 	}
 	if err = x.checkCreation(ctx, time.Now()); err != nil {
 		return nil, err
@@ -233,6 +246,9 @@ func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Re
 	// leave an intent waiting for a new payment method; that is not an active
 	// payment and must not permanently prevent changing the gift duration.
 	if p.Intent != nil {
+		if publicIntentDeclined(p) {
+			return ErrPublicPaymentDeclined
+		}
 		if publicIntentIdle(p) {
 			if p.Status == "expired" && p.PaymentStatus == "unpaid" {
 				return ErrVerifyUnpaid
@@ -244,6 +260,26 @@ func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Re
 		return ErrPublicPaymentInProgress
 	}
 	return p.guard(r, plan, true)
+}
+
+// Only explicit refusal evidence can end an otherwise valid payment window.
+// An unused intent also requires_payment_method, so that status alone is insufficient.
+func publicIntentDeclined(p *paymentPage) bool {
+	if !publicIntentIdle(p) {
+		return false
+	}
+	var extra struct {
+		Intent struct {
+			Error struct {
+				Code        string `json:"code"`
+				DeclineCode string `json:"decline_code"`
+			} `json:"last_payment_error"`
+		} `json:"payment_intent"`
+	}
+	if json.Unmarshal(p.raw, &extra) != nil {
+		return false
+	}
+	return extra.Intent.Error.Code == "card_declined" || extra.Intent.Error.DeclineCode != ""
 }
 
 // Stripe's publishable-key responses omit amount_received/capturable. The live,
@@ -360,6 +396,11 @@ func cachedPublicLinkForClient(ctx context.Context, v *vault.Vault, user, owner 
 		return nil, false, nil
 	}
 	if err = verifyPublicCheckout(ctx, v, x, r, plan); err != nil {
+		if errors.Is(err, ErrPublicPaymentDeclined) {
+			if _, releaseErr := releaseDeclinedCheckout(v, r.SessionID); releaseErr != nil {
+				return nil, true, releaseErr
+			}
+		}
 		return nil, true, err
 	}
 	if r.Status == "created" && !publicLinkFresh(r, time.Now()) {

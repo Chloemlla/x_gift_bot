@@ -171,7 +171,7 @@ func (x *xClient) checkCreation(ctx context.Context, now time.Time) error {
 		r := a.Order
 		verificationErr := verifyPublicCheckout(ctx, x.vault, x, &r, a.Plan)
 		verified := verificationErr == nil && r.Status == "succeeded"
-		if !verified {
+		if !verified && !errors.Is(verificationErr, ErrPublicPaymentDeclined) {
 			paid, _ := x.checkoutPaid(ctx, &r, a.Plan)
 			if paid {
 				r.Status = "succeeded"
@@ -182,6 +182,10 @@ func (x *xClient) checkCreation(ctx context.Context, now time.Time) error {
 			a.Released = true
 			a.Order = r
 			if err := saveActiveCheckout(x.vault, a); err != nil {
+				return err
+			}
+		} else if errors.Is(verificationErr, ErrPublicPaymentDeclined) {
+			if _, err := releaseDeclinedCheckout(x.vault, r.SessionID); err != nil {
 				return err
 			}
 		} else if remaining := time.Until(time.UnixMilli(a.ExpiresAt)); remaining > 0 {
@@ -257,4 +261,21 @@ func (x *xClient) releasePublicReplacement(v *vault.Vault) error {
 		return saveActiveCheckout(v, a)
 	}
 	return nil
+}
+
+// Called under checkout.lock after a guarded live Stripe read. Do not release
+// another recipient's reservation or mark a refused payment as successful.
+func releaseDeclinedCheckout(v *vault.Vault, session string) (bool, error) {
+	a, err := readActiveCheckout(v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if a.Released || a.Order.SessionID != session {
+		return false, nil
+	}
+	a.Released = true
+	return true, saveActiveCheckout(v, a)
 }

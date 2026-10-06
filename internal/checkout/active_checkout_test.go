@@ -223,7 +223,7 @@ func TestDeclinedPublicIntentWithoutPrivateAmountsDoesNotBlockNextOrder(t *testi
 			v := controlFixture(t)
 			now := time.Now()
 			p := Plan{Months: 6, Minor: 60000, Currency: "usd", ProductID: "prod_TEST6MO", Merchant: "acct_Test"}
-			r := Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "USD", ProductID: p.ProductID, Created: now.Add(-4 * time.Minute).Unix(), Status: "created", SessionID: "cs_live_Declined", URL: "https://checkout.stripe.com/c/pay/cs_live_Declined"}
+			r := Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "USD", ProductID: p.ProductID, Created: now.Add(-time.Minute).Unix(), Status: "created", SessionID: "cs_live_Declined", URL: "https://checkout.stripe.com/c/pay/cs_live_Declined"}
 			a := activeCheckout{Order: r, Plan: p, ExpiresAt: time.Unix(r.Created, 0).Add(publicLinkTTL).UnixMilli()}
 			if err := saveActiveCheckout(v, a); err != nil {
 				t.Fatal(err)

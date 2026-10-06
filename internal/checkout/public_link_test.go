@@ -362,13 +362,16 @@ func TestPublicLinkTTLBoundary(t *testing.T) {
 }
 
 func TestCachedPublicLinkNeverCreatesAndChecksExpiryAfterVerification(t *testing.T) {
-	for _, state := range []string{"fresh", "expires_during_verification", "paid_inactive"} {
+	for _, state := range []string{"fresh", "expires_during_verification", "paid_inactive", "declined"} {
 		t.Run(state, func(t *testing.T) {
 			v := controlFixture(t)
 			p := Plan{Months: 6, Minor: 60000, Currency: "usd", ProductID: "prod_Test"}
 			r := Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "USD", ProductID: p.ProductID, Status: "created", SessionID: "cs_live_Test", URL: "https://checkout.stripe.com/c/pay/cs_live_Test", Created: time.Now().Unix()}
 			b, _ := json.Marshal(publicLinkRecord{Order: r})
 			if err := v.Put("public-checkout:1234", b); err != nil {
+				t.Fatal(err)
+			}
+			if err := holdPublicCheckout(v, &r, p, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			client := &http.Client{Transport: mockXTransport(func(req *http.Request) (*http.Response, error) {
@@ -384,9 +387,28 @@ func TestCachedPublicLinkNeverCreatesAndChecksExpiryAfterVerification(t *testing
 				if state == "expires_during_verification" {
 					r.Created = time.Now().Add(-publicLinkTTL).Unix()
 				}
-				return publicPageFixture(r, p), nil
+				page := publicPageFixture(r, p)
+				if state == "declined" {
+					raw, _ := json.Marshal(page)
+					var fields map[string]any
+					json.Unmarshal(raw, &fields)
+					fields["payment_intent"] = map[string]any{"id": "pi_Declined", "amount": 60000, "currency": "usd", "status": "requires_payment_method", "last_payment_error": map[string]string{"code": "card_declined"}}
+					raw, _ = json.Marshal(fields)
+					json.Unmarshal(raw, page)
+				}
+				return page, nil
 			}, readCheckoutPaid: func(context.Context, *Record, Plan) (bool, error) { return state == "paid_inactive", nil }}
 			got, hit, err := cachedPublicLinkForClient(context.Background(), v, "recipient", strings.Repeat("b", 64), p, x)
+			if state == "declined" {
+				if !errors.Is(err, ErrPublicPaymentDeclined) || got != nil {
+					t.Fatal("returned declined cache", err)
+				}
+				active, e := readActiveCheckout(v)
+				if e != nil || !active.Released {
+					t.Fatal("declined cached order retained priority", e)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -420,6 +442,33 @@ func TestPublicIdleIntentRejectsExplicitFundsAndProcessing(t *testing.T) {
 		}
 		if publicIntentIdle(&p) {
 			t.Fatal("inconsistent or processing payment classified idle")
+		}
+	}
+}
+
+func TestExplicitDeclineRequiresIdleUnpaidIntent(t *testing.T) {
+	for _, tc := range []struct {
+		status, payment, failure, funds string
+		want                            bool
+	}{
+		{"requires_payment_method", "unpaid", `{"code":"card_declined","decline_code":"generic_decline"}`, "", true},
+		{"canceled", "unpaid", `{"code":"card_declined"}`, "", true},
+		{"requires_payment_method", "unpaid", `null`, "", false},
+		{"requires_payment_method", "unpaid", `{"code":"processing_error"}`, "", false},
+		{"processing", "unpaid", `{"code":"card_declined"}`, "", false},
+		{"requires_action", "unpaid", `{"code":"card_declined"}`, "", false},
+		{"requires_capture", "unpaid", `{"code":"card_declined"}`, "", false},
+		{"requires_payment_method", "paid", `{"code":"card_declined"}`, "", false},
+		{"requires_payment_method", "unpaid", `{"code":"card_declined"}`, `,"amount_received":1`, false},
+		{"requires_payment_method", "unpaid", `{"code":"card_declined"}`, `,"amount_capturable":1`, false},
+	} {
+		var p paymentPage
+		raw := fmt.Sprintf(`{"payment_status":%q,"payment_intent":{"status":%q,"last_payment_error":%s%s}}`, tc.payment, tc.status, tc.failure, tc.funds)
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		if got := publicIntentDeclined(&p); got != tc.want {
+			t.Fatalf("%s: declined=%t", raw, got)
 		}
 	}
 }

@@ -316,6 +316,21 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 		job.nextAttempt = time.Time{}
 		return
 	}
+	if w.Header().Get("X-Checkout-Requeue") == "declined" {
+		// A slot holder who retries after refusal loses the own-window shortcut.
+		// Keep their ticket durable, but put this explicit retry behind everyone.
+		job.state = "queued"
+		job.nextAttempt = time.Time{}
+		q.blockedUntil = time.Time{}
+		q.windowUser = ""
+		for i, candidate := range q.jobs {
+			if candidate == job {
+				q.jobs = append(append(q.jobs[:i], q.jobs[i+1:]...), job)
+				break
+			}
+		}
+		return
+	}
 	if w.Header().Get("Retry-After") != "" {
 		job.state = "queued"
 		if wait, _ := strconv.Atoi(w.Header().Get("X-Checkout-Wait-Seconds")); wait > 0 {

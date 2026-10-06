@@ -444,3 +444,28 @@ func TestRecoverQueueNeverRevealsAnotherBrowsersTicket(t *testing.T) {
 		t.Fatal("leaked another browser's queue")
 	}
 }
+
+func TestDeclinedRetryMovesBehindWaitingUsers(t *testing.T) {
+	s := &server{}
+	for _, user := range []string{"declined", "second", "third"} {
+		s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: user, Months: 3}, "owner-"+user)
+	}
+	original := s.linkQueue.jobs[0]
+	s.processPublicLinkQueue(context.Background(), func(w http.ResponseWriter, r *http.Request, q manualLinkRequest, owner string) {
+		w.Header().Set("X-Checkout-Requeue", "declined")
+		message(w, 409, "requeue")
+	})
+	if s.linkQueue.jobs[2] != original || original.state != "queued" {
+		t.Fatal("declined retry lost ticket or kept priority")
+	}
+	var calls []string
+	for range 3 {
+		s.processPublicLinkQueue(context.Background(), func(w http.ResponseWriter, r *http.Request, q manualLinkRequest, owner string) {
+			calls = append(calls, q.Username)
+			reply(w, 200, map[string]string{"checkout_url": "synthetic-" + q.Username})
+		})
+	}
+	if strings.Join(calls, ",") != "second,third,declined" {
+		t.Fatal("declined user jumped queue", calls)
+	}
+}

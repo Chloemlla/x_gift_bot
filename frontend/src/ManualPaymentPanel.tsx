@@ -7,6 +7,7 @@ import { PaymentQueueCard, type QueueProgress } from "./PaymentQueueCard";
 import OpenInNewRounded from "@mui/icons-material/OpenInNewRounded";
 import { adminApi } from "./adminApi";
 import { request } from "./shared";
+import { isPaymentResult } from "./manualPaymentResult";
 
 type Plan = { months: number; amount: number; currency: string };
 type Result = Plan & { username: string; status: string; checkout_url?: string; expires_at?: number; message?: string; needs_unpaid_verification?: boolean; ticket?: string; position?: number; ahead?: number; estimated_wait_seconds?: number };
@@ -45,19 +46,23 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
   useEffect(() => { if (!busy && error) usernameInput.current?.focus({ preventScroll: true }); }, [busy, error]);
   function reset() { setResult(null); setError(""); setNotice(""); setNeedsVerification(false); setVerified(false); }
   async function generate() {
-    if (inFlight.current || !valid || !plans.some((p) => p.months === months)) return;
+    const selectedPlan = plans.find((p) => p.months === months);
+    if (inFlight.current || !valid || !selectedPlan) return;
     inFlight.current = true; setBusy(true); setError(""); setNotice(""); setResult(null); setQueueProgress({ status: "submitting" });
     const controller = new AbortController();
     activeRequest.current = controller;
     try {
-      let { ok, data } = await request<Result>(endpoint, { username: cleanUser, months, verified_unpaid: needsVerification && verified }, AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]));
-      while (ok && data.ticket && (data.status === "queued" || data.status === "processing")) {
+      let { ok, data } = await request<Result>(endpoint, { username: cleanUser, months, verified_unpaid: needsVerification && verified, queue_protocol: publicMode ? 1 : undefined }, AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]));
+      while (ok && typeof data?.ticket === "string" && data.ticket && (data.status === "queued" || data.status === "processing")) {
         setQueueProgress({ status: data.status as "queued" | "processing", ahead: data.ahead ?? Math.max(0, (data.position ?? 1) - 1), estimated_wait_seconds: data.estimated_wait_seconds });
         await new Promise<void>((resolve) => setTimeout(resolve, 3000));
         controller.signal.throwIfAborted();
         ({ ok, data } = await request<Result>(`${endpoint}/queue/${encodeURIComponent(data.ticket)}`, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(45000)])));
       }
-      if (!ok) { setNeedsVerification(Boolean(data.needs_unpaid_verification)); setError(data.message || "生成失败，请稍后重试。"); return; }
+      if (!ok) { setNeedsVerification(Boolean(data?.needs_unpaid_verification)); setError(data?.message || "生成失败，请稍后重试。"); return; }
+      if (!isPaymentResult(data, cleanUser, selectedPlan)) {
+        setError("尚未取得完整的付款订单，请刷新页面后重试。系统会先检查已有链接。"); return;
+      }
       setNeedsVerification(false); setVerified(false); setResult(data);
     } catch (e) { setError((e as Error).name === "TimeoutError" ? "请求超时，请使用同一用户名和套餐重试，系统会检查已有订单。" : (e as Error).message); }
     finally { inFlight.current = false; setBusy(false); setQueueProgress({ status: "submitting" }); activeRequest.current = null; }

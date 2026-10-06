@@ -46,7 +46,7 @@ func TestActiveCheckoutWindowAndEarlyCompletion(t *testing.T) {
 				}
 			} else {
 				var wait *CheckoutWaitError
-				if !errors.As(err, &wait) || wait.Wait < 13*time.Minute {
+				if !errors.As(err, &wait) || wait.Wait < time.Minute {
 					t.Fatalf("unprotected active order: %v", err)
 				}
 			}
@@ -71,7 +71,7 @@ func TestActiveCheckoutWindowAndEarlyCompletion(t *testing.T) {
 				if wait != 0 {
 					t.Fatal("released wait remains")
 				}
-			} else if wait < 13*time.Minute {
+			} else if wait < time.Minute {
 				t.Fatal("persisted wait lost")
 			}
 			// A newly constructed client sees the durable reservation after a restart.
@@ -151,5 +151,28 @@ func TestActiveCheckoutPollReleasesCompletedInactiveSession(t *testing.T) {
 	a, err := readActiveCheckout(v)
 	if err != nil || !a.Released || polls != 1 {
 		t.Fatalf("paid poll did not release window: %v polls=%d", err, polls)
+	}
+}
+
+func TestLegacyPaymentWindowUsesThreeMinuteDeadlineAfterUpgrade(t *testing.T) {
+	v := controlFixture(t)
+	now := time.Now().Truncate(time.Second)
+	r := Record{SessionID: "cs_live_LegacyWindow", Created: now.Add(-time.Minute).Unix()}
+	a := activeCheckout{Order: r, ExpiresAt: time.Unix(r.Created, 0).Add(15 * time.Minute).UnixMilli()}
+	if err := saveActiveCheckout(v, a); err != nil {
+		t.Fatal(err)
+	}
+	wait, err := CheckoutCreationWait(v, now)
+	if err != nil || wait != 2*time.Minute {
+		t.Fatal("legacy reservation not shortened", wait, err)
+	}
+	wait, err = CheckoutCreationWait(v, now.Add(2*time.Minute))
+	if err != nil || wait != 0 {
+		t.Fatal("three-minute boundary still blocked", wait, err)
+	}
+	a.ExpiresAt++
+	saveActiveCheckout(v, a)
+	if _, err = CheckoutCreationWait(v, now); err == nil {
+		t.Fatal("accepted malformed reservation")
 	}
 }

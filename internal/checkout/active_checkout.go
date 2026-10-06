@@ -45,8 +45,15 @@ func readActiveCheckout(v *vault.Vault) (activeCheckout, error) {
 	if err = json.Unmarshal(b, &a); err != nil {
 		return a, err
 	}
-	if a.ExpiresAt != 0 && (a.Order.SessionID == "" || a.Order.Created <= 0 || a.ExpiresAt != time.Unix(a.Order.Created, 0).Add(publicLinkTTL).UnixMilli()) {
+	// Accept the previous fixed 15-minute format, but apply the new deadline.
+	// Never reset the creation clock when upgrading or restarting.
+	deadline := time.Unix(a.Order.Created, 0).Add(publicLinkTTL).UnixMilli()
+	legacyDeadline := time.Unix(a.Order.Created, 0).Add(15 * time.Minute).UnixMilli()
+	if a.ExpiresAt != 0 && (a.Order.SessionID == "" || a.Order.Created <= 0 || (a.ExpiresAt != deadline && a.ExpiresAt != legacyDeadline)) {
 		return a, errors.New("invalid active checkout reservation")
+	}
+	if a.ExpiresAt != 0 {
+		a.ExpiresAt = deadline
 	}
 	return a, nil
 }

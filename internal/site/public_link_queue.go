@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"sync"
@@ -18,29 +19,34 @@ type publicLinkJob struct {
 	seen, finished, nextAttempt time.Time
 	started                     time.Time
 	code                        int
+	cancelled                   bool
 	result                      []byte
 }
 
-// Tickets live only for this process. Restarted clients must explicitly requeue;
-// the encrypted checkout ledger still prevents ambiguous payment retries.
+// Queue tickets and their browser ownership survive restarts in the vault.
 type publicLinkQueue struct {
 	mu              sync.Mutex
 	jobs            []*publicLinkJob
 	averageDuration time.Duration
 	blockedUntil    time.Time
 	windowUser      string
+	dirty           bool
+	lastPersist     time.Time
 }
 
 func (q *publicLinkQueue) prune(now time.Time) {
 	keep := q.jobs[:0]
 	for _, j := range q.jobs {
-		if j.state == "queued" && now.Sub(j.seen) > 90*time.Second {
+		if j.state == "queued" && (j.cancelled || now.Sub(j.seen) > 90*time.Second) {
 			continue
 		}
 		if j.state == "done" && now.Sub(j.finished) > 15*time.Minute {
 			continue
 		}
 		keep = append(keep, j)
+	}
+	if len(keep) != len(q.jobs) {
+		q.dirty = true
 	}
 	clear(q.jobs[len(keep):])
 	q.jobs = keep
@@ -54,7 +60,7 @@ func (s *server) enqueuePublicLink(w http.ResponseWriter, request manualLinkRequ
 	s.refreshPublicLinkWait(now)
 	q.prune(now)
 	for _, j := range q.jobs {
-		if j.owner == owner && j.state != "done" {
+		if j.owner == owner && j.state != "done" && !j.cancelled {
 			if j.request != request {
 				if j.state != "queued" || j.request.Username != request.Username {
 					continue
@@ -63,6 +69,10 @@ func (s *server) enqueuePublicLink(w http.ResponseWriter, request manualLinkRequ
 				j.nextAttempt = time.Time{}
 			}
 			j.seen = now
+			q.dirty = true
+			if !s.savePublicQueueOrReply(w) {
+				return
+			}
 			q.respond(w, j)
 			return
 		}
@@ -73,11 +83,19 @@ func (s *server) enqueuePublicLink(w http.ResponseWriter, request manualLinkRequ
 	}
 	j := &publicLinkJob{id: token(24), owner: owner, request: request, state: "queued", seen: now}
 	q.jobs = append(q.jobs, j)
+	q.dirty = true
+	if !s.savePublicQueueOrReply(w) {
+		return
+	}
 	q.respond(w, j)
 }
 
 // All callers hold the queue mutex; only this browser may read its ticket.
 func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
+	if job.cancelled {
+		message(w, 404, "已退出排队。")
+		return
+	}
 	if job.state == "done" {
 		// A delayed poll must never deliver an old success after a later checkout
 		// may have invalidated it. A new submission always performs fresh checks.
@@ -108,9 +126,9 @@ func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
 		if ownWindow && j != job {
 			continue
 		}
-		if j.state != "done" {
+		if j.state != "done" && !j.cancelled {
 			if position > 0 {
-				estimate += 15 * time.Minute
+				estimate += checkout.PublicLinkTTL
 			}
 			position++
 			remaining := average
@@ -152,8 +170,9 @@ func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 	s.refreshPublicLinkWait(time.Now())
 	q.prune(time.Now())
 	for _, j := range q.jobs {
-		if j.id == r.PathValue("ticket") && j.owner == c.Value {
+		if j.id == r.PathValue("ticket") && j.owner == c.Value && !j.cancelled {
 			j.seen = time.Now()
+			q.dirty = true
 			if j.state == "done" && j.code == 200 && time.Since(j.finished) >= 15*time.Second {
 				request := j.request
 				q.mu.Unlock()
@@ -170,7 +189,7 @@ func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	q.mu.Unlock()
-	message(w, 404, "排队记录已失效或服务已重启，请重新提交；系统会先核对原订单。")
+	message(w, 404, "排队记录已失效，请重新提交；系统会先核对原订单。")
 }
 
 func (s *server) invalidateOlderPublicResults(username, currentURL string) {
@@ -187,7 +206,11 @@ func (s *server) invalidateOlderPublicResults(username, currentURL string) {
 		if json.Unmarshal(j.result, &old) == nil && old.URL != "" && old.URL != currentURL {
 			j.code = http.StatusConflict
 			j.result = []byte(`{"message":"付款链接已被新的请求替换，请使用最新链接。"}`)
+			q.dirty = true
 		}
+	}
+	if err := s.persistPublicLinkQueueLocked(); err != nil {
+		log.Printf("public queue checkpoint failed")
 	}
 }
 
@@ -217,6 +240,13 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 	q := &s.linkQueue
 	q.mu.Lock()
 	q.prune(time.Now())
+	if q.dirty && time.Since(q.lastPersist) >= 10*time.Second {
+		if err := s.persistPublicLinkQueueLocked(); err != nil {
+			q.mu.Unlock()
+			log.Printf("public queue checkpoint failed")
+			return
+		}
+	}
 	var job *publicLinkJob
 	for _, j := range q.jobs {
 		if j.state == "processing" {
@@ -248,12 +278,41 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 	}
 	job.state = "processing"
 	job.started = time.Now()
+	q.dirty = true
+	if err := s.persistPublicLinkQueueLocked(); err != nil {
+		job.state = "queued"
+		q.mu.Unlock()
+		log.Printf("public queue checkpoint failed; creation deferred")
+		return
+	}
 	q.mu.Unlock()
 	w := &linkResponse{header: make(http.Header), code: 200}
 	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/api/manual-link", nil)
 	execute(w, r, job.request, job.owner)
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	defer func() {
+		q.dirty = true
+		if err := s.persistPublicLinkQueueLocked(); err != nil {
+			log.Printf("public queue completion checkpoint failed")
+		}
+	}()
+	// A shutdown-cancelled operation keeps its ticket and reconciles the ledger
+	// on the next start instead of publishing a transient cancellation error.
+	if job.cancelled {
+		for i, candidate := range q.jobs {
+			if candidate == job {
+				q.jobs = append(q.jobs[:i], q.jobs[i+1:]...)
+				break
+			}
+		}
+		return
+	}
+	if ctx.Err() != nil {
+		job.state = "queued"
+		job.nextAttempt = time.Time{}
+		return
+	}
 	if w.Header().Get("Retry-After") != "" {
 		job.state = "queued"
 		if wait, _ := strconv.Atoi(w.Header().Get("X-Checkout-Wait-Seconds")); wait > 0 {

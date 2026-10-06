@@ -20,7 +20,7 @@ export async function request<T>(
   path: string,
   body?: unknown,
   signal?: AbortSignal,
-): Promise<{ ok: boolean; data: T }> {
+): Promise<{ ok: boolean; data: T; status?: number }> {
   const actions: Record<string, string> = { "/api/redeem": "redeem", "/api/check": "check", "/api/manual-link": "manual_link" };
   let token = "";
   if (body !== undefined && actions[path]) {
@@ -45,7 +45,7 @@ export async function request<T>(
   } catch {
     throw new Error("服务暂时不可用，请稍后查询。");
   }
-  return { ok: response.ok, data };
+  return { ok: response.ok, data, status: response.status };
 }
 
 class ErrorBoundary extends Component<

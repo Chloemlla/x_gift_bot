@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Box, Button, Card, CardContent, Checkbox, Divider, FormControlLabel, LinearProgress, MenuItem, Paper, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Card, CardContent, Checkbox, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Divider, FormControlLabel, LinearProgress, MenuItem, Paper, Stack, TextField, Typography } from "@mui/material";
 import LinkRounded from "@mui/icons-material/LinkRounded";
 import ContentCopyOutlined from "@mui/icons-material/ContentCopyOutlined";
 import CheckCircleOutlineRounded from "@mui/icons-material/CheckCircleOutlineRounded";
@@ -7,6 +7,7 @@ import { PaymentQueueCard, type QueueProgress } from "./PaymentQueueCard";
 import OpenInNewRounded from "@mui/icons-material/OpenInNewRounded";
 import { adminApi } from "./adminApi";
 import { request } from "./shared";
+import { readQueueWithReconnect } from "./queueReconnect";
 import { isPaymentResult } from "./manualPaymentResult";
 
 type Plan = { months: number; amount: number; currency: string };
@@ -29,6 +30,9 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
   const usernameInput = useRef<HTMLInputElement>(null);
   const activeRequest = useRef<AbortController | null>(null);
   const inFlight = useRef(false);
+  const queueTicket = useRef<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const cleanUser = username.trim().replace(/^@/, "").toLowerCase();
   const valid = /^[a-z0-9_]{1,15}$/.test(cleanUser);
   async function loadPlans() {
@@ -41,7 +45,39 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
     } catch (e) { setPlanError((e as Error).message); }
   }
   useEffect(() => { void loadPlans(); }, []);
-  useEffect(() => () => { activeRequest.current?.abort(); }, []);
+  useEffect(() => {
+    const leave = () => {
+      const ticket = queueTicket.current;
+      if (ticket) {
+        const url = `/api/manual-link/queue/${encodeURIComponent(ticket)}/cancel`;
+        if (!navigator.sendBeacon(url, "")) void fetch(url, { method: "POST", keepalive: true, credentials: "same-origin" }).catch(() => {});
+        queueTicket.current = null;
+        activeRequest.current?.abort();
+      }
+    };
+    const returned = (event: PageTransitionEvent) => {
+      if (event.persisted) { setBusy(false); setCancelling(false); inFlight.current = false; setNotice("已退出排队，可以重新提交。"); }
+    };
+    window.addEventListener("pagehide", leave);
+    window.addEventListener("pageshow", returned);
+    return () => { leave(); activeRequest.current?.abort(); window.removeEventListener("pagehide", leave); window.removeEventListener("pageshow", returned); };
+  }, []);
+  async function cancelQueue() {
+    const ticket = queueTicket.current;
+    if (!ticket || cancelling) return;
+    setCancelling(true);
+    try {
+      const response = await request<{ cancelled?: boolean; message?: string }>(`${endpoint}/queue/${encodeURIComponent(ticket)}/cancel`, {});
+      if (!response.ok) { setError(response.data.message || "暂时无法退出排队，请重试。"); return; }
+      if (response.data.cancelled) {
+        queueTicket.current = null;
+        activeRequest.current?.abort();
+        setNotice("已退出排队。");
+        setError("");
+      }
+    } catch { setError("暂时无法退出排队，请重试。"); }
+    finally { setCancelling(false); }
+  }
   useEffect(() => { if (result && publicMode) resultHeading.current?.focus({ preventScroll: true }); }, [result, publicMode]);
   useEffect(() => { if (!busy && error) usernameInput.current?.focus({ preventScroll: true }); }, [busy, error]);
   function reset() { setResult(null); setError(""); setNotice(""); setNeedsVerification(false); setVerified(false); }
@@ -54,18 +90,21 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
     try {
       let { ok, data } = await request<Result>(endpoint, { username: cleanUser, months, verified_unpaid: needsVerification && verified, queue_protocol: publicMode ? 1 : undefined }, AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]));
       while (ok && typeof data?.ticket === "string" && data.ticket && (data.status === "queued" || data.status === "processing")) {
+        queueTicket.current = data.ticket;
         setQueueProgress({ status: data.status as "queued" | "processing", ahead: data.ahead ?? Math.max(0, (data.position ?? 1) - 1), estimated_wait_seconds: data.estimated_wait_seconds });
         await new Promise<void>((resolve) => setTimeout(resolve, 3000));
         controller.signal.throwIfAborted();
-        ({ ok, data } = await request<Result>(`${endpoint}/queue/${encodeURIComponent(data.ticket)}`, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(45000)])));
+        const queuePath = `${endpoint}/queue/${encodeURIComponent(data.ticket)}`;
+        ({ ok, data } = await readQueueWithReconnect(() => request<Result>(queuePath, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(45000)])), controller.signal));
       }
+      queueTicket.current = null;
       if (!ok) { setNeedsVerification(Boolean(data?.needs_unpaid_verification)); setError(data?.message || "生成失败，请稍后重试。"); return; }
       if (!isPaymentResult(data, cleanUser, selectedPlan)) {
         setError("尚未取得完整的付款订单，请刷新页面后重试。系统会先检查已有链接。"); return;
       }
       setNeedsVerification(false); setVerified(false); setResult(data);
-    } catch (e) { setError((e as Error).name === "TimeoutError" ? "请求超时，请使用同一用户名和套餐重试，系统会检查已有订单。" : (e as Error).message); }
-    finally { inFlight.current = false; setBusy(false); setQueueProgress({ status: "submitting" }); activeRequest.current = null; }
+    } catch (e) { if (!controller.signal.aborted) setError((e as Error).name === "TimeoutError" ? "请求超时，请使用同一用户名和套餐重试，系统会检查已有订单。" : (e as Error).message); }
+    finally { inFlight.current = false; setBusy(false); setQueueProgress({ status: "submitting" }); activeRequest.current = null; queueTicket.current = null; }
   }
   async function copy() {
     if (!result?.checkout_url) return;
@@ -79,8 +118,19 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
         <Typography id="manual-payment-title" variant="h2" sx={{ fontSize: 21 }}>手动付款链接</Typography>
       </Stack>
       {!(publicMode && (busy || result)) && <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>{publicMode ? "为指定的 X 账号生成付款链接，随后前往 Stripe 自行付款。" : "填写 X 用户名和套餐时长，生成 Stripe 链接后手动付款，无需兑换码。"}</Typography>}
+      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} aria-labelledby="confirm-payment-title" aria-describedby="confirm-payment-description" fullWidth maxWidth="xs">
+        <DialogTitle id="confirm-payment-title">确认生成付款链接？</DialogTitle>
+        <DialogContent>
+          <DialogContentText id="confirm-payment-description" color="text.primary">如果不想要付款，请不要点击生成链接。</DialogContentText>
+          <DialogContentText sx={{ mt: 2 }}>退出网站会自动退出排队。</DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2.5, gap: 1 }}>
+          <Button onClick={() => setConfirmOpen(false)}>暂不生成</Button>
+          <Button variant="contained" onClick={() => { setConfirmOpen(false); void generate(); }}>确认生成</Button>
+        </DialogActions>
+      </Dialog>
       {planError && <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" onClick={() => void loadPlans()}>重新加载</Button>}>{planError}</Alert>}
-      {!(publicMode && (busy || result)) && <Box component="form" onSubmit={(e) => { e.preventDefault(); void generate(); }} aria-busy={busy}>
+      {!(publicMode && (busy || result)) && <Box component="form" onSubmit={(e) => { e.preventDefault(); if (publicMode) setConfirmOpen(true); else void generate(); }} aria-busy={busy}>
         <Box sx={{
           display: "grid",
           gridTemplateColumns: { xs: "minmax(0, 1fr)", sm: "minmax(0, 1fr) minmax(0, 1fr)", md: publicMode ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(260px, 1fr) minmax(235px, 320px) auto" },
@@ -95,7 +145,7 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
         </Box>
         {needsVerification && <FormControlLabel control={<Checkbox checked={verified} disabled={busy} onChange={(e) => setVerified(e.target.checked)} />} label="我已核实原订单未付款，也没有正在处理的扣款或银行验证，允许生成新链接" />}
       </Box>}
-      {publicMode && busy && <PaymentQueueCard progress={queueProgress} username={cleanUser} months={months} price={plans.find((p) => p.months === months) ? price(plans.find((p) => p.months === months)!) : ""} />}
+      {publicMode && busy && <PaymentQueueCard onCancel={queueProgress.status === "submitting" ? undefined : () => void cancelQueue()} cancelling={cancelling} progress={queueProgress} username={cleanUser} months={months} price={plans.find((p) => p.months === months) ? price(plans.find((p) => p.months === months)!) : ""} />}
       {!publicMode && busy && <LinearProgress aria-label="正在核对账号并生成付款链接" sx={{ mt: 1 }} />}
       {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
       {publicMode && result && <Card variant="outlined" sx={{ borderRadius: 2, bgcolor: "background.paper" }}>

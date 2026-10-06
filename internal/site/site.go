@@ -128,6 +128,9 @@ func Run(ctx context.Context) error {
 		return err
 	}
 	defer v.Close()
+	if err = s.restorePublicLinkQueue(); err != nil {
+		return err
+	}
 	if s.payments {
 		if err = checkout.CheckPaymentConfiguration(v); err != nil {
 			return err
@@ -235,6 +238,7 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/manual-link/plans", s.publicLinkPlans)
 	mux.HandleFunc("POST /api/manual-link", s.human("manual_link", s.publicLink))
 	mux.HandleFunc("GET /api/manual-link/queue/{ticket}", s.publicLinkQueueStatus)
+	mux.HandleFunc("POST /api/manual-link/queue/{ticket}/cancel", s.cancelPublicLinkQueue)
 	mux.HandleFunc("POST /api/status", s.status)
 	mux.HandleFunc("POST /api/check", s.human("check", s.check))
 	mux.HandleFunc("GET /admin", s.admin(s.asset("admin.html", "text/html; charset=utf-8")))
@@ -283,6 +287,12 @@ func Run(ctx context.Context) error {
 		h.Close()
 	}
 	s.jobs.Wait()
+	s.linkQueue.mu.Lock()
+	queueErr := s.persistPublicLinkQueueLocked()
+	s.linkQueue.mu.Unlock()
+	if queueErr != nil {
+		return queueErr
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

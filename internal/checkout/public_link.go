@@ -19,7 +19,10 @@ var ErrPublicLinkPrivateOrder = fmt.Errorf("%w: private order exists", ErrPublic
 var ErrPublicLinkPending = errors.New("public checkout creation returned no usable link")
 var ErrPublicPaymentInProgress = errors.New("public checkout payment is in progress")
 
-const publicLinkTTL = 15 * time.Minute
+// PublicLinkTTL is the fixed payment window, measured from order creation.
+const PublicLinkTTL = 3 * time.Minute
+
+const publicLinkTTL = PublicLinkTTL
 
 type publicLinkRecord struct {
 	Owner string `json:"owner"`

@@ -354,7 +354,7 @@ func TestPublicLinkTTLBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		offset time.Duration
 		fresh  bool
-	}{{-time.Second, false}, {0, true}, {15*time.Minute - time.Nanosecond, true}, {15 * time.Minute, false}, {16 * time.Minute, false}} {
+	}{{-time.Second, false}, {0, true}, {publicLinkTTL - time.Nanosecond, true}, {publicLinkTTL, false}, {publicLinkTTL + time.Minute, false}} {
 		if got := publicLinkFresh(&r, created.Add(tc.offset)); got != tc.fresh {
 			t.Fatalf("age %v: fresh=%t", tc.offset, got)
 		}

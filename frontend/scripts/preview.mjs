@@ -85,6 +85,10 @@ createServer(async (req, res) => {
       json(200, { plans: [{months: 3, amount: 30000, currency: "BDT"}, {months: 6, amount: 60000, currency: "BDT"}] });
       return;
     }
+    if (req.method === "POST" && /^\/api\/manual-link\/queue\/[^/]+\/cancel$/.test(url.pathname)) {
+      linkJobs.delete(url.pathname.split("/").at(-2));
+      return json(200, {cancelled:true});
+    }
     if (req.method === "GET" && url.pathname.startsWith("/api/manual-link/queue/")) {
       const ticket = url.pathname.split("/").pop();
       const job = linkJobs.get(ticket);

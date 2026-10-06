@@ -199,7 +199,7 @@ func (s *server) respondManualLink(w http.ResponseWriter, record *checkout.Recor
 		}
 		result["checkout_url"] = link
 		if publicOwner != "" {
-			result["expires_at"] = record.Created + 15*60
+			result["expires_at"] = record.Created + int64(checkout.PublicLinkTTL/time.Second)
 			s.invalidateOlderPublicResults(record.Username, link)
 			log.Printf("public link ready: username=%s months=%d stripe_verified=true", record.Username, record.Months)
 		}

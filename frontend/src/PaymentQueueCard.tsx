@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Box, Card, CardContent, Divider, LinearProgress, Stack, Step, StepLabel, Stepper, Typography } from "@mui/material";
+import { Box, Button, Card, CardContent, Divider, LinearProgress, Stack, Step, StepLabel, Stepper, Typography } from "@mui/material";
 import ScheduleRounded from "@mui/icons-material/ScheduleRounded";
 import LockOutlined from "@mui/icons-material/LockOutlined";
 
@@ -9,11 +9,13 @@ export type QueueProgress = {
   estimated_wait_seconds?: number;
 };
 
-export function PaymentQueueCard({ progress, username, months, price }: {
+export function PaymentQueueCard({ progress, username, months, price, onCancel, cancelling }: {
   progress: QueueProgress;
   username: string;
   months: number;
   price: string;
+  onCancel?: () => void;
+  cancelling?: boolean;
 }) {
   const card = useRef<HTMLDivElement>(null);
   useEffect(() => { card.current?.focus({ preventScroll: true }); }, []);
@@ -69,8 +71,9 @@ export function PaymentQueueCard({ progress, username, months, price }: {
         </Stack>
         <Stack direction="row" spacing={0.75} alignItems="flex-start" sx={{ mt: 2 }}>
           <LockOutlined sx={{ fontSize: 16, color: "text.secondary", mt: "3px" }} aria-hidden="true" />
-          <Typography variant="caption" color="text.secondary">请保持页面打开，无需重复提交。生成链接不会扣款。</Typography>
+          <Typography variant="caption" color="text.secondary">离开此页面将自动退出排队。生成链接不会扣款。</Typography>
         </Stack>
+        {onCancel && <Button variant="outlined" fullWidth onClick={onCancel} disabled={cancelling} sx={{ mt: 2, minHeight: 44 }}>{cancelling ? "正在退出…" : "放弃排队"}</Button>}
       </CardContent>
     </Card>
   );

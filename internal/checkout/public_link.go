@@ -79,9 +79,12 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 			return nil, err
 		}
 		if err == nil && publicLinkMatches(existing, plan) && publicLinkFresh(existing, time.Now()) {
-			return existing, nil
+			return existing, holdPublicCheckout(v, existing, plan, time.Now())
 		}
 		replace = true
+	}
+	if err = x.checkCreation(ctx, time.Now()); err != nil {
+		return nil, err
 	}
 	checked, err := x.recipient(ctx, user)
 	if err != nil {
@@ -91,9 +94,6 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 		return nil, ErrPublicLinkConflict
 	}
 	if err = x.quote(ctx, user, plan); err != nil {
-		return nil, err
-	}
-	if err = checkCheckoutCreation(v, time.Now()); err != nil {
 		return nil, err
 	}
 	r := Record{Username: user, RecipientID: recipient, Months: months, Amount: plan.Minor, Currency: strings.ToUpper(plan.Currency), ProductID: plan.ProductID, Status: "creating", Created: time.Now().Unix()}
@@ -166,6 +166,9 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 	if err = persist(); err != nil {
 		return nil, err
 	}
+	if err = holdPublicCheckout(v, &r, plan, time.Now()); err != nil {
+		return nil, err
+	}
 	// Give the visitor the full interval after verification, even when the X or
 	// Stripe request was slow. All creation paths honor this persisted clock.
 	stamp, _ := json.Marshal(time.Now().UnixMilli())
@@ -191,12 +194,19 @@ func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Re
 	}
 	p, err := read(ctx, r)
 	if inactiveCheckout(err) {
+		if paid, _ := x.checkoutPaid(ctx, r, plan); paid {
+			r.Status = "succeeded"
+			return nil
+		}
 		return ErrVerifyUnpaid
 	}
 	if err != nil {
 		return err
 	}
 	if err = p.guard(r, plan, false); err != nil {
+		return err
+	}
+	if err = rememberVerifiedCheckout(v, r, plan, p); err != nil {
 		return err
 	}
 	if p.Status == "complete" && p.PaymentStatus == "paid" {
@@ -267,4 +277,55 @@ func publicLinkMatches(r *Record, plan Plan) bool {
 func publicLinkFresh(r *Record, now time.Time) bool {
 	created := time.Unix(r.Created, 0)
 	return r.Created > 0 && !now.Before(created) && now.Sub(created) < publicLinkTTL
+}
+
+// TryCachedPublicLink is a non-creating bypass for the holder of the active
+// payment window. A cache miss must join the normal queue, never create here.
+// Caller holds checkout.lock across the entire operation.
+func TryCachedPublicLink(ctx context.Context, v *vault.Vault, user, owner string, port, months int) (*Record, bool, error) {
+	user = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(user), "@"))
+	if !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(user) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(owner) {
+		return nil, false, errors.New("invalid public link request")
+	}
+	cat, err := ReadCatalog(v)
+	if err != nil {
+		return nil, false, err
+	}
+	plan, err := cat.PlanFor(months)
+	if err != nil {
+		return nil, false, err
+	}
+	x, err := newXClient(v, port)
+	if err != nil {
+		return nil, false, err
+	}
+	defer x.close()
+	return cachedPublicLinkForClient(ctx, v, user, owner, plan, x)
+}
+func cachedPublicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string, plan Plan, x *xClient) (*Record, bool, error) {
+	recipient, err := x.identity(ctx, user, false)
+	if err != nil {
+		return nil, false, err
+	}
+	r, err := publicLinkExisting(v, user, recipient, plan)
+	if err != nil {
+		return nil, false, err
+	}
+	if r == nil || r.Status != "created" || !publicLinkFresh(r, time.Now()) || !publicLinkMatches(r, plan) {
+		return nil, false, nil
+	}
+	if err = verifyPublicCheckout(ctx, v, x, r, plan); err != nil {
+		return nil, true, err
+	}
+	if r.Status == "created" && !publicLinkFresh(r, time.Now()) {
+		return nil, false, nil
+	}
+	if r.Status == "succeeded" {
+		sum := sha256.Sum256([]byte(owner))
+		b, _ := json.Marshal(publicLinkRecord{Owner: hex.EncodeToString(sum[:]), Order: *r})
+		err = v.Put("public-checkout:"+recipient, b)
+	} else {
+		err = holdPublicCheckout(v, r, plan, time.Now())
+	}
+	return r, true, err
 }

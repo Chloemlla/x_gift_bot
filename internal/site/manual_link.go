@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -82,6 +83,9 @@ func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publ
 		return
 	}
 	if publicOwner != "" {
+		if s.tryServePublicLink(w, r, q, publicOwner) {
+			return
+		}
 		s.enqueuePublicLink(w, q, publicOwner)
 		return
 	}
@@ -124,7 +128,21 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 		log.Printf("manual link failed: public=%t username=%s months=%d reason=%s", publicOwner != "", q.Username, q.Months, reason)
 		switch {
 		case errors.Is(err, checkout.ErrCheckoutRateLimited):
-			w.Header().Set("Retry-After", "15")
+			seconds := 15
+			var wait *checkout.CheckoutWaitError
+			if errors.As(err, &wait) {
+				seconds = int((wait.Wait + time.Second - 1) / time.Second)
+				if seconds < 1 {
+					seconds = 1
+				}
+				w.Header().Set("X-Checkout-Wait-Seconds", strconv.Itoa(seconds))
+			}
+			// Recheck payment completion while retaining the real window for ETA.
+			retry := seconds
+			if retry > 10 {
+				retry = 10
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
 			message(w, 429, "正在等待处理，请稍候。")
 		case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):
 			message(w, 409, "该账号已有兑换或后台订单，请使用原付款链接或联系管理员；主页不会重复创建订单。")
@@ -151,6 +169,10 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 		}
 		return
 	}
+	s.respondManualLink(w, record, publicOwner)
+}
+
+func (s *server) respondManualLink(w http.ResponseWriter, record *checkout.Record, publicOwner string) {
 	if record == nil {
 		message(w, 502, "未取得有效订单。")
 		return
@@ -166,6 +188,7 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 		}
 		result["checkout_url"] = link
 		if publicOwner != "" {
+			result["expires_at"] = record.Created + 15*60
 			log.Printf("public link ready: username=%s months=%d stripe_verified=true", record.Username, record.Months)
 		}
 	}
@@ -184,6 +207,8 @@ func manualLinkFailureReason(err error) string {
 		return "creation_pending"
 	case errors.Is(err, checkout.ErrPublicLinkConflict):
 		return "public_order_conflict"
+	case errors.Is(err, checkout.ErrVerifyUnpaid):
+		return "requires_unpaid_confirmation"
 	case errors.Is(err, checkout.ErrNotEligible):
 		return "ineligible"
 	case errors.Is(err, checkout.ErrUserNotFound):
@@ -193,4 +218,36 @@ func manualLinkFailureReason(err error) string {
 	default:
 		return "upstream_or_order_verification"
 	}
+}
+
+// Only a verified existing link may bypass the creation queue. This path never
+// creates an order, even if the payment window expires during its network read.
+func (s *server) tryServePublicLink(w http.ResponseWriter, r *http.Request, q manualLinkRequest, owner string) bool {
+	user, months, _, err := checkout.PublicCheckoutWindow(s.vault, time.Now())
+	if err != nil || user != q.Username || months != q.Months {
+		return false
+	}
+	select {
+	case s.work <- struct{}{}:
+	default:
+		return false
+	}
+	defer func() { <-s.work }()
+	lock, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return false
+	}
+	defer lock.Close()
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return false
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	record, hit, err := checkout.TryCachedPublicLink(ctx, s.vault, q.Username, owner, s.port, q.Months)
+	if err != nil || !hit {
+		return false
+	}
+	s.respondManualLink(w, record, owner)
+	return true
 }

@@ -133,6 +133,20 @@ func TestPublicLinkExplicitRetryAfterUnpublishedTimeout(t *testing.T) {
 			if got != nil || !errors.Is(err, ErrVerifyUnpaid) || calls != 2 {
 				t.Fatal("closed session was reused or replaced without confirmation", err)
 			}
+			// User attestation cannot bypass the global payment window.
+			got, err = publicLinkForClient(context.Background(), v, "recipient", owner, plan, x, true)
+			if got != nil || !errors.Is(err, ErrCheckoutRateLimited) || calls != 2 {
+				t.Fatal("confirmation bypassed active window", err)
+			}
+			a, err := readActiveCheckout(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.Order.Created = time.Now().Add(-16 * time.Minute).Unix()
+			a.ExpiresAt = time.Unix(a.Order.Created, 0).Add(publicLinkTTL).UnixMilli()
+			if err := saveActiveCheckout(v, a); err != nil {
+				t.Fatal(err)
+			}
 			got, err = publicLinkForClient(context.Background(), v, "recipient", owner, plan, x, true)
 			if err != nil || got == nil || got.SessionID == oldID || calls != 3 {
 				t.Fatal("confirmed closed session did not get a new verified checkout", err)
@@ -211,7 +225,8 @@ func TestPublicLinkTTLAndPlanReplacement(t *testing.T) {
 		{"stored unverified session", time.Minute, false, "wrong_session", 0, true},
 		{"expired TTL", 15 * time.Minute, false, "open", 1, false},
 		{"unknown creation time", 0, false, "open", 1, false},
-		{"changed plan", time.Minute, true, "open", 1, false},
+		{"changed plan waits for active window", time.Minute, true, "open", 0, true},
+		{"changed plan after expiry", 16 * time.Minute, true, "open", 1, false},
 		{"processing within TTL", time.Minute, false, "processing", 0, true},
 		{"processing beyond TTL", 16 * time.Minute, false, "processing", 0, true},
 		{"expired with processing intent", 16 * time.Minute, false, "expired_processing", 0, true},
@@ -344,5 +359,50 @@ func TestPublicLinkTTLBoundary(t *testing.T) {
 		if got := publicLinkFresh(&r, created.Add(tc.offset)); got != tc.fresh {
 			t.Fatalf("age %v: fresh=%t", tc.offset, got)
 		}
+	}
+}
+
+func TestCachedPublicLinkNeverCreatesAndChecksExpiryAfterVerification(t *testing.T) {
+	for _, state := range []string{"fresh", "expires_during_verification", "paid_inactive"} {
+		t.Run(state, func(t *testing.T) {
+			v := controlFixture(t)
+			p := Plan{Months: 6, Minor: 60000, Currency: "usd", ProductID: "prod_Test"}
+			r := Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "USD", ProductID: p.ProductID, Status: "created", SessionID: "cs_live_Test", URL: "https://checkout.stripe.com/c/pay/cs_live_Test", Created: time.Now().Unix()}
+			b, _ := json.Marshal(publicLinkRecord{Order: r})
+			if err := v.Put("public-checkout:1234", b); err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: mockXTransport(func(req *http.Request) (*http.Response, error) {
+				if !strings.HasSuffix(req.URL.Path, "/PremiumGiftingQuery") {
+					t.Fatal("cache-only path attempted non-identity operation", req.URL.Path)
+				}
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":{"user":{"result":{"rest_id":"1234","premium_gifting_eligible":true,"core":{"screen_name":"recipient"}}}}}`))}, nil
+			})}
+			x := &xClient{vault: v, headers: make(http.Header), http: client, regionalHTTP: client, readCheckout: func(_ context.Context, r *Record) (*paymentPage, error) {
+				if state == "paid_inactive" {
+					return nil, &stripeError{Code: "checkout_not_active_session"}
+				}
+				if state == "expires_during_verification" {
+					r.Created = time.Now().Add(-publicLinkTTL).Unix()
+				}
+				return publicPageFixture(r, p), nil
+			}, readCheckoutPaid: func(context.Context, *Record, Plan) (bool, error) { return state == "paid_inactive", nil }}
+			got, hit, err := cachedPublicLinkForClient(context.Background(), v, "recipient", strings.Repeat("b", 64), p, x)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state == "expires_during_verification" {
+				if hit || got != nil {
+					t.Fatal("returned checkout past its deadline")
+				}
+				return
+			}
+			if !hit || got == nil {
+				t.Fatal("valid cached result unavailable")
+			}
+			if state == "paid_inactive" && got.Status != "succeeded" {
+				t.Fatal("paid inactive checkout treated as unpaid")
+			}
+		})
 	}
 }

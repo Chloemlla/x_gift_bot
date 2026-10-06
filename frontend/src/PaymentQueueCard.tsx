@@ -21,8 +21,8 @@ export function PaymentQueueCard({ progress, username, months, price }: {
   const processing = progress.status === "processing";
   const seconds = progress.estimated_wait_seconds;
   const hasEstimate = typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0;
-  const unit = hasEstimate && seconds >= 60 ? "分钟" : "秒";
-  const value = hasEstimate ? (seconds >= 60 ? Math.ceil(seconds / 60) : Math.ceil(seconds)) : null;
+  const unit = hasEstimate && seconds >= 3600 ? "小时" : hasEstimate && seconds >= 60 ? "分钟" : "秒";
+  const value = hasEstimate ? Math.ceil(seconds / (seconds >= 3600 ? 3600 : seconds >= 60 ? 60 : 1)) : null;
   const title = submitting ? "正在提交请求" : processing ? "正在为你生成链接" : "已加入队列";
   return (
     <Card ref={card} tabIndex={-1} role="region" variant="outlined" aria-labelledby="payment-queue-title" sx={{ borderRadius: 2, bgcolor: "background.paper", outlineOffset: 4 }}>
@@ -46,7 +46,7 @@ export function PaymentQueueCard({ progress, username, months, price }: {
                 <Typography component="span" color="text.secondary">{unit}</Typography>
               </>}
             </Stack>
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>预估时间会随进度更新</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>前方订单完成后，等待时间会缩短</Typography>
           </Box>
           <Box sx={{ borderLeft: 1, borderColor: "divider", pl: { xs: 2, sm: 3 } }}>
             <Typography variant="body2" color="text.secondary">{processing ? "当前进度" : "前方等待"}</Typography>

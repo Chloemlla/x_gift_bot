@@ -9,7 +9,7 @@ import { adminApi } from "./adminApi";
 import { request } from "./shared";
 
 type Plan = { months: number; amount: number; currency: string };
-type Result = Plan & { username: string; status: string; checkout_url?: string; message?: string; needs_unpaid_verification?: boolean; ticket?: string; position?: number; ahead?: number; estimated_wait_seconds?: number };
+type Result = Plan & { username: string; status: string; checkout_url?: string; expires_at?: number; message?: string; needs_unpaid_verification?: boolean; ticket?: string; position?: number; ahead?: number; estimated_wait_seconds?: number };
 function price(p: Plan) { return `${p.currency} ${(p.amount / 100).toFixed(2)}`; }
 export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolean }) {
   const endpoint = publicMode ? "/api/manual-link" : "/api/admin/manual-link";
@@ -112,7 +112,7 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
               <Button component="a" href={result.checkout_url} target="_blank" rel="noopener noreferrer" variant="contained" endIcon={<OpenInNewRounded />} sx={{ minHeight: 48 }}>前往 Stripe 付款</Button>
               <Button variant="outlined" onClick={() => void copy()} startIcon={<ContentCopyOutlined />}>复制链接</Button>
             </Stack>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>请尽快完成付款。已扣款或正在银行验证时，请勿重复支付。</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>{result.expires_at ? `请在 ${new Date(result.expires_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} 前完成付款。` : "请尽快完成付款。"}已扣款或正在银行验证时，请勿重复支付。</Typography>
             <Box component="details" sx={{ mt: 1 }}>
               <Box component="summary" sx={{ cursor: "pointer", color: "text.secondary", fontSize: 13, py: 1.5, minHeight: 44 }}>查看完整链接</Box>
               <TextField label="Stripe 付款链接" value={result.checkout_url} slotProps={{ input: { readOnly: true } }} onFocus={(e) => e.target.select()} />

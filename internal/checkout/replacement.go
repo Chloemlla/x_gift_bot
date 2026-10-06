@@ -109,7 +109,10 @@ func prepareRecoveryLink(ctx context.Context, v *vault.Vault, r *Record, s *stri
 			if err = eligible(); err != nil {
 				return r, err
 			}
-			return r, nil
+			if err = rememberVerifiedCheckout(v, r, plan, page); err != nil {
+				return r, err
+			}
+			return r, holdPublicCheckout(v, r, plan, time.Now())
 		}
 	} else {
 		if err := verifySubmission(v, r, plan); err != nil {
@@ -218,6 +221,10 @@ func replaceRecoveryLink(ctx context.Context, v *vault.Vault, r *Record, s *stri
 	if string(decoded) != string(old) {
 		return r, errors.New("original checkout changed")
 	}
+	gate := &xClient{vault: v, readCheckoutPaid: s.verifiedCheckoutPaid, readCheckout: func(ctx context.Context, active *Record) (*paymentPage, error) { return s.page(ctx, active, true) }}
+	if err := gate.checkCreation(ctx, time.Now()); err != nil {
+		return r, err
+	}
 	next := Record{Username: r.Username, RecipientID: r.RecipientID, Months: r.Months, Amount: r.Amount, Currency: r.Currency, ProductID: r.ProductID, Status: "creating", Created: time.Now().Unix(), ReplacementCount: r.ReplacementCount + 1, PreviousSession: r.SessionID, CreationAttempts: 1}
 	fresh, err := json.Marshal(&next)
 	if err != nil {
@@ -241,6 +248,7 @@ func replaceRecoveryLink(ctx context.Context, v *vault.Vault, r *Record, s *stri
 	if next.SessionID == r.SessionID || !sessionURL(next.URL, next.SessionID) {
 		return &next, errors.New("upstream did not create a distinct trusted checkout")
 	}
+	next.Created = time.Now().Unix()
 	next.Status = "created"
 	if err = save(v, &next); err != nil {
 		return &next, err
@@ -252,7 +260,10 @@ func replaceRecoveryLink(ctx context.Context, v *vault.Vault, r *Record, s *stri
 	if err = page.guard(&next, plan, true); err != nil {
 		return &next, err
 	}
-	return &next, nil
+	if err = rememberVerifiedCheckout(v, &next, plan, page); err != nil {
+		return &next, err
+	}
+	return &next, holdPublicCheckout(v, &next, plan, time.Now())
 }
 
 func RecoverWithNewLink(ctx context.Context, v *vault.Vault, user, recipient string, port, months int, verifiedUnpaid, linksOnly bool) (*Record, error) {

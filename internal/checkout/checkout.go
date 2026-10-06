@@ -153,6 +153,9 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 		return nil, e
 	}
 	if r.SessionID == "" {
+		if e = x.checkCreation(ctx, time.Now()); e != nil {
+			return &r, e
+		}
 		if r.Status == "" {
 			r = Record{Username: user, RecipientID: recipient, Months: plan.Months, Amount: plan.Minor, Currency: strings.ToUpper(plan.Currency), ProductID: plan.ProductID, Status: "creating", Created: time.Now().Unix()}
 		}
@@ -184,6 +187,7 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 			}
 		}
 		r.Status = "created"
+		r.Created = time.Now().Unix()
 		if e = save(v, &r); e != nil {
 			return &r, e
 		}
@@ -210,6 +214,12 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 		return &r, save(v, &r)
 	}
 	if e = page.guard(&r, plan, true); e != nil {
+		return &r, e
+	}
+	if e = rememberVerifiedCheckout(v, &r, plan, page); e != nil {
+		return &r, e
+	}
+	if e = holdPublicCheckout(v, &r, plan, time.Now()); e != nil {
 		return &r, e
 	}
 	if !pay {

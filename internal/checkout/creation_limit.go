@@ -33,7 +33,7 @@ func checkCheckoutCreation(v *vault.Vault, now time.Time) error {
 			return err
 		}
 		if now.Sub(time.UnixMilli(last)) < checkoutCreationInterval {
-			return ErrCheckoutRateLimited
+			return &CheckoutWaitError{Wait: time.UnixMilli(last).Add(checkoutCreationInterval).Sub(now)}
 		}
 	}
 	return nil

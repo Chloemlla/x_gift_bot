@@ -102,16 +102,54 @@ func TestPublicQueueShowsRemainingTimeInsteadOfInternalRate(t *testing.T) {
 		}
 		return result.Ahead, result.Seconds
 	}
-	if ahead, seconds := read(); ahead != 1 || seconds != 40 {
+	if ahead, seconds := read(); ahead != 1 || seconds != 940 {
 		t.Fatal(ahead, seconds)
 	}
 	first.started = time.Now().Add(-10 * time.Second)
 	first.state = "processing"
-	if ahead, seconds := read(); ahead != 1 || seconds != 30 {
+	if ahead, seconds := read(); ahead != 1 || seconds != 930 {
 		t.Fatal(ahead, seconds)
 	}
 	first.state = "done"
 	if ahead, seconds := read(); ahead != 0 || seconds != 20 {
 		t.Fatal(ahead, seconds)
+	}
+}
+
+func TestPublicQueuePaymentWindowEstimateAndEarlyRecheck(t *testing.T) {
+	s := &server{}
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "first", Months: 3}, "first")
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "second", Months: 3}, "second")
+	calls := 0
+	execute := func(w http.ResponseWriter, r *http.Request, req manualLinkRequest, owner string) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "10")
+			w.Header().Set("X-Checkout-Wait-Seconds", "900")
+			message(w, 429, "wait")
+			return
+		}
+		reply(w, 200, map[string]string{"status": "succeeded"})
+	}
+	s.processPublicLinkQueue(context.Background(), execute)
+	first, second := s.linkQueue.jobs[0], s.linkQueue.jobs[1]
+	if first.nextAttempt.Sub(time.Now()) > 11*time.Second || time.Until(s.linkQueue.blockedUntil) < 899*time.Second {
+		t.Fatal("payment window confused with recheck interval")
+	}
+	w := httptest.NewRecorder()
+	s.linkQueue.respond(w, second)
+	var state struct {
+		Seconds int `json:"estimated_wait_seconds"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Seconds < 1800 || state.Seconds > 1850 {
+		t.Fatal("ETA omitted payment window", state.Seconds)
+	}
+	first.nextAttempt = time.Time{}
+	s.processPublicLinkQueue(context.Background(), execute)
+	if first.state != "done" || !s.linkQueue.blockedUntil.IsZero() {
+		t.Fatal("early completion did not release wait")
 	}
 }

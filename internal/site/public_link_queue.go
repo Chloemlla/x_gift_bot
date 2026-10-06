@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"xgift/internal/checkout"
 )
 
 type publicLinkJob struct {
@@ -25,6 +26,7 @@ type publicLinkQueue struct {
 	mu              sync.Mutex
 	jobs            []*publicLinkJob
 	averageDuration time.Duration
+	blockedUntil    time.Time
 }
 
 func (q *publicLinkQueue) prune(now time.Time) {
@@ -47,6 +49,7 @@ func (s *server) enqueuePublicLink(w http.ResponseWriter, request manualLinkRequ
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	now := time.Now()
+	s.refreshPublicLinkWait(now)
 	q.prune(now)
 	for _, j := range q.jobs {
 		if j.owner == owner && j.state != "done" {
@@ -83,17 +86,23 @@ func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
 		return
 	}
 	position := 0
-	estimate := time.Duration(0)
 	now := time.Now()
+	estimate := q.blockedUntil.Sub(now)
+	if estimate < 0 {
+		estimate = 0
+	}
 	average := q.averageDuration
 	if average < 20*time.Second {
 		average = 20 * time.Second
 	}
 	for _, j := range q.jobs {
 		if j.state != "done" {
+			if position > 0 {
+				estimate += 15 * time.Minute
+			}
 			position++
 			remaining := average
-			if !j.started.IsZero() {
+			if j.state == "processing" && !j.started.IsZero() {
 				remaining -= now.Sub(j.started)
 			}
 			if wait := j.nextAttempt.Sub(now) + 5*time.Second; wait > remaining {
@@ -129,6 +138,7 @@ func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 	q := &s.linkQueue
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	s.refreshPublicLinkWait(time.Now())
 	q.prune(time.Now())
 	for _, j := range q.jobs {
 		if j.id == r.PathValue("ticket") && j.owner == c.Value {
@@ -186,9 +196,7 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 		return
 	}
 	job.state = "processing"
-	if job.started.IsZero() {
-		job.started = time.Now()
-	}
+	job.started = time.Now()
 	q.mu.Unlock()
 	w := &linkResponse{header: make(http.Header), code: 200}
 	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/api/manual-link", nil)
@@ -197,6 +205,9 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 	defer q.mu.Unlock()
 	if w.Header().Get("Retry-After") != "" {
 		job.state = "queued"
+		if wait, _ := strconv.Atoi(w.Header().Get("X-Checkout-Wait-Seconds")); wait > 0 {
+			q.blockedUntil = time.Now().Add(time.Duration(wait) * time.Second)
+		}
 		seconds, _ := strconv.Atoi(w.Header().Get("Retry-After"))
 		if seconds < 1 {
 			seconds = 3
@@ -204,6 +215,7 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 		job.nextAttempt = time.Now().Add(time.Duration(seconds) * time.Second)
 		return
 	}
+	q.blockedUntil = time.Time{}
 	job.state, job.finished, job.code = "done", time.Now(), w.code
 	if job.code == 200 {
 		duration := job.finished.Sub(job.started)
@@ -217,4 +229,15 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 		}
 	}
 	job.result = append([]byte(nil), w.Bytes()...)
+}
+
+// Caller holds the queue mutex. Reads persisted state so a restart or a new
+// browser sees the current payment window before its first worker attempt.
+func (s *server) refreshPublicLinkWait(now time.Time) {
+	if s.vault == nil {
+		return
+	}
+	if wait, err := checkout.CheckoutCreationWait(s.vault, now); err == nil {
+		s.linkQueue.blockedUntil = now.Add(wait)
+	}
 }

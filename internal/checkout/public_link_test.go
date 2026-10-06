@@ -405,3 +405,21 @@ func TestCachedPublicLinkNeverCreatesAndChecksExpiryAfterVerification(t *testing
 		})
 	}
 }
+
+func TestPublicIdleIntentRejectsExplicitFundsAndProcessing(t *testing.T) {
+	for _, raw := range []string{
+		`{"payment_status":"unpaid","payment_intent":{"status":"requires_payment_method","amount_received":1}}`,
+		`{"payment_status":"unpaid","payment_intent":{"status":"requires_payment_method","amount_capturable":1}}`,
+		`{"payment_status":"unpaid","payment_intent":{"status":"processing"}}`,
+		`{"payment_status":"unpaid","payment_intent":{"status":"requires_action"}}`,
+		`{"payment_status":"paid","payment_intent":{"status":"requires_payment_method"}}`,
+	} {
+		var p paymentPage
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		if publicIntentIdle(&p) {
+			t.Fatal("inconsistent or processing payment classified idle")
+		}
+	}
+}

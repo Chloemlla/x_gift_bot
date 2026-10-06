@@ -233,7 +233,7 @@ func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Re
 	// leave an intent waiting for a new payment method; that is not an active
 	// payment and must not permanently prevent changing the gift duration.
 	if p.Intent != nil {
-		if (p.Intent.Status == "requires_payment_method" || p.Intent.Status == "canceled") && p.Intent.AmountReceived != nil && *p.Intent.AmountReceived == 0 {
+		if publicIntentIdle(p) {
 			if p.Status == "expired" && p.PaymentStatus == "unpaid" {
 				return ErrVerifyUnpaid
 			}
@@ -244,6 +244,27 @@ func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Re
 		return ErrPublicPaymentInProgress
 	}
 	return p.guard(r, plan, true)
+}
+
+// Stripe's publishable-key responses omit amount_received/capturable. The live,
+// guarded requires_payment_method/canceled status proves no payment is in flight;
+// missing private fields are not evidence of processing. Reject contradictory
+// explicit funds evidence. This never confirms a card or reports payment success.
+func publicIntentIdle(p *paymentPage) bool {
+	if p.Intent == nil || p.PaymentStatus != "unpaid" || (p.Intent.Status != "requires_payment_method" && p.Intent.Status != "canceled") || (p.Intent.AmountReceived != nil && *p.Intent.AmountReceived != 0) {
+		return false
+	}
+	if len(p.raw) > 0 {
+		var extra struct {
+			Intent struct {
+				Capturable *int `json:"amount_capturable"`
+			} `json:"payment_intent"`
+		}
+		if json.Unmarshal(p.raw, &extra) != nil || (extra.Intent.Capturable != nil && *extra.Intent.Capturable != 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func publicLinkExisting(v *vault.Vault, user, recipient string, plan Plan) (*Record, error) {

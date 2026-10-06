@@ -216,3 +216,35 @@ func TestExpiredWindowNeverInterruptsPaymentOrAssumesNetworkFailureIsUnpaid(t *t
 		})
 	}
 }
+
+func TestDeclinedPublicIntentWithoutPrivateAmountsDoesNotBlockNextOrder(t *testing.T) {
+	for _, state := range []string{"requires_payment_method", "canceled"} {
+		t.Run(state, func(t *testing.T) {
+			v := controlFixture(t)
+			now := time.Now()
+			p := Plan{Months: 6, Minor: 60000, Currency: "usd", ProductID: "prod_TEST6MO", Merchant: "acct_Test"}
+			r := Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "USD", ProductID: p.ProductID, Created: now.Add(-4 * time.Minute).Unix(), Status: "created", SessionID: "cs_live_Declined", URL: "https://checkout.stripe.com/c/pay/cs_live_Declined"}
+			a := activeCheckout{Order: r, Plan: p, ExpiresAt: time.Unix(r.Created, 0).Add(publicLinkTTL).UnixMilli()}
+			if err := saveActiveCheckout(v, a); err != nil {
+				t.Fatal(err)
+			}
+			x := &xClient{vault: v, readCheckout: func(_ context.Context, rec *Record) (*paymentPage, error) {
+				page := publicPageFixture(rec, p)
+				raw, _ := json.Marshal(page)
+				var fields map[string]any
+				json.Unmarshal(raw, &fields)
+				fields["payment_intent"] = map[string]any{"id": "pi_Declined", "status": state, "amount": 60000, "currency": "usd", "last_payment_error": map[string]string{"code": "card_declined", "decline_code": "generic_decline"}}
+				raw, _ = json.Marshal(fields)
+				json.Unmarshal(raw, page)
+				return page, nil
+			}}
+			if err := x.checkCreation(context.Background(), now); err != nil {
+				t.Fatal("declined checkout falsely occupied channel", err)
+			}
+			stored, err := readActiveCheckout(v)
+			if err != nil || !stored.Released || stored.Order.Status == "succeeded" {
+				t.Fatal("failed payment was not released or was called paid", err)
+			}
+		})
+	}
+}

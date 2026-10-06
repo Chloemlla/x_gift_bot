@@ -18,6 +18,7 @@ type publicLinkJob struct {
 	request                     manualLinkRequest
 	seen, finished, nextAttempt time.Time
 	started                     time.Time
+	left                        time.Time
 	code                        int
 	cancelled                   bool
 	result                      []byte
@@ -37,7 +38,7 @@ type publicLinkQueue struct {
 func (q *publicLinkQueue) prune(now time.Time) {
 	keep := q.jobs[:0]
 	for _, j := range q.jobs {
-		if j.state == "queued" && (j.cancelled || now.Sub(j.seen) > 90*time.Second) {
+		if j.state == "queued" && (j.cancelled || now.Sub(j.seen) > 5*time.Minute || (!j.left.IsZero() && now.Sub(j.left) > 90*time.Second)) {
 			continue
 		}
 		if j.state == "done" && now.Sub(j.finished) > 15*time.Minute {
@@ -69,6 +70,7 @@ func (s *server) enqueuePublicLink(w http.ResponseWriter, request manualLinkRequ
 				j.nextAttempt = time.Time{}
 			}
 			j.seen = now
+			j.left = time.Time{}
 			q.dirty = true
 			if !s.savePublicQueueOrReply(w) {
 				return
@@ -172,6 +174,7 @@ func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 	for _, j := range q.jobs {
 		if j.id == r.PathValue("ticket") && j.owner == c.Value && !j.cancelled {
 			j.seen = time.Now()
+			j.left = time.Time{}
 			q.dirty = true
 			if j.state == "done" && j.code == 200 && time.Since(j.finished) >= 15*time.Second {
 				request := j.request
@@ -253,7 +256,7 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 			q.mu.Unlock()
 			return
 		}
-		if j.state == "queued" && job == nil {
+		if j.state == "queued" && j.left.IsZero() && time.Since(j.seen) <= 90*time.Second && job == nil {
 			job = j
 		}
 	}
@@ -261,7 +264,7 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 	if s.vault != nil {
 		if user, _, _, err := checkout.PublicCheckoutWindow(s.vault, time.Now()); err == nil && user != "" {
 			for _, candidate := range q.jobs {
-				if candidate.state == "queued" && candidate.request.Username == user {
+				if candidate.state == "queued" && candidate.left.IsZero() && time.Since(candidate.seen) <= 90*time.Second && candidate.request.Username == user {
 					job = candidate
 					break
 				}

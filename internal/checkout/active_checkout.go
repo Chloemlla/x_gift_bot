@@ -164,12 +164,13 @@ func (x *xClient) checkCreation(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	if !a.Released && a.ExpiresAt > now.UnixMilli() {
+	if !a.Released && a.ExpiresAt != 0 {
 		if x.publicReplacement != "" && a.Order.SessionID == x.publicReplacement && a.Order.CardFingerprint == "" && unsubmitted(&a.Order) {
 			return checkCheckoutCreation(x.vault, time.Now())
 		}
 		r := a.Order
-		verified := verifyPublicCheckout(ctx, x.vault, x, &r, a.Plan) == nil && r.Status == "succeeded"
+		verificationErr := verifyPublicCheckout(ctx, x.vault, x, &r, a.Plan)
+		verified := verificationErr == nil && r.Status == "succeeded"
 		if !verified {
 			paid, _ := x.checkoutPaid(ctx, &r, a.Plan)
 			if paid {
@@ -185,6 +186,16 @@ func (x *xClient) checkCreation(ctx context.Context, now time.Time) error {
 			}
 		} else if remaining := time.Until(time.UnixMilli(a.ExpiresAt)); remaining > 0 {
 			return &CheckoutWaitError{Wait: remaining}
+		} else if verificationErr != nil && !errors.Is(verificationErr, ErrVerifyUnpaid) {
+			// The 180-second window limits idle checkouts. It is not permission
+			// to invalidate an in-flight payment or ignore a failed status read.
+			return &CheckoutWaitError{Wait: 10 * time.Second}
+		} else {
+			// A final live check proved the idle/failed payment can be replaced.
+			a.Released = true
+			if err := saveActiveCheckout(x.vault, a); err != nil {
+				return err
+			}
 		}
 	}
 	return checkCheckoutCreation(x.vault, time.Now())

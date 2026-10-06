@@ -9,13 +9,16 @@ export type QueueProgress = {
   estimated_wait_seconds?: number;
 };
 
-export function PaymentQueueCard({ progress, username, months, price, onCancel, cancelling }: {
+export function PaymentQueueCard({ progress, username, months, price, onCancel, cancelling, reconnecting, onNotify, notifyReady }: {
   progress: QueueProgress;
   username: string;
   months: number;
   price: string;
   onCancel?: () => void;
   cancelling?: boolean;
+  reconnecting?: boolean;
+  onNotify?: () => void;
+  notifyReady?: boolean;
 }) {
   const card = useRef<HTMLDivElement>(null);
   useEffect(() => { card.current?.focus({ preventScroll: true }); }, []);
@@ -25,7 +28,7 @@ export function PaymentQueueCard({ progress, username, months, price, onCancel, 
   const hasEstimate = typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0;
   const unit = hasEstimate && seconds >= 3600 ? "小时" : hasEstimate && seconds >= 60 ? "分钟" : "秒";
   const value = hasEstimate ? Math.ceil(seconds / (seconds >= 3600 ? 3600 : seconds >= 60 ? 60 : 1)) : null;
-  const title = submitting ? "正在提交请求" : processing ? "正在为你生成链接" : "已加入队列";
+  const title = reconnecting ? "连接中断，正在重连" : submitting ? "正在提交请求" : processing ? "正在为你生成链接" : "已加入队列";
   return (
     <Card ref={card} tabIndex={-1} role="region" variant="outlined" aria-labelledby="payment-queue-title" sx={{ borderRadius: 2, bgcolor: "background.paper", outlineOffset: 4 }}>
       <CardContent sx={{ p: { xs: 2.5, sm: 3 }, "&:last-child": { pb: { xs: 2.5, sm: 3 } } }}>
@@ -35,7 +38,7 @@ export function PaymentQueueCard({ progress, username, months, price, onCancel, 
           </Box>
           <Box role="status" aria-live="polite" aria-atomic="true">
             <Typography id="payment-queue-title" variant="h3">{title}</Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>{submitting ? "请稍候，正在确认你的请求" : processing ? "完成后将在这里显示付款入口" : "你的请求将按顺序处理"}</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>{reconnecting ? "正在恢复原排队，请勿重复提交" : submitting ? "请稍候，正在确认你的请求" : processing ? "完成后将在这里显示付款入口" : "你的请求将按顺序处理"}</Typography>
           </Box>
         </Stack>
 
@@ -71,8 +74,9 @@ export function PaymentQueueCard({ progress, username, months, price, onCancel, 
         </Stack>
         <Stack direction="row" spacing={0.75} alignItems="flex-start" sx={{ mt: 2 }}>
           <LockOutlined sx={{ fontSize: 16, color: "text.secondary", mt: "3px" }} aria-hidden="true" />
-          <Typography variant="caption" color="text.secondary">离开此页面将自动退出排队。生成链接不会扣款。</Typography>
+          <Typography variant="caption" color="text.secondary">刷新或收起此区域不会退出排队；关闭或离开网站后会自动退出。生成链接不会扣款。</Typography>
         </Stack>
+        {onNotify && <Button fullWidth onClick={onNotify} disabled={notifyReady} sx={{ mt: 2, minHeight: 44 }}>{notifyReady ? "已开启就绪通知" : "链接就绪时通知我"}</Button>}
         {onCancel && <Button variant="outlined" fullWidth onClick={onCancel} disabled={cancelling} sx={{ mt: 2, minHeight: 44 }}>{cancelling ? "正在退出…" : "放弃排队"}</Button>}
       </CardContent>
     </Card>

@@ -220,6 +220,7 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("GET /{$}", s.asset("index.html", "text/html; charset=utf-8"))
 	mux.HandleFunc("GET /favicon.svg", s.asset("favicon.svg", "image/svg+xml"))
 	mux.HandleFunc("GET /appearance.js", s.asset("appearance.js", "application/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /payment-notifications.js", s.asset("payment-notifications.js", "application/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /app.js", s.asset("app.js", "application/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if s.db.PingContext(r.Context()) != nil {
@@ -237,6 +238,8 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/redeem", s.human("redeem", s.redeem))
 	mux.HandleFunc("GET /api/manual-link/plans", s.publicLinkPlans)
 	mux.HandleFunc("POST /api/manual-link", s.human("manual_link", s.publicLink))
+	mux.HandleFunc("GET /api/manual-link/queue/current", s.currentPublicLinkQueue)
+	mux.HandleFunc("POST /api/manual-link/queue/{ticket}/leave", s.leavePublicLinkQueue)
 	mux.HandleFunc("GET /api/manual-link/queue/{ticket}", s.publicLinkQueueStatus)
 	mux.HandleFunc("POST /api/manual-link/queue/{ticket}/cancel", s.cancelPublicLinkQueue)
 	mux.HandleFunc("POST /api/status", s.status)
@@ -422,7 +425,7 @@ func (s *server) middleware(next http.Handler) http.Handler {
 		nonce := token(16)
 		r = r.WithContext(context.WithValue(r.Context(), nonceContextKey{}, nonce))
 		// Emotion style elements use a fresh nonce. MUI also sets dynamic style attributes.
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'nonce-"+nonce+"'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'nonce-"+nonce+"'; style-src-attr 'unsafe-inline'; connect-src 'self'; worker-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")

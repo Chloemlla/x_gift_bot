@@ -75,7 +75,7 @@ func TestPublicQueueFIFOOwnershipDeduplicationAndRateWait(t *testing.T) {
 func TestPublicQueueAbandonedRequestsExpireWithoutCreatingOrders(t *testing.T) {
 	s := &server{}
 	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "gone", Months: 3}, "owner")
-	s.linkQueue.jobs[0].seen = time.Now().Add(-91 * time.Second)
+	s.linkQueue.jobs[0].seen = time.Now().Add(-301 * time.Second)
 	s.processPublicLinkQueue(context.Background(), func(http.ResponseWriter, *http.Request, manualLinkRequest, string) { t.Fatal("abandoned job executed") })
 	if len(s.linkQueue.jobs) != 0 {
 		t.Fatal("abandoned job retained")
@@ -333,7 +333,7 @@ func TestPublicQueueCancellationSurvivesRestartAndChecksOwner(t *testing.T) {
 	}
 	id := s.linkQueue.jobs[0].id
 	cancel := func(owner string) int {
-		r := httptest.NewRequest("POST", "/", nil)
+		r := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
 		r.SetPathValue("ticket", id)
 		r.AddCookie(&http.Cookie{Name: "__Host-xgift-link", Value: owner})
 		w := httptest.NewRecorder()
@@ -361,7 +361,7 @@ func TestPublicQueueCancelDuringProcessingDoesNotRetry(t *testing.T) {
 	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "first", Months: 3}, "owner")
 	id := s.linkQueue.jobs[0].id
 	s.processPublicLinkQueue(context.Background(), func(w http.ResponseWriter, _ *http.Request, _ manualLinkRequest, _ string) {
-		r := httptest.NewRequest("POST", "/", nil)
+		r := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
 		r.SetPathValue("ticket", id)
 		r.AddCookie(&http.Cookie{Name: "__Host-xgift-link", Value: "owner"})
 		s.cancelPublicLinkQueue(httptest.NewRecorder(), r)
@@ -377,5 +377,70 @@ func TestPublicQueueCancelDuringProcessingDoesNotRetry(t *testing.T) {
 	}
 	if len(restarted.linkQueue.jobs) != 0 {
 		t.Fatal("cancelled worker returned after restart")
+	}
+}
+
+func TestPublicQueueRefreshRecoversSameTicketWithoutDispatchWhileAway(t *testing.T) {
+	s := checkFixture(t)
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "first", Months: 3}, "owner")
+	id := s.linkQueue.jobs[0].id
+	r := httptest.NewRequest("POST", "/", nil)
+	r.SetPathValue("ticket", id)
+	r.AddCookie(&http.Cookie{Name: "__Host-xgift-link", Value: "owner"})
+	s.cancelPublicLinkQueue(httptest.NewRecorder(), r) // legacy pagehide beacon
+	s.processPublicLinkQueue(context.Background(), func(http.ResponseWriter, *http.Request, manualLinkRequest, string) {
+		t.Fatal("created while browser disconnected")
+	})
+	if len(s.linkQueue.jobs) != 1 || s.linkQueue.jobs[0].cancelled {
+		t.Fatal("refresh cancelled ticket")
+	}
+	r = httptest.NewRequest("GET", "/", nil)
+	r.AddCookie(&http.Cookie{Name: "__Host-xgift-link", Value: "owner"})
+	w := httptest.NewRecorder()
+	s.currentPublicLinkQueue(w, r)
+	var got struct {
+		Ticket, Username string
+		Months           int
+	}
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if w.Code != 200 || got.Ticket != id || got.Username != "first" || got.Months != 3 || !s.linkQueue.jobs[0].left.IsZero() {
+		t.Fatal("failed to resume exact ticket")
+	}
+	restarted := &server{vault: s.vault}
+	if err := restarted.restorePublicLinkQueue(); err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.linkQueue.jobs) != 1 || restarted.linkQueue.jobs[0].id != id {
+		t.Fatal("resumed ticket not durable")
+	}
+}
+
+func TestDisconnectedQueueWaitsForReconnectAndThenExpires(t *testing.T) {
+	s := &server{}
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "first", Months: 3}, "owner")
+	job := s.linkQueue.jobs[0]
+	job.seen = time.Now().Add(-2 * time.Minute)
+	s.processPublicLinkQueue(context.Background(), func(http.ResponseWriter, *http.Request, manualLinkRequest, string) {
+		t.Fatal("created for offline browser")
+	})
+	if len(s.linkQueue.jobs) != 1 {
+		t.Fatal("short network interruption lost position")
+	}
+	job.left = time.Now().Add(-91 * time.Second)
+	s.linkQueue.prune(time.Now())
+	if len(s.linkQueue.jobs) != 0 {
+		t.Fatal("closed page did not leave queue")
+	}
+}
+
+func TestRecoverQueueNeverRevealsAnotherBrowsersTicket(t *testing.T) {
+	s := &server{}
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "first", Months: 3}, "owner")
+	r := httptest.NewRequest("GET", "/", nil)
+	r.AddCookie(&http.Cookie{Name: "__Host-xgift-link", Value: "wrong"})
+	w := httptest.NewRecorder()
+	s.currentPublicLinkQueue(w, r)
+	if w.Code != 404 || strings.Contains(w.Body.String(), s.linkQueue.jobs[0].id) {
+		t.Fatal("leaked another browser's queue")
 	}
 }

@@ -24,6 +24,7 @@ type savedPublicJob struct {
 	Owner       string            `json:"owner"`
 	State       string            `json:"state"`
 	Request     manualLinkRequest `json:"request"`
+	Left        int64             `json:"left,omitempty"`
 	Seen        int64             `json:"seen"`
 	Finished    int64             `json:"finished"`
 	NextAttempt int64             `json:"next_attempt"`
@@ -55,7 +56,7 @@ func (s *server) persistPublicLinkQueueLocked() error {
 	}
 	saved := savedPublicQueue{Version: 1, SavedAt: time.Now().UnixMilli(), AverageDuration: q.averageDuration, Jobs: make([]savedPublicJob, 0, len(q.jobs))}
 	for _, j := range q.jobs {
-		saved.Jobs = append(saved.Jobs, savedPublicJob{ID: j.id, Owner: j.owner, State: j.state, Request: j.request, Seen: queueMillis(j.seen), Finished: queueMillis(j.finished), NextAttempt: queueMillis(j.nextAttempt), Started: queueMillis(j.started), Code: j.code, Result: j.result, Cancelled: j.cancelled})
+		saved.Jobs = append(saved.Jobs, savedPublicJob{ID: j.id, Owner: j.owner, State: j.state, Request: j.request, Seen: queueMillis(j.seen), Finished: queueMillis(j.finished), NextAttempt: queueMillis(j.nextAttempt), Started: queueMillis(j.started), Code: j.code, Result: j.result, Cancelled: j.cancelled, Left: queueMillis(j.left)})
 	}
 	b, err := json.Marshal(saved)
 	if err != nil {
@@ -109,7 +110,7 @@ func (s *server) restorePublicLinkQueue() error {
 		if j.Cancelled {
 			continue
 		}
-		job := &publicLinkJob{id: j.ID, owner: j.Owner, state: j.State, request: j.Request, seen: queueTime(j.Seen), finished: queueTime(j.Finished), nextAttempt: queueTime(j.NextAttempt), started: queueTime(j.Started), code: j.Code, result: j.Result}
+		job := &publicLinkJob{id: j.ID, owner: j.Owner, state: j.State, left: queueTime(j.Left), request: j.Request, seen: queueTime(j.Seen), finished: queueTime(j.Finished), nextAttempt: queueTime(j.NextAttempt), started: queueTime(j.Started), code: j.Code, result: j.Result}
 		if job.state != "done" {
 			// Give existing browsers a full reconnect grace period after downtime.
 			job.state = "queued"

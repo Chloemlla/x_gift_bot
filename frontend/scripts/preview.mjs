@@ -37,6 +37,7 @@ const files = {
   "/": ["index.html", "text/html"],
   "/admin": ["admin.html", "text/html"],
   "/appearance.js": ["appearance.js", "application/javascript"],
+  "/payment-notifications.js": ["payment-notifications.js", "application/javascript"],
   "/app.js": ["app.js", "application/javascript"],
   "/admin.js": ["admin.js", "application/javascript"],
   "/favicon.svg": ["favicon.svg", "image/svg+xml"],
@@ -47,7 +48,7 @@ createServer(async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader(
     "Content-Security-Policy",
-    `default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+    `default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'nonce-${nonce}'; style-src-attr 'unsafe-inline'; connect-src 'self'; worker-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
   );
   res.setHeader("X-Content-Type-Options", "nosniff");
   const url = new URL(req.url, `http://127.0.0.1:${port}`);
@@ -85,6 +86,11 @@ createServer(async (req, res) => {
       json(200, { plans: [{months: 3, amount: 30000, currency: "BDT"}, {months: 6, amount: 60000, currency: "BDT"}] });
       return;
     }
+    if (req.method === "GET" && url.pathname === "/api/manual-link/queue/current") {
+      const latest = [...linkJobs.entries()].at(-1);
+      return latest ? json(200, {ticket: latest[0], username:latest[1].username, months:latest[1].months}) : json(404, {});
+    }
+    if (req.method === "POST" && /^\/api\/manual-link\/queue\/[^/]+\/leave$/.test(url.pathname)) return json(200, {leaving:true});
     if (req.method === "POST" && /^\/api\/manual-link\/queue\/[^/]+\/cancel$/.test(url.pathname)) {
       linkJobs.delete(url.pathname.split("/").at(-2));
       return json(200, {cancelled:true});
@@ -94,7 +100,7 @@ createServer(async (req, res) => {
       const job = linkJobs.get(ticket);
       if (!job) { json(404, {message: "排队记录已失效，请重新提交。"}); return; }
       job.polls++;
-      if (job.polls < 3) {
+      if (job.polls < 3 || process.env.PREVIEW_QUEUE_HOLD === "true") {
         json(202, {ticket, status: job.polls === 1 ? "queued" : "processing", position: 1, ahead: 0, estimated_wait_seconds: job.polls === 1 ? 20 : 10, message: job.polls === 1 ? "前方还有 0 人，预计约 20 秒后生成链接。请保持页面打开。" : "正在生成付款链接，预计还需约 10 秒。"}); return;
       }
       if (job.username === "expired_demo" && !job.verified_unpaid) {

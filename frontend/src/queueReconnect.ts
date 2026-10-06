@@ -4,8 +4,9 @@ export async function readQueueWithReconnect<T>(
   signal: AbortSignal,
   pause: () => Promise<void> = () => new Promise((resolve) => setTimeout(resolve, 3000)),
   now: () => number = Date.now,
+  options: { maxWaitMs?: number; onRetry?: () => void } = {},
 ): Promise<{ ok: boolean; data: T; status?: number }> {
-  const deadline = now() + 60000;
+  const deadline = now() + (options.maxWaitMs ?? Number.POSITIVE_INFINITY);
   for (;;) {
     signal.throwIfAborted();
     try {
@@ -16,6 +17,7 @@ export async function readQueueWithReconnect<T>(
       signal.throwIfAborted();
       if (now() >= deadline) throw error;
     }
+    options.onRetry?.();
     await pause();
   }
 }

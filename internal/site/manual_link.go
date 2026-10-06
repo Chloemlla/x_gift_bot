@@ -55,12 +55,15 @@ func (s *server) publicLink(w http.ResponseWriter, r *http.Request) {
 func (s *server) manualLink(w http.ResponseWriter, r *http.Request) {
 	s.generateManualLink(w, r, "")
 }
+
+type manualLinkRequest struct {
+	Username       string `json:"username"`
+	Months         int    `json:"months"`
+	VerifiedUnpaid bool   `json:"verified_unpaid"`
+}
+
 func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publicOwner string) {
-	var q struct {
-		Username       string `json:"username"`
-		Months         int    `json:"months"`
-		VerifiedUnpaid bool   `json:"verified_unpaid"`
-	}
+	var q manualLinkRequest
 	if !decode(w, r, &q) {
 		return
 	}
@@ -78,9 +81,18 @@ func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publ
 		message(w, 400, "该套餐时长未配置。")
 		return
 	}
+	if publicOwner != "" {
+		s.enqueuePublicLink(w, q, publicOwner)
+		return
+	}
+	s.executeManualLink(w, r, q, publicOwner)
+}
+
+func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q manualLinkRequest, publicOwner string) {
 	select {
 	case s.work <- struct{}{}:
 	default:
+		w.Header().Set("Retry-After", "3")
 		message(w, 409, "有订单正在处理，请稍后再生成链接。")
 		return
 	}
@@ -92,6 +104,7 @@ func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publ
 	}
 	defer lock.Close()
 	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		w.Header().Set("Retry-After", "3")
 		message(w, 409, "有订单正在处理，请稍后再生成链接。")
 		return
 	}
@@ -100,7 +113,7 @@ func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publ
 	defer cancel()
 	var record *checkout.Record
 	if publicOwner != "" {
-		record, err = checkout.PublicLinkForUsername(ctx, s.vault, q.Username, publicOwner, s.port, q.Months)
+		record, err = checkout.PublicLinkForUsername(ctx, s.vault, q.Username, publicOwner, s.port, q.Months, q.VerifiedUnpaid)
 	} else {
 		record, err = checkout.ManualLinkForUsername(ctx, s.vault, q.Username, s.port, q.Months, q.VerifiedUnpaid)
 	}
@@ -110,6 +123,9 @@ func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publ
 		reason := manualLinkFailureReason(err)
 		log.Printf("manual link failed: public=%t username=%s months=%d reason=%s", publicOwner != "", q.Username, q.Months, reason)
 		switch {
+		case errors.Is(err, checkout.ErrCheckoutRateLimited):
+			w.Header().Set("Retry-After", "15")
+			message(w, 429, "正在等待处理，请稍候。")
 		case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):
 			message(w, 409, "该账号已有兑换或后台订单，请使用原付款链接或联系管理员；主页不会重复创建订单。")
 		case errors.Is(err, checkout.ErrPublicLinkOtherBrowser):
@@ -153,12 +169,17 @@ func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publ
 			return
 		}
 		result["checkout_url"] = link
+		if publicOwner != "" {
+			log.Printf("public link ready: username=%s months=%d fresh=true stripe_verified=true", record.Username, record.Months)
+		}
 	}
 	reply(w, 200, result)
 }
 
 func manualLinkFailureReason(err error) string {
 	switch {
+	case errors.Is(err, checkout.ErrCheckoutRateLimited):
+		return "creation_rate_limited"
 	case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):
 		return "private_order"
 	case errors.Is(err, checkout.ErrPublicLinkOtherBrowser):

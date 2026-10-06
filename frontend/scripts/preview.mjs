@@ -8,6 +8,7 @@ const port = Number(process.env.PREVIEW_PORT || 4173);
 const paused = process.env.PREVIEW_PAUSED === "true";
 const states = new Map();
 const attempts = new Map();
+const linkJobs = new Map();
 let folders = [
   { id: "a".repeat(32), name: "本地预览 · 示例批次" },
   { id: "b".repeat(32), name: "国庆活动" },
@@ -83,6 +84,19 @@ createServer(async (req, res) => {
     if (req.method === "GET" && ["/api/admin/manual-link/plans", "/api/manual-link/plans"].includes(url.pathname)) {
       json(200, { plans: [{months: 3, amount: 30000, currency: "BDT"}, {months: 6, amount: 60000, currency: "BDT"}] });
       return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/api/manual-link/queue/")) {
+      const ticket = url.pathname.split("/").pop();
+      const job = linkJobs.get(ticket);
+      if (!job) { json(404, {message: "排队记录已失效，请重新提交。"}); return; }
+      job.polls++;
+      if (job.polls < 3) {
+        json(202, {ticket, status: job.polls === 1 ? "queued" : "processing", position: 1, ahead: 0, estimated_wait_seconds: job.polls === 1 ? 20 : 10, message: job.polls === 1 ? "前方还有 0 人，预计约 20 秒后生成链接。请保持页面打开。" : "正在生成付款链接，预计还需约 10 秒。"}); return;
+      }
+      if (job.username === "expired_demo" && !job.verified_unpaid) {
+        json(409, {message: "原付款链接已失效，请核实原订单未付款后再重新生成。", needs_unpaid_verification: true}); return;
+      }
+      json(200, {username: job.username, months: job.months, amount: job.months === 3 ? 30000 : 60000, currency: "BDT", status: "created", checkout_url: `https://checkout.stripe.com/c/pay/cs_test_PreviewOnly${ticket}`}); return;
     }
     if (req.method === "GET" && url.pathname === "/healthz") {
       json(200, { ok: true, payments_enabled: !paused });
@@ -252,6 +266,11 @@ createServer(async (req, res) => {
     if (["/api/admin/manual-link", "/api/manual-link"].includes(url.pathname)) {
       if (![3, 6].includes(body.months) || !/^[a-z0-9_]{1,15}$/.test(body.username || "")) {
         json(400, {message: "请填写正确用户名和套餐。"}); return;
+      }
+      if (url.pathname === "/api/manual-link") {
+        const ticket = randomBytes(12).toString("hex");
+        linkJobs.set(ticket, {...body, polls: 0});
+        json(202, {ticket, status: "queued", position: 2, ahead: 1, estimated_wait_seconds: 40, message: "前方还有 1 人，预计约 40 秒后生成链接。请保持页面打开。"}); return;
       }
       if (body.username === "expired_demo" && !body.verified_unpaid) {
         json(409, {message: "原付款链接已失效，请核实原订单未付款后再重新生成。", needs_unpaid_verification: true}); return;

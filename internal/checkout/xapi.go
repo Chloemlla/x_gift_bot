@@ -42,6 +42,7 @@ type xClient struct {
 	http         *http.Client
 	regionalHTTP *http.Client
 	headers      http.Header
+	readCheckout func(context.Context, *Record) (*paymentPage, error)
 }
 
 func newXClient(v *vault.Vault, port int) (*xClient, error) {
@@ -304,6 +305,9 @@ func (c *xClient) quote(ctx context.Context, user string, p Plan) error {
 	return nil
 }
 func (c *xClient) create(ctx context.Context, user, recipient string, p Plan) (string, string, error) {
+	if err := reserveCheckoutCreation(c.vault, time.Now()); err != nil {
+		return "", "", err
+	}
 	var r struct {
 		Data struct {
 			Gift struct {

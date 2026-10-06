@@ -40,6 +40,7 @@ var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{1,15}$`)
 var codePattern = regexp.MustCompile(`^XG-[A-F0-9]{48}$`)
 
 type server struct {
+	linkQueue        publicLinkQueue
 	turnstileSiteKey string
 	turnstileSecret  string
 	turnstileHTTP    *http.Client
@@ -233,6 +234,7 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/redeem", s.human("redeem", s.redeem))
 	mux.HandleFunc("GET /api/manual-link/plans", s.publicLinkPlans)
 	mux.HandleFunc("POST /api/manual-link", s.human("manual_link", s.publicLink))
+	mux.HandleFunc("GET /api/manual-link/queue/{ticket}", s.publicLinkQueueStatus)
 	mux.HandleFunc("POST /api/status", s.status)
 	mux.HandleFunc("POST /api/check", s.human("check", s.check))
 	mux.HandleFunc("GET /admin", s.admin(s.asset("admin.html", "text/html; charset=utf-8")))
@@ -268,6 +270,8 @@ func Run(ctx context.Context) error {
 	log.Printf("xgift-web listening on %s; payments enabled=%t", addr, s.payments)
 	s.jobs.Add(1)
 	go func() { defer s.jobs.Done(); s.reconcileLoop() }()
+	s.jobs.Add(1)
+	go func() { defer s.jobs.Done(); s.publicLinkQueueLoop() }()
 	select {
 	case err = <-done:
 	case <-ctx.Done():

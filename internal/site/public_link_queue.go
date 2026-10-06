@@ -3,6 +3,7 @@ package site
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -27,6 +28,7 @@ type publicLinkQueue struct {
 	jobs            []*publicLinkJob
 	averageDuration time.Duration
 	blockedUntil    time.Time
+	windowUser      string
 }
 
 func (q *publicLinkQueue) prune(now time.Time) {
@@ -35,7 +37,7 @@ func (q *publicLinkQueue) prune(now time.Time) {
 		if j.state == "queued" && now.Sub(j.seen) > 90*time.Second {
 			continue
 		}
-		if j.state == "done" && now.Sub(j.finished) > 10*time.Minute {
+		if j.state == "done" && now.Sub(j.finished) > 15*time.Minute {
 			continue
 		}
 		keep = append(keep, j)
@@ -54,8 +56,11 @@ func (s *server) enqueuePublicLink(w http.ResponseWriter, request manualLinkRequ
 	for _, j := range q.jobs {
 		if j.owner == owner && j.state != "done" {
 			if j.request != request {
-				message(w, 409, "当前浏览器已有请求排队，请等待完成后再生成其他订单。")
-				return
+				if j.state != "queued" || j.request.Username != request.Username {
+					continue
+				}
+				j.request = request
+				j.nextAttempt = time.Time{}
 			}
 			j.seen = now
 			q.respond(w, j)
@@ -95,7 +100,14 @@ func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
 	if average < 20*time.Second {
 		average = 20 * time.Second
 	}
+	ownWindow := q.windowUser != "" && job.request.Username == q.windowUser
+	if ownWindow {
+		estimate = 0
+	}
 	for _, j := range q.jobs {
+		if ownWindow && j != job {
+			continue
+		}
 		if j.state != "done" {
 			if position > 0 {
 				estimate += 15 * time.Minute
@@ -137,17 +149,46 @@ func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	q := &s.linkQueue
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	s.refreshPublicLinkWait(time.Now())
 	q.prune(time.Now())
 	for _, j := range q.jobs {
 		if j.id == r.PathValue("ticket") && j.owner == c.Value {
 			j.seen = time.Now()
+			if j.state == "done" && j.code == 200 && time.Since(j.finished) >= 15*time.Second {
+				request := j.request
+				q.mu.Unlock()
+				// A delayed poll revalidates its link; it must never create or switch plans.
+				if s.tryServePublicLink(w, r, request, c.Value, false) {
+					return
+				}
+				message(w, 409, "付款链接已更新或失效，请重新获取。")
+				return
+			}
 			q.respond(w, j)
+			q.mu.Unlock()
 			return
 		}
 	}
+	q.mu.Unlock()
 	message(w, 404, "排队记录已失效或服务已重启，请重新提交；系统会先核对原订单。")
+}
+
+func (s *server) invalidateOlderPublicResults(username, currentURL string) {
+	q := &s.linkQueue
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, j := range q.jobs {
+		if j.state != "done" || j.code != 200 || j.request.Username != username {
+			continue
+		}
+		var old struct {
+			URL string `json:"checkout_url"`
+		}
+		if json.Unmarshal(j.result, &old) == nil && old.URL != "" && old.URL != currentURL {
+			j.code = http.StatusConflict
+			j.result = []byte(`{"message":"付款链接已被新的请求替换，请使用最新链接。"}`)
+		}
+	}
 }
 
 type linkResponse struct {
@@ -182,9 +223,19 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 			q.mu.Unlock()
 			return
 		}
-		if j.state == "queued" {
+		if j.state == "queued" && job == nil {
 			job = j
-			break
+		}
+	}
+	// Replacing the active user's own plan does not take another person's slot.
+	if s.vault != nil {
+		if user, _, _, err := checkout.PublicCheckoutWindow(s.vault, time.Now()); err == nil && user != "" {
+			for _, candidate := range q.jobs {
+				if candidate.state == "queued" && candidate.request.Username == user {
+					job = candidate
+					break
+				}
+			}
 		}
 	}
 	if job == nil {
@@ -236,6 +287,9 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 func (s *server) refreshPublicLinkWait(now time.Time) {
 	if s.vault == nil {
 		return
+	}
+	if user, _, _, err := checkout.PublicCheckoutWindow(s.vault, now); err == nil {
+		s.linkQueue.windowUser = user
 	}
 	if wait, err := checkout.CheckoutCreationWait(s.vault, now); err == nil {
 		s.linkQueue.blockedUntil = now.Add(wait)

@@ -38,12 +38,14 @@ func Eligibility(ctx context.Context, v *vault.Vault, user string, port int) (st
 func (p Plan) Name() string { return fmt.Sprintf("Premium Gift - %d months", p.Months) }
 
 type xClient struct {
-	vault            *vault.Vault
-	http             *http.Client
-	regionalHTTP     *http.Client
-	headers          http.Header
-	readCheckout     func(context.Context, *Record) (*paymentPage, error)
-	readCheckoutPaid func(context.Context, *Record, Plan) (bool, error)
+	// Set only after validating an explicitly replaced public order.
+	publicReplacement string
+	vault             *vault.Vault
+	http              *http.Client
+	regionalHTTP      *http.Client
+	headers           http.Header
+	readCheckout      func(context.Context, *Record) (*paymentPage, error)
+	readCheckoutPaid  func(context.Context, *Record, Plan) (bool, error)
 }
 
 func newXClient(v *vault.Vault, port int) (*xClient, error) {

@@ -158,6 +158,9 @@ func (x *xClient) checkCreation(ctx context.Context, now time.Time) error {
 		return err
 	}
 	if !a.Released && a.ExpiresAt > now.UnixMilli() {
+		if x.publicReplacement != "" && a.Order.SessionID == x.publicReplacement && a.Order.CardFingerprint == "" && unsubmitted(&a.Order) {
+			return checkCheckoutCreation(x.vault, time.Now())
+		}
 		r := a.Order
 		verified := verifyPublicCheckout(ctx, x.vault, x, &r, a.Plan) == nil && r.Status == "succeeded"
 		if !verified {
@@ -219,4 +222,21 @@ func (x *xClient) checkoutPaid(ctx context.Context, r *Record, p Plan) (bool, er
 		return false, nil
 	}
 	return verifiedCheckoutPaid(ctx, x.vault, r, p)
+}
+
+// Called under checkout.lock after archiving the user's explicitly replaced
+// public order. Never release another order's window.
+func (x *xClient) releasePublicReplacement(v *vault.Vault) error {
+	a, err := readActiveCheckout(v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if x.publicReplacement != "" && a.Order.SessionID == x.publicReplacement && a.Order.CardFingerprint == "" && unsubmitted(&a.Order) {
+		a.Released = true
+		return saveActiveCheckout(v, a)
+	}
+	return nil
 }

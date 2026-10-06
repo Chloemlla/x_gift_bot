@@ -16,8 +16,8 @@ import (
 
 var ErrPublicLinkConflict = errors.New("existing checkout requires private review")
 var ErrPublicLinkPrivateOrder = fmt.Errorf("%w: private order exists", ErrPublicLinkConflict)
-var ErrPublicLinkRetryLimit = fmt.Errorf("%w: unpublished creation retry budget exhausted", ErrPublicLinkConflict)
 var ErrPublicLinkPending = errors.New("public checkout creation returned no usable link")
+var ErrPublicPaymentInProgress = errors.New("public checkout payment is in progress")
 
 const publicLinkTTL = 15 * time.Minute
 
@@ -52,6 +52,8 @@ func PublicLinkForUsername(ctx context.Context, v *vault.Vault, user, owner stri
 
 func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string, plan Plan, x *xClient, verifiedUnpaid ...bool) (*Record, error) {
 	months := plan.Months
+	x.publicReplacement = ""
+	defer func() { x.publicReplacement = "" }()
 	recipient, err := x.identity(ctx, user, false)
 	if err != nil {
 		return nil, err
@@ -75,13 +77,14 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 			b, _ := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: *existing})
 			return existing, v.Put("public-checkout:"+recipient, b)
 		}
-		if err != nil && (!errors.Is(err, ErrVerifyUnpaid) || len(verifiedUnpaid) == 0 || !verifiedUnpaid[0]) {
+		if err != nil && !errors.Is(err, ErrVerifyUnpaid) {
 			return nil, err
 		}
 		if err == nil && publicLinkMatches(existing, plan) && publicLinkFresh(existing, time.Now()) {
 			return existing, holdPublicCheckout(v, existing, plan, time.Now())
 		}
 		replace = true
+		x.publicReplacement = existing.SessionID
 	}
 	if err = x.checkCreation(ctx, time.Now()); err != nil {
 		return nil, err
@@ -114,7 +117,7 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 		}
 		return v.Put("public-checkout:"+recipient, b)
 	}
-	// Preserve closed sessions and the visitor's explicit unpaid confirmation.
+	// Preserve previous sessions without interpreting inactivity as payment failure.
 	// The public reservation remains isolated from saved-card payment records.
 	if replace {
 		old, e := v.Get("public-checkout:" + recipient)
@@ -133,6 +136,13 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 	}
 	if err != nil {
 		return nil, err
+	}
+	// The user requested a replacement for this public order. Retire only its
+	// own reservation; a different recipient's payment window remains protected.
+	if replace {
+		if err = x.releasePublicReplacement(v); err != nil {
+			return nil, err
+		}
 	}
 	r.SessionID, r.URL, err = x.create(ctx, user, recipient, plan)
 	if err != nil {
@@ -216,6 +226,20 @@ func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Re
 	if p.Status == "expired" && p.PaymentStatus == "unpaid" && p.IntentPresent && p.IntentNull && p.Intent == nil {
 		return ErrVerifyUnpaid
 	}
+	// Public links never submit a saved card. A failed/manual payment may
+	// leave an intent waiting for a new payment method; that is not an active
+	// payment and must not permanently prevent changing the gift duration.
+	if p.Intent != nil {
+		if (p.Intent.Status == "requires_payment_method" || p.Intent.Status == "canceled") && p.Intent.AmountReceived != nil && *p.Intent.AmountReceived == 0 {
+			if p.Status == "expired" && p.PaymentStatus == "unpaid" {
+				return ErrVerifyUnpaid
+			}
+			manual := *p
+			manual.Intent, manual.IntentNull, manual.IntentPresent = nil, true, true
+			return manual.guard(r, plan, true)
+		}
+		return ErrPublicPaymentInProgress
+	}
 	return p.guard(r, plan, true)
 }
 
@@ -260,9 +284,6 @@ func publicLinkExisting(v *vault.Vault, user, recipient string, plan Plan) (*Rec
 		r.Months, r.Amount, r.Currency, r.ProductID = plan.Months, plan.Minor, strings.ToUpper(plan.Currency), plan.ProductID
 		if r.URL != "" || r.SessionID != "" || r.PreviousSession != "" || r.ReplacementCount != 0 || r.RecoveryAttempts != 0 || r.ManualRecovery || r.LastError != nil {
 			return nil, ErrPublicLinkConflict
-		}
-		if r.CreationAttempts >= maxAttempts {
-			return nil, ErrPublicLinkRetryLimit
 		}
 	default:
 		return nil, ErrPublicLinkConflict

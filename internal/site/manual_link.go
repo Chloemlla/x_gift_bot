@@ -83,7 +83,7 @@ func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publ
 		return
 	}
 	if publicOwner != "" {
-		if s.tryServePublicLink(w, r, q, publicOwner) {
+		if s.tryServePublicLink(w, r, q, publicOwner, true) {
 			return
 		}
 		s.enqueuePublicLink(w, q, publicOwner)
@@ -144,16 +144,20 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
 			message(w, 429, "正在等待处理，请稍候。")
+		case errors.Is(err, checkout.ErrPublicPaymentInProgress):
+			message(w, 409, "该订单正在付款或银行验证中，请先完成当前付款。")
 		case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):
 			message(w, 409, "该账号已有兑换或后台订单，请使用原付款链接或联系管理员；主页不会重复创建订单。")
-		case errors.Is(err, checkout.ErrPublicLinkRetryLimit):
-			message(w, 409, "创建链接已连续失败，请联系管理员检查；系统没有提交付款。")
 		case errors.Is(err, checkout.ErrPublicLinkPending):
 			message(w, 502, "暂未取得付款链接，系统没有提交付款。请用相同账号和套餐重试；请勿同时使用其他入口重复建单。")
 		case errors.Is(err, checkout.ErrPublicLinkConflict):
 			message(w, 409, "该账号暂时无法生成新链接，请使用原付款页面或联系管理员核实。")
 		case errors.Is(err, checkout.ErrVerifyUnpaid):
-			reply(w, 409, map[string]any{"message": "原付款链接已失效，请核实原订单未付款后再重新生成。", "needs_unpaid_verification": true})
+			if publicOwner != "" {
+				message(w, 502, "付款链接暂不可用，请重新获取。")
+			} else {
+				reply(w, 409, map[string]any{"message": "原付款链接已失效，请核实原订单未付款后再重新生成。", "needs_unpaid_verification": true})
+			}
 		case errors.Is(err, checkout.ErrNotEligible):
 			message(w, 409, "该账号目前无法接收 Premium 赠送。")
 		case errors.Is(err, checkout.ErrUserNotFound):
@@ -189,6 +193,7 @@ func (s *server) respondManualLink(w http.ResponseWriter, record *checkout.Recor
 		result["checkout_url"] = link
 		if publicOwner != "" {
 			result["expires_at"] = record.Created + 15*60
+			s.invalidateOlderPublicResults(record.Username, link)
 			log.Printf("public link ready: username=%s months=%d stripe_verified=true", record.Username, record.Months)
 		}
 	}
@@ -199,10 +204,10 @@ func manualLinkFailureReason(err error) string {
 	switch {
 	case errors.Is(err, checkout.ErrCheckoutRateLimited):
 		return "creation_rate_limited"
+	case errors.Is(err, checkout.ErrPublicPaymentInProgress):
+		return "payment_in_progress"
 	case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):
 		return "private_order"
-	case errors.Is(err, checkout.ErrPublicLinkRetryLimit):
-		return "creation_retry_limit"
 	case errors.Is(err, checkout.ErrPublicLinkPending):
 		return "creation_pending"
 	case errors.Is(err, checkout.ErrPublicLinkConflict):
@@ -220,17 +225,28 @@ func manualLinkFailureReason(err error) string {
 	}
 }
 
-// Only a verified existing link may bypass the creation queue. This path never
-// creates an order, even if the payment window expires during its network read.
-func (s *server) tryServePublicLink(w http.ResponseWriter, r *http.Request, q manualLinkRequest, owner string) bool {
-	user, months, _, err := checkout.PublicCheckoutWindow(s.vault, time.Now())
-	if err != nil || user != q.Username || months != q.Months {
+// The current slot holder may retrieve its link or replace its own plan.
+// Both operations retain the work/file locks and the global creation guard.
+func (s *server) tryServePublicLink(w http.ResponseWriter, r *http.Request, q manualLinkRequest, owner string, allowReplacement bool) bool {
+	if s.vault == nil {
 		return false
+	}
+	user, months, _, err := checkout.PublicCheckoutWindow(s.vault, time.Now())
+	if err != nil || user != q.Username || (!allowReplacement && months != q.Months) {
+		return false
+	}
+	waitForRead := func() bool {
+		ticket := r.PathValue("ticket")
+		if allowReplacement || ticket == "" {
+			return false
+		}
+		reply(w, 202, map[string]any{"ticket": ticket, "status": "queued", "ahead": 0, "estimated_wait_seconds": 5, "message": "正在核验付款链接，请稍候。"})
+		return true
 	}
 	select {
 	case s.work <- struct{}{}:
 	default:
-		return false
+		return waitForRead()
 	}
 	defer func() { <-s.work }()
 	lock, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
@@ -239,12 +255,22 @@ func (s *server) tryServePublicLink(w http.ResponseWriter, r *http.Request, q ma
 	}
 	defer lock.Close()
 	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-		return false
+		return waitForRead()
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	timeout := 20 * time.Second
+	if allowReplacement && months != q.Months {
+		timeout = 110 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
-	record, hit, err := checkout.TryCachedPublicLink(ctx, s.vault, q.Username, owner, s.port, q.Months)
+	var record *checkout.Record
+	hit := true
+	if months != q.Months {
+		record, err = checkout.PublicLinkForUsername(ctx, s.vault, q.Username, owner, s.port, q.Months)
+	} else {
+		record, hit, err = checkout.TryCachedPublicLink(ctx, s.vault, q.Username, owner, s.port, q.Months)
+	}
 	if err != nil || !hit {
 		return false
 	}

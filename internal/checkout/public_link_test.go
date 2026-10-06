@@ -99,9 +99,10 @@ func TestPublicLinkExplicitRetryAfterUnpublishedTimeout(t *testing.T) {
 					t.Fatal(e)
 				}
 			}
+			resetCreationClock(t, v)
 			_, e = publicLinkForClient(context.Background(), v, "recipient", owner, plan, x)
-			if !errors.Is(e, ErrPublicLinkRetryLimit) || calls != 3 {
-				t.Fatal("unbounded public creation retry")
+			if !errors.Is(e, ErrPublicLinkPending) || calls != 4 {
+				t.Fatal("manual retry was permanently blocked", e)
 			}
 		} else {
 			resetCreationClock(t, v)
@@ -119,8 +120,8 @@ func TestPublicLinkExplicitRetryAfterUnpublishedTimeout(t *testing.T) {
 			if e != nil || other.URL != original || calls != 2 {
 				t.Fatal("another browser could not retrieve verified public order")
 			}
-			// A closed session is not evidence of non-payment. Never replace it
-			// without the visitor's explicit confirmation, nor return its old URL.
+			// An explicit manual-link request may replace an inactive session;
+			// this never declares the old payment failed or submits a payment.
 			oldID := r.SessionID
 			x.readCheckout = func(_ context.Context, record *Record) (*paymentPage, error) {
 				if record.SessionID == oldID {
@@ -130,27 +131,10 @@ func TestPublicLinkExplicitRetryAfterUnpublishedTimeout(t *testing.T) {
 			}
 			resetCreationClock(t, v)
 			got, err := publicLinkForClient(context.Background(), v, "recipient", owner, plan, x)
-			if got != nil || !errors.Is(err, ErrVerifyUnpaid) || calls != 2 {
-				t.Fatal("closed session was reused or replaced without confirmation", err)
-			}
-			// User attestation cannot bypass the global payment window.
-			got, err = publicLinkForClient(context.Background(), v, "recipient", owner, plan, x, true)
-			if got != nil || !errors.Is(err, ErrCheckoutRateLimited) || calls != 2 {
-				t.Fatal("confirmation bypassed active window", err)
-			}
-			a, err := readActiveCheckout(v)
-			if err != nil {
-				t.Fatal(err)
-			}
-			a.Order.Created = time.Now().Add(-16 * time.Minute).Unix()
-			a.ExpiresAt = time.Unix(a.Order.Created, 0).Add(publicLinkTTL).UnixMilli()
-			if err := saveActiveCheckout(v, a); err != nil {
-				t.Fatal(err)
-			}
-			got, err = publicLinkForClient(context.Background(), v, "recipient", owner, plan, x, true)
 			if err != nil || got == nil || got.SessionID == oldID || calls != 3 {
-				t.Fatal("confirmed closed session did not get a new verified checkout", err)
+				t.Fatal("inactive link could not be replaced directly", err)
 			}
+
 		}
 	}
 }
@@ -225,12 +209,15 @@ func TestPublicLinkTTLAndPlanReplacement(t *testing.T) {
 		{"stored unverified session", time.Minute, false, "wrong_session", 0, true},
 		{"expired TTL", 15 * time.Minute, false, "open", 1, false},
 		{"unknown creation time", 0, false, "open", 1, false},
-		{"changed plan waits for active window", time.Minute, true, "open", 0, true},
+		{"changed plan immediately replaces own window", time.Minute, true, "open", 1, false},
+		{"changed plan after failed manual payment", time.Minute, true, "requires_payment_method", 1, false},
+		{"other account window protected", time.Minute, true, "other_active", 0, true},
 		{"changed plan after expiry", 16 * time.Minute, true, "open", 1, false},
 		{"processing within TTL", time.Minute, false, "processing", 0, true},
 		{"processing beyond TTL", 16 * time.Minute, false, "processing", 0, true},
 		{"expired with processing intent", 16 * time.Minute, false, "expired_processing", 0, true},
-		{"inactive beyond TTL", 16 * time.Minute, false, "inactive", 0, true},
+		{"inactive beyond TTL", 16 * time.Minute, false, "inactive", 1, false},
+		{"inactive within TTL", time.Minute, false, "inactive", 1, false},
 		{"paid beyond TTL", 16 * time.Minute, true, "paid", 0, false},
 		{"upstream repeats expired session", 16 * time.Minute, false, "replay", 1, true},
 	} {
@@ -283,6 +270,9 @@ func TestPublicLinkTTLAndPlanReplacement(t *testing.T) {
 					p.SessionID = "cs_live_WrongRecipientSession"
 				case "inactive":
 					return nil, &stripeError{Code: "checkout_not_active_session"}
+				case "requires_payment_method":
+					p.IntentNull = false
+					json.Unmarshal([]byte(fmt.Sprintf(`{"currency":%q,"amount":%d,"status":"requires_payment_method","amount_received":0}`, plan.Currency, plan.Minor)), &p.Intent)
 				case "processing", "expired_processing":
 					if tc.state == "expired_processing" {
 						p.Status = "expired"
@@ -301,6 +291,15 @@ func TestPublicLinkTTLAndPlanReplacement(t *testing.T) {
 			if tc.creates == 0 {
 				clock, _ := json.Marshal(time.Now().UnixMilli())
 				v.Put("checkout-creation:last", clock)
+			}
+			if tc.state == "other_active" {
+				other := old
+				other.Username, other.RecipientID, other.SessionID = "other", "5678", "cs_live_Other"
+				other.URL = "https://checkout.stripe.com/c/pay/cs_live_Other"
+				if err := saveActiveCheckout(v, activeCheckout{Order: other, Plan: plan, ExpiresAt: time.Unix(other.Created, 0).Add(publicLinkTTL).UnixMilli()}); err != nil {
+					t.Fatal(err)
+				}
+				resetCreationClock(t, v)
 			}
 			beforeClock, _ := v.Get("checkout-creation:last")
 			got, err := publicLinkForClient(context.Background(), v, "recipient", strings.Repeat("b", 64), requested, x, tc.state == "processing" || tc.state == "expired_processing")

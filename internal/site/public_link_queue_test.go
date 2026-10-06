@@ -153,3 +153,80 @@ func TestPublicQueuePaymentWindowEstimateAndEarlyRecheck(t *testing.T) {
 		t.Fatal("early completion did not release wait")
 	}
 }
+
+func TestQueuedPlanCanBeChangedWithoutLosingPosition(t *testing.T) {
+	s := &server{}
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "recipient", Months: 3}, "browser")
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "other", Months: 3}, "other-browser")
+	ticket := s.linkQueue.jobs[0].id
+	s.linkQueue.jobs[0].nextAttempt = time.Now().Add(time.Minute)
+	w := httptest.NewRecorder()
+	s.enqueuePublicLink(w, manualLinkRequest{Username: "recipient", Months: 6}, "browser")
+	if w.Code != 202 || len(s.linkQueue.jobs) != 2 || s.linkQueue.jobs[0].id != ticket || s.linkQueue.jobs[0].request.Months != 6 || !s.linkQueue.jobs[0].nextAttempt.IsZero() {
+		t.Fatal("plan change lost queue position or remained blocked")
+	}
+	var got int
+	s.processPublicLinkQueue(context.Background(), func(w http.ResponseWriter, r *http.Request, q manualLinkRequest, owner string) {
+		got = q.Months
+		reply(w, 200, map[string]string{"status": "created"})
+	})
+	if got != 6 {
+		t.Fatal("executed obsolete plan", got)
+	}
+}
+
+func TestReplacementInvalidatesOldCompletedTickets(t *testing.T) {
+	old := &publicLinkJob{state: "done", code: 200, request: manualLinkRequest{Username: "recipient"}, result: []byte(`{"checkout_url":"old"}`)}
+	current := &publicLinkJob{state: "done", code: 200, request: manualLinkRequest{Username: "recipient"}, result: []byte(`{"checkout_url":"new"}`)}
+	other := &publicLinkJob{state: "done", code: 200, request: manualLinkRequest{Username: "other"}, result: []byte(`{"checkout_url":"other"}`)}
+	s := &server{linkQueue: publicLinkQueue{jobs: []*publicLinkJob{old, current, other}}}
+	s.invalidateOlderPublicResults("recipient", "new")
+	if old.code != 409 || strings.Contains(string(old.result), `"old"`) || current.code != 200 || other.code != 200 {
+		t.Fatal("stale link retained or another order changed")
+	}
+}
+
+func TestCurrentHolderCanChangePlanAheadOfWaitingAccounts(t *testing.T) {
+	s := checkFixture(t)
+	created := time.Now().Add(-time.Minute).Unix()
+	order := map[string]any{"username": "holder", "recipient_id": "1234", "session_id": "cs_live_Holder", "created": created, "months": 3, "status": "created"}
+	active, _ := json.Marshal(map[string]any{"order": order, "expires_at": (created + 900) * 1000})
+	public, _ := json.Marshal(map[string]any{"order": order})
+	if err := s.vault.Put("checkout-creation:active", active); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.vault.Put("public-checkout:1234", public); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "other", Months: 3}, "other")
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "holder", Months: 6}, "holder")
+	var user string
+	var months int
+	s.processPublicLinkQueue(context.Background(), func(w http.ResponseWriter, r *http.Request, q manualLinkRequest, owner string) {
+		user, months = q.Username, q.Months
+		reply(w, 200, map[string]string{"status": "created"})
+	})
+	if user != "holder" || months != 6 || s.linkQueue.jobs[0].state != "queued" {
+		t.Fatal("holder was blocked by its own payment window", user, months)
+	}
+}
+
+func TestDelayedLinkPollWaitsForVerificationInsteadOfFailingWhenBusy(t *testing.T) {
+	s := checkFixture(t)
+	created := time.Now().Add(-time.Minute).Unix()
+	order := map[string]any{"username": "holder", "recipient_id": "1234", "session_id": "cs_live_Holder", "created": created, "months": 3, "status": "created"}
+	active, _ := json.Marshal(map[string]any{"order": order, "expires_at": (created + 900) * 1000})
+	public, _ := json.Marshal(map[string]any{"order": order})
+	s.vault.Put("checkout-creation:active", active)
+	s.vault.Put("public-checkout:1234", public)
+	s.linkQueue.jobs = []*publicLinkJob{{id: "ticket", owner: "owner", state: "done", code: 200, finished: time.Now().Add(-20 * time.Second), request: manualLinkRequest{Username: "holder", Months: 3}, result: []byte(`{"checkout_url":"old"}`)}}
+	s.work <- struct{}{}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.SetPathValue("ticket", "ticket")
+	r.AddCookie(&http.Cookie{Name: "__Host-xgift-link", Value: "owner"})
+	w := httptest.NewRecorder()
+	s.publicLinkQueueStatus(w, r)
+	if w.Code != 202 || !strings.Contains(w.Body.String(), `"ticket":"ticket"`) || strings.Contains(w.Body.String(), "checkout_url") {
+		t.Fatal("busy verification returned a stale link or an error", w.Code, w.Body.String())
+	}
+}

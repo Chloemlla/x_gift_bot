@@ -118,7 +118,10 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
               <TextField label="Stripe 付款链接" value={result.checkout_url} slotProps={{ input: { readOnly: true } }} onFocus={(e) => e.target.select()} />
             </Box>
           </>}
-          <Button onClick={() => { reset(); setUsername(""); requestAnimationFrame(() => usernameInput.current?.focus()); }} sx={{ mt: 2, ml: -2 }}>为其他账号生成链接</Button>
+          <Stack direction="row" spacing={1} sx={{ mt: 2, ml: -2 }}>
+            {result.checkout_url && <Button onClick={() => { reset(); requestAnimationFrame(() => usernameInput.current?.focus()); }}>更换套餐</Button>}
+            <Button onClick={() => { reset(); setUsername(""); requestAnimationFrame(() => usernameInput.current?.focus()); }}>为其他账号生成链接</Button>
+          </Stack>
         </CardContent>
       </Card>}
       {!publicMode && result && <Box sx={{ mt: 2 }} aria-live="polite">

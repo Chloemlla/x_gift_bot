@@ -73,3 +73,24 @@ func TestPublicLinkCookieBoundary(t *testing.T) {
 		t.Fatal("unsafe ownership cookie")
 	}
 }
+
+func TestLegacyPublicPageCannotEnqueueOrMisreadAcceptedAsSuccess(t *testing.T) {
+	for _, protocol := range []string{"", `,"queue_protocol":0`, `,"queue_protocol":2`} {
+		s := &server{}
+		w := httptest.NewRecorder()
+		r := manualLinkJSONRequest(`{"username":"recipient","months":3` + protocol + `}`)
+		s.generateManualLink(w, r, "browser-owner")
+		if w.Code != 409 || !strings.Contains(w.Body.String(), "刷新") || strings.Contains(w.Body.String(), "ticket") || len(s.linkQueue.jobs) != 0 {
+			t.Fatal("legacy request created work or appeared successful", w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestQueueAwarePageReceivesQueueAcknowledgement(t *testing.T) {
+	s := resumeFixture(t, "review", "created")
+	w := httptest.NewRecorder()
+	s.generateManualLink(w, manualLinkJSONRequest(`{"username":"recipient","months":6,"queue_protocol":1}`), "browser-owner")
+	if w.Code != 202 || !strings.Contains(w.Body.String(), `"status":"queued"`) || len(s.linkQueue.jobs) != 1 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}

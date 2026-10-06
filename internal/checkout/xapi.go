@@ -38,10 +38,14 @@ func Eligibility(ctx context.Context, v *vault.Vault, user string, port int) (st
 func (p Plan) Name() string { return fmt.Sprintf("Premium Gift - %d months", p.Months) }
 
 type xClient struct {
-	vault        *vault.Vault
-	http         *http.Client
-	regionalHTTP *http.Client
-	headers      http.Header
+	// Set only after validating an explicitly replaced public order.
+	publicReplacement string
+	vault             *vault.Vault
+	http              *http.Client
+	regionalHTTP      *http.Client
+	headers           http.Header
+	readCheckout      func(context.Context, *Record) (*paymentPage, error)
+	readCheckoutPaid  func(context.Context, *Record, Plan) (bool, error)
 }
 
 func newXClient(v *vault.Vault, port int) (*xClient, error) {
@@ -304,6 +308,12 @@ func (c *xClient) quote(ctx context.Context, user string, p Plan) error {
 	return nil
 }
 func (c *xClient) create(ctx context.Context, user, recipient string, p Plan) (string, string, error) {
+	if err := c.checkCreation(ctx, time.Now()); err != nil {
+		return "", "", err
+	}
+	if err := reserveCheckoutCreation(c.vault, time.Now()); err != nil {
+		return "", "", err
+	}
 	var r struct {
 		Data struct {
 			Gift struct {

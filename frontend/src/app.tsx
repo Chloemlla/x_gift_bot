@@ -52,6 +52,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [confirmation, setConfirmation] = useState(false);
   const [pauseNotice, setPauseNotice] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const [severity, setSeverity] = useState<
     "info" | "success" | "warning" | "error"
@@ -605,12 +606,12 @@ function App() {
             </AccordionDetails>
           </Accordion>
         ))}
-        <Accordion disableGutters slotProps={{ transition: { unmountOnExit: true } }} sx={{ bgcolor: "transparent", borderBottom: 1, borderColor: "divider", "&:before": { display: "none" } }}>
+        <Accordion expanded={manualOpen} onChange={(_, expanded) => setManualOpen(expanded)} disableGutters slotProps={{ transition: { unmountOnExit: false } }} sx={{ bgcolor: "transparent", borderBottom: 1, borderColor: "divider", "&:before": { display: "none" } }}>
           <AccordionSummary expandIcon={<ExpandMoreRounded />} id="faq-manual-link" aria-controls="faq-manual-link-content" sx={{ px: 0, minHeight: 64 }}>
             <Typography fontWeight={500}>没有兑换码，可以为某个用户生成 Stripe 付款链接吗？</Typography>
           </AccordionSummary>
           <AccordionDetails id="faq-manual-link-content" sx={{ px: 0, pb: 3 }}>
-            <ManualPaymentPanel publicMode />
+            <ManualPaymentPanel publicMode onShow={() => setManualOpen(true)} />
           </AccordionDetails>
         </Accordion>
       </Box>

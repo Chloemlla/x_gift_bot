@@ -74,6 +74,8 @@ func (s *server) leavePublicLinkQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 // Recover only tickets belonging to this browser, never search by username.
+// Finished tickets are recovered only while their payment link is still live;
+// failures, payments and expired links are not replayed on a later visit.
 func (s *server) currentPublicLinkQueue(w http.ResponseWriter, r *http.Request) {
 	c, err := r.Cookie("__Host-xgift-link")
 	if err != nil {
@@ -85,8 +87,9 @@ func (s *server) currentPublicLinkQueue(w http.ResponseWriter, r *http.Request) 
 	defer q.mu.Unlock()
 	q.prune(time.Now())
 	var found *publicLinkJob
+	now := time.Now()
 	for _, j := range q.jobs {
-		if j.owner == c.Value && !j.cancelled && (found == nil || j.state != "done") {
+		if j.owner == c.Value && !j.cancelled && (j.state != "done" || (found == nil && j.liveLink(now))) {
 			found = j
 		}
 	}

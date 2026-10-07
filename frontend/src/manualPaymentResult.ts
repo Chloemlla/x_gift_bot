@@ -1,5 +1,5 @@
 export type PaymentPlan = { months: number; amount: number; currency: string };
-export type PaymentResult = PaymentPlan & { username: string; status: "created" | "requires_action" | "succeeded"; checkout_url?: string };
+export type PaymentResult = PaymentPlan & { username: string; status: "created" | "requires_action" | "succeeded"; checkout_url?: string; expires_at?: number };
 
 // A 2xx response may only acknowledge queue submission. Never render it as an order.
 export function isPaymentResult(value: unknown, username: string, plan: PaymentPlan): value is PaymentResult {

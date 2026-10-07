@@ -177,13 +177,19 @@ func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 			j.left = time.Time{}
 			q.dirty = true
 			if j.state == "done" && j.code == 200 && time.Since(j.finished) >= 15*time.Second {
+				if !j.liveLink(time.Now()) {
+					// Paid or expired: the page returns to a clean form.
+					q.mu.Unlock()
+					message(w, http.StatusGone, "上次的付款链接已结束，如需付款请重新排队。")
+					return
+				}
 				request := j.request
 				q.mu.Unlock()
 				// A delayed poll revalidates its link; it must never create or switch plans.
 				if s.tryServePublicLink(w, r, request, c.Value, false) {
 					return
 				}
-				message(w, 409, "付款链接已更新或失效，请重新获取。")
+				message(w, 409, "这条付款链接已失效（可能已超时、付款被拒或已被新的请求替换）。如尚未付款，请重新排队获取新链接；如已付款，请勿重复支付。")
 				return
 			}
 			q.respond(w, j)
@@ -193,6 +199,18 @@ func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	q.mu.Unlock()
 	message(w, 404, "排队记录已失效，请重新提交；系统会先核对原订单。")
+}
+
+// liveLink reports a delivered checkout link still inside its payment window.
+func (j *publicLinkJob) liveLink(now time.Time) bool {
+	if j.state != "done" || j.code != 200 {
+		return false
+	}
+	var result struct {
+		URL       string `json:"checkout_url"`
+		ExpiresAt int64  `json:"expires_at"`
+	}
+	return json.Unmarshal(j.result, &result) == nil && result.URL != "" && result.ExpiresAt > now.Unix()
 }
 
 func (s *server) invalidateOlderPublicResults(username, currentURL string) {

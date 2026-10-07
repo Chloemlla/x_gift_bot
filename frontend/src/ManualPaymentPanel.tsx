@@ -12,13 +12,19 @@ import { isPaymentResult } from "./manualPaymentResult";
 
 type Plan = { months: number; amount: number; currency: string };
 type Result = Plan & { username: string; status: string; checkout_url?: string; expires_at?: number; message?: string; needs_unpaid_verification?: boolean; ticket?: string; position?: number; ahead?: number; estimated_wait_seconds?: number };
-type QueueSession = { ticket: string; username: string; months: number };
+// expires_at is set once a link is delivered: refresh recovers it only during the payment window.
+type QueueSession = { ticket: string; username: string; months: number; expires_at?: number };
 const queueStorageKey = "xgift-public-queue";
 function saveQueue(value: QueueSession | null) {
   try { if (value) sessionStorage.setItem(queueStorageKey, JSON.stringify(value)); else sessionStorage.removeItem(queueStorageKey); } catch { /* Cookie-based recovery remains available. */ }
 }
 function savedQueue(): QueueSession | null {
-  try { const value = JSON.parse(sessionStorage.getItem(queueStorageKey) || "null"); return value && typeof value.ticket === "string" && /^[a-z0-9_]{1,15}$/.test(value.username) && Number.isInteger(value.months) && value.months >= 1 && value.months <= 24 ? value : null; } catch { return null; }
+  try {
+    const value = JSON.parse(sessionStorage.getItem(queueStorageKey) || "null");
+    if (!value || typeof value.ticket !== "string" || !/^[a-z0-9_]{1,15}$/.test(value.username) || !Number.isInteger(value.months) || value.months < 1 || value.months > 24) return null;
+    if (typeof value.expires_at === "number" && value.expires_at * 1000 <= Date.now()) { saveQueue(null); return null; }
+    return value;
+  } catch { return null; }
 }
 function price(p: Plan) { return `${p.currency} ${(p.amount / 100).toFixed(2)}`; }
 export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?: boolean; onShow?: () => void }) {
@@ -53,6 +59,7 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
   }, [result]);
   const secondsLeft = result?.expires_at ? Math.max(0, Math.floor(result.expires_at - Date.now() / 1000)) : null;
   const expired = secondsLeft === 0;
+  useEffect(() => { if (publicMode && expired) saveQueue(null); }, [publicMode, expired]);
   const cleanUser = username.trim().replace(/^@/, "").toLowerCase();
   const valid = /^[a-z0-9_]{1,15}$/.test(cleanUser);
   async function loadPlans(recover = false) {
@@ -111,7 +118,7 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
   }
   useEffect(() => { if (result && publicMode) resultHeading.current?.focus({ preventScroll: true }); }, [result, publicMode]);
   useEffect(() => { if (!busy && error) usernameInput.current?.focus({ preventScroll: true }); }, [busy, error]);
-  function reset() { setResult(null); setError(""); setNotice(""); setNeedsVerification(false); setVerified(false); }
+  function reset() { if (publicMode) saveQueue(null); setResult(null); setError(""); setNotice(""); setNeedsVerification(false); setVerified(false); }
   async function enableNotification() {
     if (!("Notification" in window)) { setNotice("此浏览器不支持系统通知，请保持页面打开，链接生成后页面标题也会提醒。"); return; }
     try { const permission = await Notification.requestPermission(); if (permission === "granted" && "serviceWorker" in navigator) await navigator.serviceWorker.register("/payment-notifications.js"); setNotifyReady(permission === "granted"); setNotice(permission === "granted" ? "已开启链接就绪通知，请保持网页打开。" : "未开启系统通知，请留意此页面的排队进度。"); } catch { setNotice("暂时无法开启系统通知，请留意此页面。"); }
@@ -126,7 +133,7 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
     if (resume) queueTicket.current = resume.ticket; else saveQueue(null);
     try {
       const poll = (path: string) => readQueueWithReconnect(() => request<Result>(path, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(20000)])), controller.signal, undefined, undefined, {onRetry: () => setReconnecting(true)});
-      let { ok, data } = resume
+      let { ok, data, status } = resume
         ? await poll(`${endpoint}/queue/${encodeURIComponent(resume.ticket)}`)
         : await request<Result>(endpoint, { username: user, months: selectedPlan.months, verified_unpaid: needsVerification && verified, queue_protocol: publicMode ? 1 : undefined }, AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]));
       if (resume) queueTicket.current = resume.ticket;
@@ -138,17 +145,20 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
         await new Promise<void>((resolve) => setTimeout(resolve, 3000));
         controller.signal.throwIfAborted();
         const queuePath = `${endpoint}/queue/${encodeURIComponent(data.ticket)}`;
-        ({ ok, data } = await poll(queuePath));
+        ({ ok, data, status } = await poll(queuePath));
       }
       const completedTicket = queueTicket.current;
       queueTicket.current = null;
       setReconnecting(false);
       if (!ok) saveQueue(null);
+      // The previous link already ended (paid or expired): show the clean form.
+      if (!ok && status === 410) return;
       if (!ok) { setNeedsVerification(Boolean(data?.needs_unpaid_verification)); setError(data?.message || "生成失败，请稍后重试。"); return; }
       if (!isPaymentResult(data, user, selectedPlan)) {
         setError("尚未取得完整的付款订单，请刷新页面后重试。系统会先检查已有链接。"); return;
       }
       setNeedsVerification(false); setVerified(false); setResult(data); onShow?.();
+      if (publicMode) saveQueue(completedTicket && data.checkout_url && data.expires_at ? { ticket: completedTicket, username: user, months: selectedPlan.months, expires_at: data.expires_at } : null);
       if (publicMode && completedTicket && notifiedTicket.current !== completedTicket) {
         notifiedTicket.current = completedTicket;
         document.title = data.status === "succeeded" ? "订单已付款 · XGift" : "付款链接已就绪 · XGift";

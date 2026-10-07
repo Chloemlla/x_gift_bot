@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -219,7 +220,7 @@ func TestDelayedLinkPollWaitsForVerificationInsteadOfFailingWhenBusy(t *testing.
 	public, _ := json.Marshal(map[string]any{"order": order})
 	s.vault.Put("checkout-creation:active", active)
 	s.vault.Put("public-checkout:1234", public)
-	s.linkQueue.jobs = []*publicLinkJob{{id: "ticket", owner: "owner", state: "done", code: 200, finished: time.Now().Add(-20 * time.Second), request: manualLinkRequest{Username: "holder", Months: 3}, result: []byte(`{"checkout_url":"old"}`)}}
+	s.linkQueue.jobs = []*publicLinkJob{{id: "ticket", owner: "owner", state: "done", code: 200, finished: time.Now().Add(-20 * time.Second), request: manualLinkRequest{Username: "holder", Months: 3}, result: []byte(`{"checkout_url":"old","expires_at":` + strconv.FormatInt(created+180, 10) + `}`)}}
 	s.work <- struct{}{}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.SetPathValue("ticket", "ticket")
@@ -501,5 +502,39 @@ func TestPublicQueueRestoreSkipsInvalidTicketsInsteadOfFailing(t *testing.T) {
 	}
 	if len(restarted.linkQueue.jobs) != 1 || restarted.linkQueue.jobs[0].request.Months != 12 {
 		t.Fatal("12-month ticket lost or invalid ticket kept", len(restarted.linkQueue.jobs))
+	}
+}
+
+func TestFinishedTicketsAreRecoveredOnlyDuringTheirPaymentWindow(t *testing.T) {
+	s := &server{}
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "first", Months: 3}, "owner")
+	job := s.linkQueue.jobs[0]
+	job.state, job.code, job.finished = "done", 200, time.Now().Add(-time.Minute)
+	current := func() int {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.AddCookie(&http.Cookie{Name: "__Host-xgift-link", Value: "owner"})
+		w := httptest.NewRecorder()
+		s.currentPublicLinkQueue(w, r)
+		return w.Code
+	}
+	job.result = []byte(`{"checkout_url":"https://checkout.stripe.com/c/pay/cs_test_x","expires_at":` + strconv.FormatInt(time.Now().Add(time.Minute).Unix(), 10) + `}`)
+	if current() != 200 {
+		t.Fatal("live link not recoverable")
+	}
+	job.result = []byte(`{"checkout_url":"https://checkout.stripe.com/c/pay/cs_test_x","expires_at":` + strconv.FormatInt(time.Now().Add(-time.Second).Unix(), 10) + `}`)
+	if current() != 404 {
+		t.Fatal("expired link replayed")
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.SetPathValue("ticket", job.id)
+	r.AddCookie(&http.Cookie{Name: "__Host-xgift-link", Value: "owner"})
+	w := httptest.NewRecorder()
+	s.publicLinkQueueStatus(w, r)
+	if w.Code != http.StatusGone {
+		t.Fatal("expired ticket not reported as finished", w.Code)
+	}
+	job.code, job.result = 409, []byte(`{"message":"declined"}`)
+	if current() != 404 {
+		t.Fatal("failure replayed on revisit")
 	}
 }

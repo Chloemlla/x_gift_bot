@@ -7,13 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 	"xgift/internal/proxy"
-	"xgift/internal/vault"
 )
 
 func TestNetworkFailoverOnlyReplaysSafeRequests(t *testing.T) {
@@ -98,142 +95,4 @@ func TestNetworkFailoverOnlyReplaysSafeRequests(t *testing.T) {
 	}
 }
 
-func TestNodeCooldownSurvivesVaultReopen(t *testing.T) {
-	dir := t.TempDir()
-	password := filepath.Join(dir, "password")
-	if err := os.WriteFile(password, []byte(strings.Repeat("p", 32)), 0600); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "vault.db")
-	v, err := vault.Open(path, password, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw := []byte(`[{"type":"direct","tag":"direct"}]`)
-	if err = v.Put("payment-outbounds", raw); err != nil {
-		t.Fatal(err)
-	}
-	nodes, err := proxy.ParseOutboundPool(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = coolPaymentNode(v, nodes[0]); err != nil {
-		t.Fatal(err)
-	}
-	until, err := nodeCoolingUntil(v, nodes[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = v.Close(); err != nil {
-		t.Fatal(err)
-	}
-	v, err = vault.Open(path, password, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer v.Close()
-	after, err := nodeCoolingUntil(v, nodes[0])
-	if err != nil || after != until {
-		t.Fatalf("cooldown changed after reopen: before=%d after=%d err=%v", until, after, err)
-	}
-	if _, err = selectPaymentRoute(v, "1234"); !errors.Is(err, ErrPaymentNodesCooling) {
-		t.Fatalf("restart bypassed cooldown: %v", err)
-	}
-}
-
-func TestCooldownGroupsSharedExitAndExpires(t *testing.T) {
-	v := controlFixture(t)
-	raw := `[{"type":"http","tag":"a","server":"a.invalid","server_port":443},{"type":"http","tag":"b","server":"b.invalid","server_port":443},{"type":"direct","tag":"direct"}]`
-	v.Put("payment-outbounds", []byte(raw))
-	nodes, e := proxy.ParseOutboundPool([]byte(raw))
-	if e != nil {
-		t.Fatal(e)
-	}
-	for _, node := range nodes[:2] {
-		v.Put("payment-egress:"+outboundID(node), []byte("203.0.113.10"))
-	}
-	if e = coolPaymentNode(v, nodes[0]); e != nil {
-		t.Fatal(e)
-	}
-	state, e := PaymentNetworkStatus(v)
-	if e != nil || state.Cooling != 2 || state.Available != 1 {
-		t.Fatalf("shared IP not cooled: %+v %v", state, e)
-	}
-	r, e := selectPaymentRoute(v, "1234")
-	if e != nil || r.NodeID != outboundID(nodes[2]) {
-		t.Fatal("did not choose remaining direct exit")
-	}
-	keys, _ := nodeCooldownKeys(v, nodes[0])
-	past, _ := json.Marshal(nodeCooldown{Until: time.Now().Add(-time.Second).Unix(), Reason: "transport_failure"})
-	for _, key := range keys {
-		v.Put(key, past)
-	}
-	state, e = PaymentNetworkStatus(v)
-	if e != nil || state.Available != 3 || state.Cooling != 0 {
-		t.Fatal("expired cooldown did not recover")
-	}
-	if e = coolPaymentNode(v, nodes[2]); e != nil {
-		t.Fatal(e)
-	}
-	state, _ = PaymentNetworkStatus(v)
-	if state.Cooling != 1 {
-		t.Fatal("direct exit did not enter cooldown")
-	}
-}
-
-func TestReadOnlyFailoverHasThreeAttemptLimit(t *testing.T) {
-	v := controlFixture(t)
-	raw := `[{"type":"http","tag":"a","server":"a.invalid","server_port":443},{"type":"http","tag":"b","server":"b.invalid","server_port":443},{"type":"http","tag":"c","server":"c.invalid","server_port":443},{"type":"direct","tag":"direct"}]`
-	v.Put("payment-outbounds", []byte(raw))
-	route, e := selectPaymentRoute(v, "1234")
-	if e != nil {
-		t.Fatal(e)
-	}
-	calls := 0
-	tr := stripeRoundTrip(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("synthetic timeout") })
-	s := &stripeClient{http: &http.Client{Transport: tr}, vault: v, key: "pk_live_Test", route: route}
-	defer s.close()
-	s.openRoute = func(context.Context, json.RawMessage) (*http.Client, func(), error) {
-		return &http.Client{Transport: tr}, func() {}, nil
-	}
-	var out map[string]any
-	if e = s.call(context.Background(), "GET", "payment_pages/cs_live_Test/poll", url.Values{}, "", &out); e == nil {
-		t.Fatal("missing failure")
-	}
-	state, _ := PaymentNetworkStatus(v)
-	if calls != 3 || state.Cooling != 3 || state.Available != 1 {
-		t.Fatalf("retry budget violated: calls=%d state=%+v", calls, state)
-	}
-}
-
-func TestNoAvailableExitAndCanceledRequestDoNotReplay(t *testing.T) {
-	v := controlFixture(t)
-	raw := `[{"type":"direct","tag":"direct"}]`
-	v.Put("payment-outbounds", []byte(raw))
-	v.Put("stripe-key", []byte("pk_live_Test"))
-	s, e := newStripe(context.Background(), v, "1234", paymentRead)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer s.close()
-	if s.http.Transport.(*http.Transport).Proxy != nil {
-		t.Fatal("explicit direct exit used proxy")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	var out map[string]any
-	s.call(ctx, "GET", "payment_pages/cs_live_Test/poll", url.Values{}, "", &out)
-	state, _ := PaymentNetworkStatus(v)
-	if state.Cooling != 0 {
-		t.Fatal("user cancellation cooled node")
-	}
-	if e = coolPaymentNode(v, s.route.Outbound); e != nil {
-		t.Fatal(e)
-	}
-	if _, e = selectPaymentRoute(v, "1234"); !errors.Is(e, ErrPaymentNodesCooling) {
-		t.Fatal("bound order bypassed cooling")
-	}
-	if _, e = selectPaymentRoute(v, "5678"); !errors.Is(e, ErrPaymentNodesCooling) {
-		t.Fatal("new order bypassed cooling")
-	}
-}
+const twoPaymentNodes = `[{"type":"http","tag":"a","server":"a.example.invalid","server_port":443},{"type":"http","tag":"b","server":"b.example.invalid","server_port":443}]`

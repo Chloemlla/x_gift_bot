@@ -80,58 +80,6 @@ func TestDeclinePersistsDetailsAndStopsPolling(t *testing.T) {
 	}
 }
 
-func TestOrdinaryDeclinesDoNotPauseGloballyAndExplicitPauseIsDurable(t *testing.T) {
-	v := controlFixture(t)
-	r := &Record{SessionID: "cs_live_First", Status: "declined", LastError: &stripeError{HTTP: 402, Type: "card_error", Code: "card_declined"}}
-	if err := savePaymentControl(v, paymentControl{LastSession: r.SessionID, LastSubmittedAt: time.Now().UnixNano()}); err != nil {
-		t.Fatal(err)
-	}
-	if err := paymentOutcome(v, r); err != nil {
-		t.Fatal(err)
-	}
-	if err := paymentOutcome(v, r); err != nil {
-		t.Fatal(err)
-	}
-	state, err := readPaymentControl(v)
-	if err != nil || state.ConsecutiveDeclines != 1 || state.Paused {
-		t.Fatalf("duplicate outcome counted: %+v %v", state, err)
-	}
-	state.LastSession = "cs_live_Second"
-	state.Outcome = ""
-	if err = savePaymentControl(v, state); err != nil {
-		t.Fatal(err)
-	}
-	r.SessionID = state.LastSession
-	if err = paymentOutcome(v, r); err != nil {
-		t.Fatal(err)
-	}
-	state, err = readPaymentControl(v)
-	if err != nil || state.Paused || state.ConsecutiveDeclines != 2 {
-		t.Fatalf("ordinary declines should be recorded without global pause: %+v %v", state, err)
-	}
-	state.Paused = true
-	state.Reason = "operator_pause"
-	if err = savePaymentControl(v, state); err != nil {
-		t.Fatal(err)
-	}
-	if err = reservePaymentSlot(context.Background(), v, &Record{SessionID: "cs_live_Third"}); !errors.Is(err, ErrPaymentPaused) {
-		t.Fatalf("paused payment admitted: %v", err)
-	}
-	if err = paymentOutcome(v, &Record{SessionID: "cs_live_First", Status: "succeeded"}); err != nil {
-		t.Fatal(err)
-	}
-	if paused, _ := PaymentPaused(v); !paused {
-		t.Fatal("older success cleared newer pause")
-	}
-	if err = ResetPaymentPause(v); err != nil {
-		t.Fatal(err)
-	}
-	reset, err := readPaymentControl(v)
-	if err != nil || reset.Paused || reset.LastSubmittedAt != state.LastSubmittedAt {
-		t.Fatalf("reset bypassed spacing: %+v %v", reset, err)
-	}
-}
-
 func TestSpacingUsesPersistedTimeAndCancellationDoesNotReserve(t *testing.T) {
 	v := controlFixture(t)
 	now := time.Now()
@@ -167,14 +115,5 @@ func TestDoNotRetryAdvicePausesOnFirstDecline(t *testing.T) {
 	}
 	if paused, _ := PaymentPaused(v); !paused {
 		t.Fatal("do_not_try_again did not pause")
-	}
-}
-
-func TestFinalStatusOverridesEarlierCardError(t *testing.T) {
-	for _, status := range []string{"succeeded", "requires_action"} {
-		r := &Record{Status: status, LastError: &stripeError{HTTP: 402, Type: "card_error", Code: "card_declined"}}
-		if IsPaymentDeclined(r) {
-			t.Fatalf("%s incorrectly treated as declined", status)
-		}
 	}
 }

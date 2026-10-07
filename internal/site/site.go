@@ -238,6 +238,7 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/redeem", s.human("redeem", s.redeem))
 	mux.HandleFunc("GET /api/manual-link/plans", s.publicLinkPlans)
 	mux.HandleFunc("POST /api/manual-link", s.human("manual_link", s.publicLink))
+	mux.HandleFunc("GET /api/manual-link/queue", s.publicLinkQueueSummary)
 	mux.HandleFunc("GET /api/manual-link/queue/current", s.currentPublicLinkQueue)
 	mux.HandleFunc("POST /api/manual-link/queue/{ticket}/leave", s.leavePublicLinkQueue)
 	mux.HandleFunc("GET /api/manual-link/queue/{ticket}", s.publicLinkQueueStatus)

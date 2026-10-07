@@ -110,8 +110,23 @@ func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
 		w.Write(job.result)
 		return
 	}
+	position, estimate := q.estimate(job, time.Now())
+	seconds := roundWait(estimate)
+	waitText := fmt.Sprintf("%d 秒", seconds)
+	if seconds >= 60 {
+		waitText = fmt.Sprintf("%d 分钟", (seconds+59)/60)
+	}
+	msg := fmt.Sprintf("前方还有 %d 人，预计约 %s后生成链接。请保持页面打开。", position-1, waitText)
+	if job.state == "processing" {
+		msg = fmt.Sprintf("正在生成付款链接，预计还需约 %s。", waitText)
+	}
+	reply(w, http.StatusAccepted, map[string]any{"ticket": job.id, "status": job.state, "position": position, "ahead": position - 1, "estimated_wait_seconds": seconds, "message": msg})
+}
+
+// estimate walks the queue up to job; a nil job estimates a newcomer joining
+// at the end. Caller holds the queue mutex.
+func (q *publicLinkQueue) estimate(job *publicLinkJob, now time.Time) (int, time.Duration) {
 	position := 0
-	now := time.Now()
 	estimate := q.blockedUntil.Sub(now)
 	if estimate < 0 {
 		estimate = 0
@@ -120,7 +135,7 @@ func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
 	if average < 20*time.Second {
 		average = 20 * time.Second
 	}
-	ownWindow := q.windowUser != "" && job.request.Username == q.windowUser
+	ownWindow := job != nil && q.windowUser != "" && job.request.Username == q.windowUser
 	if ownWindow {
 		estimate = 0
 	}
@@ -146,19 +161,27 @@ func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
 			estimate += remaining
 		}
 		if j == job {
-			break
+			return position, estimate
 		}
 	}
-	seconds := int((estimate+5*time.Second-1)/(5*time.Second)) * 5
-	waitText := fmt.Sprintf("%d 秒", seconds)
-	if seconds >= 60 {
-		waitText = fmt.Sprintf("%d 分钟", (seconds+59)/60)
+	if position > 0 {
+		estimate += checkout.PublicLinkTTL
 	}
-	msg := fmt.Sprintf("前方还有 %d 人，预计约 %s后生成链接。请保持页面打开。", position-1, waitText)
-	if job.state == "processing" {
-		msg = fmt.Sprintf("正在生成付款链接，预计还需约 %s。", waitText)
-	}
-	reply(w, http.StatusAccepted, map[string]any{"ticket": job.id, "status": job.state, "position": position, "ahead": position - 1, "estimated_wait_seconds": seconds, "message": msg})
+	return position + 1, estimate + average
+}
+
+func roundWait(d time.Duration) int { return int((d+5*time.Second-1)/(5*time.Second)) * 5 }
+
+// publicLinkQueueSummary is a read-only view for the form before joining.
+func (s *server) publicLinkQueueSummary(w http.ResponseWriter, r *http.Request) {
+	q := &s.linkQueue
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	now := time.Now()
+	s.refreshPublicLinkWait(now)
+	q.prune(now)
+	position, estimate := q.estimate(nil, now)
+	reply(w, 200, map[string]int{"waiting": position - 1, "estimated_wait_seconds": roundWait(estimate)})
 }
 
 func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {

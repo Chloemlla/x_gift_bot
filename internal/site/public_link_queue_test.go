@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"xgift/internal/checkout"
 )
 
 func TestPublicQueueFIFOOwnershipDeduplicationAndRateWait(t *testing.T) {
@@ -536,5 +537,29 @@ func TestFinishedTicketsAreRecoveredOnlyDuringTheirPaymentWindow(t *testing.T) {
 	job.code, job.result = 409, []byte(`{"message":"declined"}`)
 	if current() != 404 {
 		t.Fatal("failure replayed on revisit")
+	}
+}
+
+func TestQueueSummaryIsReadOnlyAndCountsWaitingUsers(t *testing.T) {
+	s := &server{}
+	summary := func() (waiting, seconds int) {
+		w := httptest.NewRecorder()
+		s.publicLinkQueueSummary(w, httptest.NewRequest("GET", "/", nil))
+		var got struct {
+			Waiting int `json:"waiting"`
+			Wait    int `json:"estimated_wait_seconds"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &got)
+		return got.Waiting, got.Wait
+	}
+	if n, wait := summary(); n != 0 || wait <= 0 {
+		t.Fatal("empty queue", n, wait)
+	}
+	for _, user := range []string{"first", "second"} {
+		s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: user, Months: 3}, "owner-"+user)
+	}
+	n, wait := summary()
+	if n != 2 || wait < int(2*checkout.PublicLinkTTL/time.Second) || len(s.linkQueue.jobs) != 2 {
+		t.Fatal("summary wrong or mutated queue", n, wait)
 	}
 }

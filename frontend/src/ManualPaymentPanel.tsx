@@ -26,6 +26,13 @@ function savedQueue(): QueueSession | null {
     return value;
   } catch { return null; }
 }
+export function formatWait(seconds: number) {
+  if (seconds < 60) return "1 分钟内";
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `约 ${minutes} 分钟`;
+  const rest = minutes % 60;
+  return `约 ${Math.floor(minutes / 60)} 小时${rest ? ` ${rest} 分钟` : ""}`;
+}
 function price(p: Plan) { return `${p.currency} ${(p.amount / 100).toFixed(2)}`; }
 export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?: boolean; onShow?: () => void }) {
   const endpoint = publicMode ? "/api/manual-link" : "/api/admin/manual-link";
@@ -52,6 +59,15 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
   const notifiedTicket = useRef<string | null>(null);
   const mounted = useRef(true);
   const [, setTick] = useState(0);
+  const [queueSummary, setQueueSummary] = useState<{ waiting: number; estimated_wait_seconds: number } | null>(null);
+  const formVisible = publicMode && !busy && !result;
+  useEffect(() => {
+    if (!formVisible) return;
+    const load = () => { if (document.visibilityState === "visible") void request<{ waiting: number; estimated_wait_seconds: number }>(endpoint + "/queue").then(({ ok, data }) => setQueueSummary(ok && Number.isInteger(data.waiting) ? data : null)).catch(() => setQueueSummary(null)); };
+    load();
+    const timer = setInterval(load, 30000);
+    return () => clearInterval(timer);
+  }, [formVisible]);
   useEffect(() => {
     if (!result?.expires_at || !result.checkout_url) return;
     const timer = setInterval(() => setTick((t) => t + 1), 1000);
@@ -203,11 +219,15 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
           ))}
         </Box>
       )}
+      {formVisible && queueSummary && <Alert severity={queueSummary.waiting >= 10 ? "warning" : "info"} icon={false} sx={{ mb: 2 }} role="status">
+        {queueSummary.waiting > 0 ? <>当前排队 <strong>{queueSummary.waiting}</strong> 人，现在提交预计{formatWait(queueSummary.estimated_wait_seconds)}后轮到你。</> : <>当前无人排队，提交后预计{formatWait(queueSummary.estimated_wait_seconds)}生成链接。</>}
+        {queueSummary.waiting >= 10 && " 等待期间需保持本页打开，请确认有空再提交。"}
+      </Alert>}
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} aria-labelledby="confirm-payment-title" aria-describedby="confirm-payment-description" fullWidth maxWidth="xs">
         <DialogTitle id="confirm-payment-title">确认生成付款链接？</DialogTitle>
         <DialogContent>
           <DialogContentText id="confirm-payment-description" color="text.primary">如果不想要付款，请不要点击生成链接。</DialogContentText>
-          <DialogContentText sx={{ mt: 2 }}>提交后需要排队。轮到你时付款链接只保留 3 分钟，超时作废并需重新排队，请提前准备好银行卡。付款成功后 Premium 会直接赠送到 @{cleanUser || "填写的账号"}，不会生成兑换码。刷新页面会保留排队；关闭或离开网站后会自动退出排队。</DialogContentText>
+          <DialogContentText sx={{ mt: 2 }}>提交后需要排队{queueSummary?.waiting ? `（当前 ${queueSummary.waiting} 人，预计${formatWait(queueSummary.estimated_wait_seconds)}）` : ""}。轮到你时付款链接只保留 3 分钟，超时作废并需重新排队，请提前准备好银行卡。付款成功后 Premium 会直接赠送到 @{cleanUser || "填写的账号"}，不会生成兑换码。刷新页面会保留排队；关闭或离开网站后会自动退出排队。</DialogContentText>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2.5, gap: 1 }}>
           <Button onClick={() => setConfirmOpen(false)}>暂不生成</Button>

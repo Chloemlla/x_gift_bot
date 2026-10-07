@@ -9,6 +9,7 @@ import { adminApi } from "./adminApi";
 import { request } from "./shared";
 import { readQueueWithReconnect } from "./queueReconnect";
 import { isPaymentResult } from "./manualPaymentResult";
+import { PublicOrderLookup } from "./PublicOrderLookup";
 
 type Plan = { months: number; amount: number; currency: string };
 type Result = Plan & { username: string; status: string; checkout_url?: string; expires_at?: number; message?: string; needs_unpaid_verification?: boolean; ticket?: string; position?: number; ahead?: number; estimated_wait_seconds?: number };
@@ -248,6 +249,7 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
           </TextField>
           <Button type="submit" variant="contained" startIcon={<LinkRounded />} disabled={busy || !valid || !plans.length || (needsVerification && !verified)} sx={{ minHeight: 56, px: 3, whiteSpace: "nowrap", gridColumn: { sm: "1 / -1", md: publicMode ? "1 / -1" : "auto" }, justifySelf: { xs: "stretch", sm: "end", md: publicMode ? "end" : "stretch" } }}>{busy ? "正在生成…" : "生成付款链接"}</Button>
         </Box>
+        {publicMode && <PublicOrderLookup username={cleanUser} />}
         {needsVerification && <FormControlLabel control={<Checkbox checked={verified} disabled={busy} onChange={(e) => setVerified(e.target.checked)} />} label="我已核实原订单未付款，也没有正在处理的扣款或银行验证，允许生成新链接" />}
       </Box>}
       {publicMode && busy && <PaymentQueueCard reconnecting={reconnecting} onNotify={() => void enableNotification()} notifyReady={notifyReady} onCancel={queueProgress.status === "submitting" ? undefined : () => void cancelQueue()} cancelling={cancelling} progress={queueProgress} username={cleanUser} months={months} price={plans.find((p) => p.months === months) ? price(plans.find((p) => p.months === months)!) : ""} />}
@@ -285,6 +287,7 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
               <Box component="summary" sx={{ cursor: "pointer", color: "text.secondary", fontSize: 13, py: 1.5, minHeight: 44 }}>查看完整链接</Box>
               <TextField label="Stripe 付款链接" value={result.checkout_url} slotProps={{ input: { readOnly: true } }} onFocus={(e) => e.target.select()} />
             </Box>
+            <PublicOrderLookup username={result.username} />
           </>}
           {result.status === "succeeded" && (
             <Box sx={{ mb: 2 }}>

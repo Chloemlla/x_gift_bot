@@ -239,6 +239,7 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/manual-link/plans", s.publicLinkPlans)
 	mux.HandleFunc("POST /api/manual-link", s.human("manual_link", s.publicLink))
 	mux.HandleFunc("GET /api/manual-link/queue", s.publicLinkQueueSummary)
+	mux.HandleFunc("GET /api/manual-link/order", s.publicOrderStatus)
 	mux.HandleFunc("GET /api/manual-link/queue/current", s.currentPublicLinkQueue)
 	mux.HandleFunc("POST /api/manual-link/queue/{ticket}/leave", s.leavePublicLinkQueue)
 	mux.HandleFunc("GET /api/manual-link/queue/{ticket}", s.publicLinkQueueStatus)
@@ -449,6 +450,9 @@ func (s *server) middleware(next http.Handler) http.Handler {
 			} else if r.URL.Path == "/api/manual-link" {
 				max = 4
 				bucket = "manual-link:"
+			} else if r.URL.Path == "/api/manual-link/order" {
+				max = 10
+				bucket = "order:"
 			} else if r.URL.Path == "/api/check" {
 				max = 8
 				bucket = "check:"

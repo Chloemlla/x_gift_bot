@@ -3,6 +3,7 @@ package site
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -165,4 +166,20 @@ func checkFixture(t *testing.T) *server {
 	}
 	t.Cleanup(func() { v.Close() })
 	return &server{vault: v, origin: "https://example.test", work: make(chan struct{}, 1), checks: make(chan struct{}, 4), limits: map[string]limit{}}
+}
+
+func TestRestoreKeepsV1QueueOrder(t *testing.T) {
+	s := checkFixture(t)
+	seen := time.Now().UnixMilli()
+	v1 := fmt.Sprintf(`{"version":1,"jobs":[{"id":"a","owner":"%s","state":"queued","request":{"username":"alice","months":6},"seen":%d},{"id":"b","owner":"%s","state":"processing","request":{"username":"bob","months":3},"seen":%d}]}`, strings.Repeat("a", 64), seen, strings.Repeat("b", 64), seen)
+	if err := s.vault.Put("public-link-queue:v1", []byte(v1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.restorePublicLinkQueue(); err != nil {
+		t.Fatal(err)
+	}
+	jobs := s.linkQueue.jobs
+	if len(jobs) != 2 || jobs[0].ID != "a" || jobs[1].ID != "b" || jobs[1].State != "queued" || jobs[1].Request.Months != 3 {
+		t.Fatalf("v1 queue not carried over: %+v", jobs)
+	}
 }

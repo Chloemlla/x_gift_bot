@@ -742,6 +742,7 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	}()
 	reply(w, 202, map[string]any{"status": "processing", "progress": 20, "months": c.Months, "message": "正在处理，请保留本页并等待结果。"})
 }
+
 // redeemMessage explains an unfinished redemption; payment state wins over errors.
 func redeemMessage(record *checkout.Record, err error) string {
 	switch {

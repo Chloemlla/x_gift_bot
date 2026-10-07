@@ -40,16 +40,21 @@ func (s *server) savePublicQueueOrReply(w http.ResponseWriter) bool {
 // The queue is soft state: a damaged snapshot or ticket is dropped, never fatal.
 func (s *server) restorePublicLinkQueue() error {
 	b, err := s.vault.Get(publicQueueKey)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read public queue: %w", err)
-	}
-	defer clear(b)
 	var saved []*publicLinkJob
-	if err = json.Unmarshal(b, &saved); err != nil {
-		log.Printf("public queue snapshot unreadable; starting empty")
+	if errors.Is(err, sql.ErrNoRows) {
+		if saved, err = s.readV1Queue(); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return fmt.Errorf("read public queue: %w", err)
+	} else {
+		defer clear(b)
+		if err = json.Unmarshal(b, &saved); err != nil {
+			log.Printf("public queue snapshot unreadable; starting empty")
+		}
+	}
+	if saved == nil {
+		return nil
 	}
 	now := time.Now()
 	cat, catalogErr := checkout.ReadCatalog(s.vault)
@@ -80,4 +85,48 @@ func (s *server) restorePublicLinkQueue() error {
 func validUsername(s string) bool {
 	user, ok := checkout.NormalizeUsername(s)
 	return ok && user == s
+}
+
+// readV1Queue carries the queue across the v1→v2 deploy so waiting users keep
+// their places. Delete once production has started with v2.
+func (s *server) readV1Queue() ([]*publicLinkJob, error) {
+	b, err := s.vault.Get("public-link-queue:v1")
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read v1 public queue: %w", err)
+	}
+	defer clear(b)
+	var v1 struct {
+		Jobs []struct {
+			ID          string            `json:"id"`
+			Owner       string            `json:"owner"`
+			State       string            `json:"state"`
+			Request     manualLinkRequest `json:"request"`
+			Left        int64             `json:"left"`
+			Seen        int64             `json:"seen"`
+			Finished    int64             `json:"finished"`
+			NextAttempt int64             `json:"next_attempt"`
+			Started     int64             `json:"started"`
+			Cancelled   bool              `json:"cancelled"`
+			Code        int               `json:"code"`
+			Result      []byte            `json:"result"`
+		} `json:"jobs"`
+	}
+	if err = json.Unmarshal(b, &v1); err != nil {
+		log.Printf("v1 public queue snapshot unreadable; starting empty")
+		return nil, nil
+	}
+	ms := func(v int64) time.Time {
+		if v == 0 {
+			return time.Time{}
+		}
+		return time.UnixMilli(v)
+	}
+	jobs := make([]*publicLinkJob, 0, len(v1.Jobs))
+	for _, j := range v1.Jobs {
+		jobs = append(jobs, &publicLinkJob{ID: j.ID, Owner: j.Owner, State: j.State, Request: j.Request, Seen: ms(j.Seen), Left: ms(j.Left), Started: ms(j.Started), Finished: ms(j.Finished), NextAttempt: ms(j.NextAttempt), Cancelled: j.Cancelled, Code: j.Code, Result: j.Result})
+	}
+	return jobs, nil
 }

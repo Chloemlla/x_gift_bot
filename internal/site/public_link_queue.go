@@ -221,7 +221,7 @@ func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	q.mu.Unlock()
-	message(w, 404, "排队记录已失效，请重新提交；系统会先核对原订单。")
+	message(w, 404, "排队记录已失效（离开本页或在后台停留过久会被移出队列）。请重新提交；系统会先核对原订单，不会重复扣款。")
 }
 
 // liveLink reports a delivered checkout link still inside its payment window.

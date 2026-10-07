@@ -56,7 +56,10 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
   const [cancelling, setCancelling] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
-  const [notifyReady, setNotifyReady] = useState(false);
+  const canNotify = typeof Notification !== "undefined" && Notification.permission !== "denied";
+  const [notifyReady, setNotifyReady] = useState(() => typeof Notification !== "undefined" && Notification.permission === "granted");
+  const errorAlert = useRef<HTMLDivElement>(null);
+  const baseTitle = useRef(document.title);
   const notifiedTicket = useRef<string | null>(null);
   const mounted = useRef(true);
   const [, setTick] = useState(0);
@@ -77,6 +80,17 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
   const secondsLeft = result?.expires_at ? Math.max(0, Math.floor(result.expires_at - Date.now() / 1000)) : null;
   const expired = secondsLeft === 0;
   useEffect(() => { if (publicMode && expired) saveQueue(null); }, [publicMode, expired]);
+  // The tab title is what people see while the page is in the background.
+  useEffect(() => {
+    if (!publicMode) return;
+    let title = baseTitle.current;
+    if (result?.checkout_url && secondsLeft !== null) title = secondsLeft > 0 ? `${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, "0")} 内请付款 · XGift` : "付款链接已过期 · XGift";
+    else if (result?.status === "succeeded") title = "订单已付款 · XGift";
+    else if (busy && queueProgress.status === "processing") title = "即将生成付款链接 · XGift";
+    else if (busy && queueProgress.status === "queued") title = `排队中 · 前方 ${queueProgress.ahead ?? "—"} 人 · XGift`;
+    document.title = title;
+  });
+  useEffect(() => () => { document.title = baseTitle.current; }, []);
   const cleanUser = username.trim().replace(/^@/, "").toLowerCase();
   const valid = /^[a-z0-9_]{1,15}$/.test(cleanUser);
   async function loadPlans(recover = false) {
@@ -134,7 +148,11 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
     finally { setCancelling(false); }
   }
   useEffect(() => { if (result && publicMode) resultHeading.current?.focus({ preventScroll: true }); }, [result, publicMode]);
-  useEffect(() => { if (!busy && error) usernameInput.current?.focus({ preventScroll: true }); }, [busy, error]);
+  useEffect(() => {
+    if (busy || !error) return;
+    usernameInput.current?.focus({ preventScroll: true });
+    if (publicMode) errorAlert.current?.scrollIntoView({ block: "nearest" });
+  }, [busy, error]);
   function reset() { if (publicMode) saveQueue(null); setResult(null); setError(""); setNotice(""); setNeedsVerification(false); setVerified(false); }
   async function enableNotification() {
     if (!("Notification" in window)) { setNotice("此浏览器不支持系统通知，请保持页面打开，链接生成后页面标题也会提醒。"); return; }
@@ -178,7 +196,7 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
       if (publicMode) saveQueue(completedTicket && data.checkout_url && data.expires_at ? { ticket: completedTicket, username: user, months: selectedPlan.months, expires_at: data.expires_at } : null);
       if (publicMode && completedTicket && notifiedTicket.current !== completedTicket) {
         notifiedTicket.current = completedTicket;
-        document.title = data.status === "succeeded" ? "订单已付款 · XGift" : "付款链接已就绪 · XGift";
+        navigator.vibrate?.([200, 100, 200]);
         if ("Notification" in window && Notification.permission === "granted") {
           void (async () => { try {
             const title = data.status === "succeeded" ? "订单已付款" : "付款链接已就绪";
@@ -252,9 +270,9 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
         {publicMode && <PublicOrderLookup username={cleanUser} />}
         {needsVerification && <FormControlLabel control={<Checkbox checked={verified} disabled={busy} onChange={(e) => setVerified(e.target.checked)} />} label="我已核实原订单未付款，也没有正在处理的扣款或银行验证，允许生成新链接" />}
       </Box>}
-      {publicMode && busy && <PaymentQueueCard reconnecting={reconnecting} onNotify={() => void enableNotification()} notifyReady={notifyReady} onCancel={queueProgress.status === "submitting" ? undefined : () => void cancelQueue()} cancelling={cancelling} progress={queueProgress} username={cleanUser} months={months} price={plans.find((p) => p.months === months) ? price(plans.find((p) => p.months === months)!) : ""} />}
+      {publicMode && busy && <PaymentQueueCard reconnecting={reconnecting} onNotify={canNotify ? () => void enableNotification() : undefined} notifyReady={notifyReady} onCancel={queueProgress.status === "submitting" ? undefined : () => void cancelQueue()} cancelling={cancelling} progress={queueProgress} username={cleanUser} months={months} price={plans.find((p) => p.months === months) ? price(plans.find((p) => p.months === months)!) : ""} />}
       {!publicMode && busy && <LinearProgress aria-label="正在核对账号并生成付款链接" sx={{ mt: 1 }} />}
-      {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
+      {error && <Alert ref={errorAlert} severity="error" sx={{ mt: 2, scrollMarginTop: 24 }}>{error}</Alert>}
       {publicMode && result && <Card variant="outlined" sx={{ borderRadius: 2, bgcolor: "background.paper" }}>
         <CardContent sx={{ p: { xs: 2.5, sm: 3 }, "&:last-child": { pb: { xs: 2.5, sm: 3 } } }}>
           <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 3 }}>

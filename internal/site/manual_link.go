@@ -173,9 +173,9 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 				reply(w, 409, map[string]any{"message": "原付款链接已失效，请核实原订单未付款后再重新生成。", "needs_unpaid_verification": true})
 			}
 		case errors.Is(err, checkout.ErrNotEligible):
-			message(w, 409, "该账号目前无法接收 Premium 赠送。")
+			message(w, 409, "X 目前不允许 @"+q.Username+" 接收 Premium 赠送，本次没有建单或扣款。可先用本页「检测赠送资格」确认，或改为其他账号。")
 		case errors.Is(err, checkout.ErrUserNotFound):
-			message(w, 404, "未找到该 X 用户名。")
+			message(w, 404, "未找到 X 用户名 @"+q.Username+"。请填写个人主页 @ 后面的用户名（不是显示名称），核对拼写后重新提交；本次没有建单或扣款。")
 		case errors.Is(err, checkout.ErrManualLinkConflict):
 			message(w, 409, "该客户已有其他套餐或账号信息的订单，请先通过客户查询核实原订单。")
 		default:

@@ -26,3 +26,11 @@ test('the normal queue keeps its ticket after more than a minute of network erro
  const result=await readQueueWithReconnect(async()=>{calls++;if(calls<5)throw new TypeError('Failed to fetch');return {ok:true,status:202,data:{ticket:'original'}}},new AbortController().signal,async()=>{elapsed+=30000},()=>elapsed,{onRetry:()=>{retries++}});
  assert.equal(result.data.ticket,'original');assert.equal(retries,4);assert.equal(elapsed,120000);
 });
+
+test('stored business failures are final, not reconnect loops',async()=>{
+ for(const status of [409,422,500]){
+  let calls=0;
+  const result=await readQueueWithReconnect(async()=>{calls++;return {ok:false,status,data:{message:'final'}}},new AbortController().signal,async()=>{});
+  assert.equal(result.status,status);assert.equal(calls,1);
+ }
+});

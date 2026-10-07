@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"xgift/internal/checkout"
 	"xgift/internal/vault"
 )
@@ -113,6 +114,8 @@ func TestReviewSubmission(t *testing.T) {
 		}
 	})
 	t.Run("cross process lock prevents resume", func(t *testing.T) {
+		defer func(wait time.Duration) { redeemLockWait = wait }(redeemLockWait)
+		redeemLockWait = 0
 		s := resumeFixture(t, "review", "created")
 		lock, e := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
 		if e != nil {

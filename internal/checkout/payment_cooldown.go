@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	paymentNodeCooldown        = 6 * time.Hour
+	paymentNodeCooldown        = 30 * time.Minute
 	paymentNodeDeclineCooldown = 30 * time.Minute
 )
 

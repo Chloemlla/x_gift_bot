@@ -83,14 +83,13 @@ func newStripe(ctx context.Context, v *vault.Vault, recipient string, mode payme
 	}
 	var route *paymentRoute
 	var bound card
-	last4, _ := ctx.Value(paymentCardSelectionKey{}).(string)
 	switch mode {
 	case paymentPay:
-		if route, bound, e = assignPaymentRouteCard(v, recipient, false, last4); e != nil {
+		if route, bound, e = assignPaymentRoute(v, recipient, false); e != nil {
 			return nil, e
 		}
 	case paymentRetry:
-		if route, bound, e = assignPaymentRouteCard(v, recipient, true, last4); e != nil {
+		if route, bound, e = assignPaymentRoute(v, recipient, true); e != nil {
 			return nil, e
 		}
 	default:

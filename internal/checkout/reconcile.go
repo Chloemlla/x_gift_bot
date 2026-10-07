@@ -30,16 +30,22 @@ func Reconcile(ctx context.Context, v *vault.Vault, recipient string, port int) 
 	if err != nil {
 		return nil, err
 	}
-	if r.RecipientID != recipient || r.Amount != plan.Minor || r.Currency != strings.ToUpper(plan.Currency) || r.ProductID != plan.ProductID || !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(r.Username) || !sessionURL(r.URL, r.SessionID) {
+	if r.RecipientID != recipient || r.Amount != plan.Minor || r.Currency != strings.ToUpper(plan.Currency) || r.ProductID != plan.ProductID || !usernamePattern.MatchString(r.Username) || !sessionURL(r.URL, r.SessionID) {
 		return nil, errors.New("recorded order identity or price mismatch")
 	}
 	if r.Status == "succeeded" {
 		return &r, nil
 	}
-	if r.Status != "unknown" && r.Status != "submitting" && r.Status != "requires_action" && !IsPaymentDeclined(&r) {
+	if r.Status != "created" && r.Status != "unknown" && r.Status != "submitting" && r.Status != "requires_action" && !IsPaymentDeclined(&r) {
 		return &r, errors.New("order has no submitted payment to reconcile")
 	}
-	if err = verifySubmission(v, &r, plan); err != nil {
+	if !unsubmitted(&r) {
+		if err = verifySubmission(v, &r, plan); err != nil {
+			return &r, err
+		}
+	}
+	r.LinkBlocked = true
+	if err = save(v, &r); err != nil {
 		return &r, err
 	}
 	s, err := newStripe(ctx, v, r.RecipientID, paymentRead)
@@ -47,7 +53,16 @@ func Reconcile(ctx context.Context, v *vault.Vault, recipient string, port int) 
 		return &r, err
 	}
 	defer s.close()
-	status, err := s.poll(ctx, &r, plan)
+	status := "pending"
+	if unsubmitted(&r) {
+		var paid bool
+		paid, err = s.verifiedCheckoutPaid(ctx, &r, plan)
+		if paid {
+			status = "succeeded"
+		}
+	} else {
+		status, err = s.poll(ctx, &r, plan)
+	}
 	if err != nil {
 		return &r, err
 	}

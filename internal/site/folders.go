@@ -160,8 +160,8 @@ func (s *server) moveCodes(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &q) {
 		return
 	}
-	if len(q.IDs) < 1 || len(q.IDs) > 100 || (q.Folder != "" && !folderIDPattern.MatchString(q.Folder)) {
-		message(w, 400, "请选择 1–100 枚兑换码和有效的目标文件夹。")
+	if len(q.IDs) < 1 || len(q.IDs) > 1000 || (q.Folder != "" && !folderIDPattern.MatchString(q.Folder)) {
+		message(w, 400, "请选择 1–1000 枚兑换码和有效的目标文件夹。")
 		return
 	}
 	seen := map[string]bool{}

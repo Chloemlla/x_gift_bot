@@ -7,9 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
-	"syscall"
 	"time"
 	"xgift/internal/checkout"
 )
@@ -71,7 +69,7 @@ func (s *server) saveRecovery(q *recoveryBatch) error {
 	}
 	return s.vault.Put("admin-recovery:latest", b)
 }
-func recoveryView(q *recoveryBatch) any {
+func (s *server) recoveryView(q *recoveryBatch) any {
 	if q == nil {
 		return nil
 	}
@@ -81,6 +79,17 @@ func recoveryView(q *recoveryBatch) any {
 	for i := range out.Items {
 		out.Items[i].Recipient = ""
 		out.Items[i].Digest = ""
+		out.Items[i].CheckoutURL = ""
+		if q.Items[i].Recipient != "" {
+			raw, err := s.vault.Get("checkout:" + q.Items[i].Recipient)
+			if err == nil {
+				var order checkout.Record
+				if json.Unmarshal(raw, &order) == nil && order.RecipientID == q.Items[i].Recipient && order.Username == q.Items[i].Username && order.Months == q.Items[i].Months {
+					out.Items[i].CheckoutURL = checkout.CheckoutLink(&order)
+				}
+				clear(raw)
+			}
+		}
 	}
 	return out
 }
@@ -135,7 +144,7 @@ func (s *server) recoveryStatus(w http.ResponseWriter, r *http.Request) {
 		message(w, 503, "无法读取当前订单状态。")
 		return
 	}
-	reply(w, 200, map[string]any{"batch": recoveryView(q), "network": network, "cards": cards, "rotation": rotation, "paused": paused, "summary": map[string]int{"review": review, "processing": processing}})
+	reply(w, 200, map[string]any{"batch": s.recoveryView(q), "network": network, "cards": cards, "rotation": rotation, "paused": paused, "summary": map[string]int{"review": review, "processing": processing}})
 }
 func (s *server) recoveryCandidate(id string) (recoveryItem, error) {
 	item := recoveryItem{ID: id, State: "skipped"}
@@ -280,7 +289,7 @@ func (s *server) recoveryPreview(w http.ResponseWriter, r *http.Request) {
 		message(w, 503, "无法保存预览。")
 		return
 	}
-	reply(w, 200, map[string]any{"batch": recoveryView(q)})
+	reply(w, 200, map[string]any{"batch": s.recoveryView(q)})
 }
 func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -304,36 +313,19 @@ func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if q.State != "preview" {
-		reply(w, 200, map[string]any{"batch": recoveryView(q)})
+		reply(w, 200, map[string]any{"batch": s.recoveryView(q)})
 		return
 	}
-	if time.Now().Unix()-q.Created > 600 {
+	if time.Now().Unix()-q.Created > 3600 {
 		message(w, 409, "预览已过期，请重新生成。")
 		return
 	}
-	select {
-	case s.work <- struct{}{}:
-	default:
+	release, ok := s.tryLock()
+	if !ok {
 		message(w, 409, "当前有订单处理中，请稍后再试。")
 		return
 	}
 	handed := false
-	defer func() {
-		if !handed {
-			<-s.work
-		}
-	}()
-	lock, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		message(w, 503, "无法锁定付款队列。")
-		return
-	}
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lock.Close()
-		message(w, 409, "另一任务正在处理订单。")
-		return
-	}
-	release := func() { syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); lock.Close() }
 	defer func() {
 		if !handed {
 			release()
@@ -396,11 +388,10 @@ func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 	s.jobs.Add(1)
 	go func() {
 		defer s.jobs.Done()
-		defer func() { <-s.work }()
 		defer release()
 		s.runRecovery(q.ID, binding)
 	}()
-	reply(w, 202, map[string]any{"batch": recoveryView(q)})
+	reply(w, 202, map[string]any{"batch": s.recoveryView(q)})
 }
 func (s *server) recoveryStop(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -424,7 +415,7 @@ func (s *server) recoveryStop(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	reply(w, 200, map[string]any{"batch": recoveryView(q)})
+	reply(w, 200, map[string]any{"batch": s.recoveryView(q)})
 }
 func (s *server) finishRecovery(id, state, msg string) {
 	s.recoveryMu.Lock()
@@ -482,7 +473,7 @@ func (s *server) runRecovery(id, binding string) {
 		if err != nil {
 			return
 		}
-		state, detail, stop := s.recoverOneOptions(item, binding, q.Mode, q.VerifiedUnpaid)
+		state, detail, stop := s.recoverOne(item, binding, q.Mode, q.VerifiedUnpaid)
 		s.recoveryMu.Lock()
 		q, err = s.loadRecovery()
 		if err != nil || q == nil || q.ID != id {
@@ -526,10 +517,7 @@ func (s *server) runRecovery(id, binding string) {
 		}
 	}
 }
-func (s *server) recoverOne(item recoveryItem, binding string) (state, detail string, stop bool) {
-	return s.recoverOneOptions(item, binding, "pay", false)
-}
-func (s *server) recoverOneOptions(item recoveryItem, binding, mode string, verified bool) (state, detail string, stop bool) {
+func (s *server) recoverOne(item recoveryItem, binding, mode string, verified bool) (state, detail string, stop bool) {
 	if mode != "links" {
 		_, _, current, err := checkout.CardSummary(s.vault)
 		if err != nil || current != binding {

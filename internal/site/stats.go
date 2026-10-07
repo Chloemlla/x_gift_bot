@@ -102,7 +102,7 @@ func (s *server) stats(w http.ResponseWriter, r *http.Request) {
 	redeemedByDay := map[string]int{}
 	succeededByDay := map[string]int{}
 	dailyQueries := []struct {
-		sql string
+		sql  string
 		into map[string]int
 	}{
 		{"SELECT date(created,'unixepoch','localtime'),COUNT(*) FROM codes WHERE created>=? GROUP BY 1", createdByDay},

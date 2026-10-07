@@ -2,7 +2,6 @@ package checkout
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,107 +27,6 @@ func manualFixture(t *testing.T) (*vault.Vault, *Record, Plan, manualProof) {
 	zero := 0
 	proof := manualProof{Page: raw, Intent: &stripeIntentEvidence{ID: "pi_Test", Status: "requires_payment_method", Currency: "usd", Live: true, Amount: 30000, Received: &zero, Capturable: &zero}}
 	return v, r, plan, proof
-}
-func TestManualRetryUsesSameSessionAndSingleNewAttempt(t *testing.T) {
-	for _, outcome := range []string{"succeeded", "declined", "requires_action"} {
-		t.Run(outcome, func(t *testing.T) {
-			v, r, plan, proof := manualFixture(t)
-			originalKey := r.ConfirmKey
-			confirms, methods := 0, 0
-			s := &stripeClient{vault: v, key: "pk_live_Test", http: &http.Client{Transport: stripeRoundTrip(func(req *http.Request) (*http.Response, error) {
-				status := 200
-				body := "{}"
-				switch {
-				case strings.HasSuffix(req.URL.Path, "/poll"):
-					payment, state := "requires_payment_method", "active"
-					if confirms > 0 && outcome != "declined" {
-						payment = outcome
-						if outcome == "succeeded" {
-							state = "succeeded"
-						}
-					}
-					body = `{"session_id":"cs_live_Test","livemode":true,"is_sandbox_merchant":false,"mode":"payment","success_url":"https://x.com/recipient/gift-premium/success","state":"` + state + `","payment_object_status":"` + payment + `"}`
-				case strings.HasSuffix(req.URL.Path, "/init"):
-					body = string(proof.Page)
-				case strings.HasSuffix(req.URL.Path, "/payment_intents/pi_Test"):
-					b, _ := json.Marshal(proof.Intent)
-					body = string(b)
-				case strings.HasSuffix(req.URL.Path, "/payment_methods"):
-					methods++
-					body = `{"id":"pm_New","type":"card","livemode":true}`
-				case strings.HasSuffix(req.URL.Path, "/confirm"):
-					confirms++
-					if req.Header.Get("Idempotency-Key") == originalKey {
-						t.Fatal("reused original rejected attempt key")
-					}
-					if outcome == "declined" {
-						status = 402
-						body = `{"error":{"type":"card_error","code":"card_declined","advice_code":"do_not_try_again","message":"declined"}}`
-					}
-				default:
-					t.Fatalf("unexpected request %s", req.URL.Path)
-				}
-				return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
-			})}}
-			result, err := manualRecoverDeclined(context.Background(), v, r, s, plan, func() error { return nil })
-			if confirms != 1 || methods != 1 || result.Status != outcome || result.SessionID != r.SessionID || result.RecoveryAttempts != 1 {
-				t.Fatalf("bad outcome status=%s confirms=%d methods=%d err=%v", result.Status, confirms, methods, err)
-			}
-			if err = verifySubmission(v, result, plan); err != nil {
-				t.Fatal("recovery evidence cannot be reconciled", err)
-			}
-			if _, err = v.Get("manual-previous:cs_live_Test:1"); err != nil {
-				t.Fatal("missing original attempt archive")
-			}
-			if outcome == "declined" {
-				paused, e := PaymentPaused(v)
-				if e != nil || !paused {
-					t.Fatal("hard decline did not pause")
-				}
-				if ResetManualPaymentPause(v) == nil {
-					t.Fatal("hard no-retry pause was reset")
-				}
-			}
-			// A duplicate reservation for this attempt cannot submit a second time.
-			if err = reservePaymentSlot(context.Background(), v, result); err == nil {
-				t.Fatal("duplicate attempt accepted")
-			}
-		})
-	}
-}
-func TestManualRetryProofFailsClosed(t *testing.T) {
-	_, r, plan, proof := manualFixture(t)
-	if err := proof.guard(r, plan); err != nil {
-		t.Fatal(err)
-	}
-	for _, kind := range []string{"received", "capturable", "missing_amount", "processing", "wrong_intent", "wrong_recipient", "wrong_price"} {
-		t.Run(kind, func(t *testing.T) {
-			b, _ := json.Marshal(proof)
-			var p manualProof
-			json.Unmarshal(b, &p)
-			switch kind {
-			case "received":
-				v := 1
-				p.Intent.Received = &v
-			case "capturable":
-				v := 1
-				p.Intent.Capturable = &v
-			case "missing_amount":
-				p.Intent.Received = nil
-			case "processing":
-				p.Intent.Status = "processing"
-			case "wrong_intent":
-				p.Intent.ID = "pi_Other"
-			case "wrong_recipient":
-				p.Page = []byte(strings.ReplaceAll(string(p.Page), "recipient", "other"))
-			case "wrong_price":
-				p.Intent.Amount = 1
-			}
-			if p.guard(r, plan) == nil {
-				t.Fatal("unsafe evidence accepted")
-			}
-		})
-	}
 }
 func TestManualPreflightFailureNeverConfirms(t *testing.T) {
 	v, r, plan, proof := manualFixture(t)

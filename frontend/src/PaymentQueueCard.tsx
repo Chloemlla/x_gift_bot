@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Box, Button, Card, CardContent, Divider, LinearProgress, Stack, Step, StepLabel, Stepper, Typography } from "@mui/material";
+import { Alert, Box, Button, Card, CardContent, Divider, LinearProgress, Stack, Step, StepLabel, Stepper, Typography } from "@mui/material";
 import ScheduleRounded from "@mui/icons-material/ScheduleRounded";
 import LockOutlined from "@mui/icons-material/LockOutlined";
 
@@ -67,6 +67,12 @@ export function PaymentQueueCard({ progress, username, months, price, onCancel, 
           {["提交请求", "排队等待", "生成链接"].map((label) => <Step key={label}><StepLabel>{label}</StepLabel></Step>)}
         </Stepper>
 
+        {onNotify && <Button variant="outlined" fullWidth onClick={onNotify} disabled={notifyReady} sx={{ mb: 2, minHeight: 44 }}>{notifyReady ? "已开启就绪通知" : "链接就绪时通知我"}</Button>}
+        <Alert severity="warning" icon={false} sx={{ mb: 3 }}>
+          <Typography variant="body2" fontWeight={600}>轮到你后，付款链接只保留 3 分钟</Typography>
+          <Typography variant="body2" sx={{ mt: 0.5 }}>请提前准备好银行卡，超时未付款链接会作废，需要重新排队。等待时请让本页保持打开：手机切到其他应用超过约 1.5 分钟会暂停你的排队，超过 5 分钟会被移出队列。页面标题会显示排队进度和付款倒计时。</Typography>
+        </Alert>
+
         <Divider sx={{ mb: 2 }} />
         <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={0.5}>
           <Typography variant="body2" fontWeight={600} sx={{ overflowWrap: "anywhere" }}>@{username}</Typography>
@@ -74,9 +80,8 @@ export function PaymentQueueCard({ progress, username, months, price, onCancel, 
         </Stack>
         <Stack direction="row" spacing={0.75} alignItems="flex-start" sx={{ mt: 2 }}>
           <LockOutlined sx={{ fontSize: 16, color: "text.secondary", mt: "3px" }} aria-hidden="true" />
-          <Typography variant="caption" color="text.secondary">刷新或收起此区域不会退出排队；关闭或离开网站后会自动退出。生成链接不会扣款。</Typography>
+          <Typography variant="caption" color="text.secondary">刷新页面不会退出排队；关闭或离开网站后会自动退出。生成链接不会扣款。</Typography>
         </Stack>
-        {onNotify && <Button fullWidth onClick={onNotify} disabled={notifyReady} sx={{ mt: 2, minHeight: 44 }}>{notifyReady ? "已开启就绪通知" : "链接就绪时通知我"}</Button>}
         {onCancel && <Button variant="outlined" fullWidth onClick={onCancel} disabled={cancelling} sx={{ mt: 2, minHeight: 44 }}>{cancelling ? "正在退出…" : "放弃排队"}</Button>}
       </CardContent>
     </Card>

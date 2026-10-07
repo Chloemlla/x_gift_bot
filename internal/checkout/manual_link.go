@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"regexp"
 	"strings"
 	"xgift/internal/vault"
 )
@@ -16,8 +15,8 @@ var ErrPaymentActionRequired = errors.New("bank authentication required")
 // ManualLinkForUsername creates/reuses a guarded checkout without tokenizing or
 // confirming a card. No redemption code is required. Caller holds checkout.lock.
 func ManualLinkForUsername(ctx context.Context, v *vault.Vault, user string, port, months int, verifiedUnpaid bool) (*Record, error) {
-	user = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(user), "@"))
-	if !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(user) {
+	user, ok := NormalizeUsername(user)
+	if !ok {
 		return nil, errors.New("invalid username")
 	}
 	cat, err := ReadCatalog(v)

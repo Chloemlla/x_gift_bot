@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Box, Button, Card, CardContent, Checkbox, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Divider, FormControlLabel, LinearProgress, MenuItem, Paper, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Card, CardContent, Checkbox, Divider, FormControlLabel, LinearProgress, MenuItem, Paper, Stack, TextField, Typography } from "@mui/material";
 import LinkRounded from "@mui/icons-material/LinkRounded";
 import ContentCopyOutlined from "@mui/icons-material/ContentCopyOutlined";
 import CheckCircleOutlineRounded from "@mui/icons-material/CheckCircleOutlineRounded";
@@ -8,17 +8,30 @@ import OpenInNewRounded from "@mui/icons-material/OpenInNewRounded";
 import { adminApi } from "./adminApi";
 import { request } from "./shared";
 import { readQueueWithReconnect } from "./queueReconnect";
-import { isPaymentResult } from "./manualPaymentResult";
+import { PublicOrderLookup } from "./PublicOrderLookup";
 
 type Plan = { months: number; amount: number; currency: string };
 type Result = Plan & { username: string; status: string; checkout_url?: string; expires_at?: number; message?: string; needs_unpaid_verification?: boolean; ticket?: string; position?: number; ahead?: number; estimated_wait_seconds?: number };
-type QueueSession = { ticket: string; username: string; months: number };
+// expires_at is set once a link is delivered: refresh recovers it only during the payment window.
+type QueueSession = { ticket: string; username: string; months: number; expires_at?: number };
 const queueStorageKey = "xgift-public-queue";
 function saveQueue(value: QueueSession | null) {
   try { if (value) sessionStorage.setItem(queueStorageKey, JSON.stringify(value)); else sessionStorage.removeItem(queueStorageKey); } catch { /* Cookie-based recovery remains available. */ }
 }
 function savedQueue(): QueueSession | null {
-  try { const value = JSON.parse(sessionStorage.getItem(queueStorageKey) || "null"); return value && typeof value.ticket === "string" && /^[a-z0-9_]{1,15}$/.test(value.username) && [3,6].includes(value.months) ? value : null; } catch { return null; }
+  try {
+    const value = JSON.parse(sessionStorage.getItem(queueStorageKey) || "null");
+    if (!value || typeof value.ticket !== "string" || !/^[a-z0-9_]{1,15}$/.test(value.username) || !Number.isInteger(value.months) || value.months < 1 || value.months > 24) return null;
+    if (typeof value.expires_at === "number" && value.expires_at * 1000 <= Date.now()) { saveQueue(null); return null; }
+    return value;
+  } catch { return null; }
+}
+export function formatWait(seconds: number) {
+  if (seconds < 60) return "1 分钟内";
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `约 ${minutes} 分钟`;
+  const rest = minutes % 60;
+  return `约 ${Math.floor(minutes / 60)} 小时${rest ? ` ${rest} 分钟` : ""}`;
 }
 function price(p: Plan) { return `${p.currency} ${(p.amount / 100).toFixed(2)}`; }
 export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?: boolean; onShow?: () => void }) {
@@ -40,11 +53,42 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
   const inFlight = useRef(false);
   const queueTicket = useRef<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
-  const [notifyReady, setNotifyReady] = useState(false);
+  const canNotify = typeof Notification !== "undefined" && Notification.permission !== "denied";
+  const [notifyReady, setNotifyReady] = useState(() => typeof Notification !== "undefined" && Notification.permission === "granted");
+  const errorAlert = useRef<HTMLDivElement>(null);
+  const baseTitle = useRef(document.title);
   const notifiedTicket = useRef<string | null>(null);
   const mounted = useRef(true);
+  const [, setTick] = useState(0);
+  const [queueSummary, setQueueSummary] = useState<{ waiting: number; estimated_wait_seconds: number } | null>(null);
+  const formVisible = publicMode && !busy && !result;
+  useEffect(() => {
+    if (!formVisible) return;
+    const load = () => { if (document.visibilityState === "visible") void request<{ waiting: number; estimated_wait_seconds: number }>(endpoint + "/queue").then(({ ok, data }) => setQueueSummary(ok && Number.isInteger(data.waiting) ? data : null)).catch(() => setQueueSummary(null)); };
+    load();
+    const timer = setInterval(load, 30000);
+    return () => clearInterval(timer);
+  }, [formVisible]);
+  useEffect(() => {
+    if (!result?.expires_at || !result.checkout_url) return;
+    const timer = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(timer);
+  }, [result]);
+  const secondsLeft = result?.expires_at ? Math.max(0, Math.floor(result.expires_at - Date.now() / 1000)) : null;
+  const expired = secondsLeft === 0;
+  useEffect(() => { if (publicMode && expired) saveQueue(null); }, [publicMode, expired]);
+  // The tab title is what people see while the page is in the background.
+  useEffect(() => {
+    if (!publicMode) return;
+    let title = baseTitle.current;
+    if (result?.checkout_url && secondsLeft !== null) title = secondsLeft > 0 ? `${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, "0")} 内请付款 · XGift` : "付款链接已过期 · XGift";
+    else if (result?.status === "succeeded") title = "订单已付款 · XGift";
+    else if (busy && queueProgress.status === "processing") title = "即将生成付款链接 · XGift";
+    else if (busy && queueProgress.status === "queued") title = `排队中 · 前方 ${queueProgress.ahead ?? "—"} 人 · XGift`;
+    document.title = title;
+  });
+  useEffect(() => () => { document.title = baseTitle.current; }, []);
   const cleanUser = username.trim().replace(/^@/, "").toLowerCase();
   const valid = /^[a-z0-9_]{1,15}$/.test(cleanUser);
   async function loadPlans(recover = false) {
@@ -102,8 +146,12 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
     finally { setCancelling(false); }
   }
   useEffect(() => { if (result && publicMode) resultHeading.current?.focus({ preventScroll: true }); }, [result, publicMode]);
-  useEffect(() => { if (!busy && error) usernameInput.current?.focus({ preventScroll: true }); }, [busy, error]);
-  function reset() { setResult(null); setError(""); setNotice(""); setNeedsVerification(false); setVerified(false); }
+  useEffect(() => {
+    if (busy || !error) return;
+    usernameInput.current?.focus({ preventScroll: true });
+    if (publicMode) errorAlert.current?.scrollIntoView({ block: "nearest" });
+  }, [busy, error]);
+  function reset() { if (publicMode) saveQueue(null); setResult(null); setError(""); setNotice(""); setNeedsVerification(false); setVerified(false); }
   async function enableNotification() {
     if (!("Notification" in window)) { setNotice("此浏览器不支持系统通知，请保持页面打开，链接生成后页面标题也会提醒。"); return; }
     try { const permission = await Notification.requestPermission(); if (permission === "granted" && "serviceWorker" in navigator) await navigator.serviceWorker.register("/payment-notifications.js"); setNotifyReady(permission === "granted"); setNotice(permission === "granted" ? "已开启链接就绪通知，请保持网页打开。" : "未开启系统通知，请留意此页面的排队进度。"); } catch { setNotice("暂时无法开启系统通知，请留意此页面。"); }
@@ -118,9 +166,9 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
     if (resume) queueTicket.current = resume.ticket; else saveQueue(null);
     try {
       const poll = (path: string) => readQueueWithReconnect(() => request<Result>(path, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(20000)])), controller.signal, undefined, undefined, {onRetry: () => setReconnecting(true)});
-      let { ok, data } = resume
+      let { ok, data, status } = resume
         ? await poll(`${endpoint}/queue/${encodeURIComponent(resume.ticket)}`)
-        : await request<Result>(endpoint, { username: user, months: selectedPlan.months, verified_unpaid: needsVerification && verified, queue_protocol: publicMode ? 1 : undefined }, AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]));
+        : await request<Result>(endpoint, { username: user, months: selectedPlan.months, verified_unpaid: needsVerification && verified }, AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]));
       if (resume) queueTicket.current = resume.ticket;
       while (ok && typeof data?.ticket === "string" && data.ticket && (data.status === "queued" || data.status === "processing")) {
         queueTicket.current = data.ticket;
@@ -130,20 +178,24 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
         await new Promise<void>((resolve) => setTimeout(resolve, 3000));
         controller.signal.throwIfAborted();
         const queuePath = `${endpoint}/queue/${encodeURIComponent(data.ticket)}`;
-        ({ ok, data } = await poll(queuePath));
+        ({ ok, data, status } = await poll(queuePath));
       }
       const completedTicket = queueTicket.current;
       queueTicket.current = null;
       setReconnecting(false);
       if (!ok) saveQueue(null);
+      // The previous link already ended (paid or expired): show the clean form.
+      if (!ok && status === 410) return;
       if (!ok) { setNeedsVerification(Boolean(data?.needs_unpaid_verification)); setError(data?.message || "生成失败，请稍后重试。"); return; }
-      if (!isPaymentResult(data, user, selectedPlan)) {
+      // A 2xx may only acknowledge a queue ticket; render only a real order.
+      if (data.ticket || (data.status !== "succeeded" && typeof data.checkout_url !== "string")) {
         setError("尚未取得完整的付款订单，请刷新页面后重试。系统会先检查已有链接。"); return;
       }
       setNeedsVerification(false); setVerified(false); setResult(data); onShow?.();
+      if (publicMode) saveQueue(completedTicket && data.checkout_url && data.expires_at ? { ticket: completedTicket, username: user, months: selectedPlan.months, expires_at: data.expires_at } : null);
       if (publicMode && completedTicket && notifiedTicket.current !== completedTicket) {
         notifiedTicket.current = completedTicket;
-        document.title = data.status === "succeeded" ? "订单已付款 · XGift" : "付款链接已就绪 · XGift";
+        navigator.vibrate?.([200, 100, 200]);
         if ("Notification" in window && Notification.permission === "granted") {
           void (async () => { try {
             const title = data.status === "succeeded" ? "订单已付款" : "付款链接已就绪";
@@ -170,20 +222,27 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
         <LinkRounded color="primary" aria-hidden="true" />
         <Typography id="manual-payment-title" variant="h2" sx={{ fontSize: 21 }}>手动付款链接</Typography>
       </Stack>
-      {!(publicMode && (busy || result)) && <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>{publicMode ? "为指定的 X 账号生成付款链接，随后前往 Stripe 自行付款。" : "填写 X 用户名和套餐时长，生成 Stripe 链接后手动付款，无需兑换码。"}</Typography>}
-      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} aria-labelledby="confirm-payment-title" aria-describedby="confirm-payment-description" fullWidth maxWidth="xs">
-        <DialogTitle id="confirm-payment-title">确认生成付款链接？</DialogTitle>
-        <DialogContent>
-          <DialogContentText id="confirm-payment-description" color="text.primary">如果不想要付款，请不要点击生成链接。</DialogContentText>
-          <DialogContentText sx={{ mt: 2 }}>刷新页面会保留排队；关闭或离开网站后会自动退出排队。</DialogContentText>
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2.5, gap: 1 }}>
-          <Button onClick={() => setConfirmOpen(false)}>暂不生成</Button>
-          <Button variant="contained" onClick={() => { setConfirmOpen(false); void generate(); }}>确认生成</Button>
-        </DialogActions>
-      </Dialog>
+      {!(publicMode && (busy || result)) && <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{publicMode ? "为指定的 X 账号生成 Stripe 付款链接，付款成功后 Premium 直接赠送到该账号。" : "填写 X 用户名和套餐时长，生成 Stripe 链接后手动付款，无需兑换码。"}</Typography>}
+      {publicMode && !(busy || result) && (
+        <Box component="ol" sx={{ m: 0, mb: 3, p: 0, listStyle: "none", display: "grid", gap: 1 }}>
+          {[
+            "填写 X 用户名、选择套餐后提交，按顺序排队；高峰期可能需要等待较久，请保持本页打开",
+            "轮到你时生成 Stripe 付款链接，链接只保留 3 分钟，请提前准备好银行卡，看到链接立即付款",
+            "付款成功后 Premium 直接赠送到该账号，没有兑换码；可登录该账号在 X 的 Premium 页面确认到账",
+          ].map((text, i) => (
+            <Box component="li" key={text} sx={{ display: "flex", gap: 1.25, alignItems: "flex-start" }}>
+              <Box aria-hidden="true" sx={{ flexShrink: 0, width: 22, height: 22, mt: "1px", borderRadius: "50%", bgcolor: "action.selected", color: "text.secondary", display: "grid", placeItems: "center", fontSize: 13, fontWeight: 600 }}>{i + 1}</Box>
+              <Typography variant="body2" color="text.secondary">{text}</Typography>
+            </Box>
+          ))}
+        </Box>
+      )}
+      {formVisible && queueSummary && <Alert severity={queueSummary.waiting >= 10 ? "warning" : "info"} icon={false} sx={{ mb: 2 }} role="status">
+        {queueSummary.waiting > 0 ? <>当前排队 <strong>{queueSummary.waiting}</strong> 人，现在提交预计{formatWait(queueSummary.estimated_wait_seconds)}后轮到你。</> : <>当前无人排队，提交后预计{formatWait(queueSummary.estimated_wait_seconds)}生成链接。</>}
+        {queueSummary.waiting >= 10 && " 等待期间需保持本页打开，请确认有空再提交。"}
+      </Alert>}
       {planError && <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" onClick={() => void loadPlans(true)}>重新加载</Button>}>{planError}</Alert>}
-      {!(publicMode && (busy || result)) && <Box component="form" onSubmit={(e) => { e.preventDefault(); if (publicMode) setConfirmOpen(true); else void generate(); }} aria-busy={busy}>
+      {!(publicMode && (busy || result)) && <Box component="form" onSubmit={(e) => { e.preventDefault(); void generate(); }} aria-busy={busy}>
         <Box sx={{
           display: "grid",
           gridTemplateColumns: { xs: "minmax(0, 1fr)", sm: "minmax(0, 1fr) minmax(0, 1fr)", md: publicMode ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(260px, 1fr) minmax(235px, 320px) auto" },
@@ -196,11 +255,12 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
           </TextField>
           <Button type="submit" variant="contained" startIcon={<LinkRounded />} disabled={busy || !valid || !plans.length || (needsVerification && !verified)} sx={{ minHeight: 56, px: 3, whiteSpace: "nowrap", gridColumn: { sm: "1 / -1", md: publicMode ? "1 / -1" : "auto" }, justifySelf: { xs: "stretch", sm: "end", md: publicMode ? "end" : "stretch" } }}>{busy ? "正在生成…" : "生成付款链接"}</Button>
         </Box>
+        {publicMode && <PublicOrderLookup username={cleanUser} />}
         {needsVerification && <FormControlLabel control={<Checkbox checked={verified} disabled={busy} onChange={(e) => setVerified(e.target.checked)} />} label="我已核实原订单未付款，也没有正在处理的扣款或银行验证，允许生成新链接" />}
       </Box>}
-      {publicMode && busy && <PaymentQueueCard reconnecting={reconnecting} onNotify={() => void enableNotification()} notifyReady={notifyReady} onCancel={queueProgress.status === "submitting" ? undefined : () => void cancelQueue()} cancelling={cancelling} progress={queueProgress} username={cleanUser} months={months} price={plans.find((p) => p.months === months) ? price(plans.find((p) => p.months === months)!) : ""} />}
+      {publicMode && busy && <PaymentQueueCard reconnecting={reconnecting} onNotify={canNotify ? () => void enableNotification() : undefined} notifyReady={notifyReady} onCancel={queueProgress.status === "submitting" ? undefined : () => void cancelQueue()} cancelling={cancelling} progress={queueProgress} username={cleanUser} months={months} price={plans.find((p) => p.months === months) ? price(plans.find((p) => p.months === months)!) : ""} />}
       {!publicMode && busy && <LinearProgress aria-label="正在核对账号并生成付款链接" sx={{ mt: 1 }} />}
-      {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
+      {error && <Alert ref={errorAlert} severity="error" sx={{ mt: 2, scrollMarginTop: 24 }}>{error}</Alert>}
       {publicMode && result && <Card variant="outlined" sx={{ borderRadius: 2, bgcolor: "background.paper" }}>
         <CardContent sx={{ p: { xs: 2.5, sm: 3 }, "&:last-child": { pb: { xs: 2.5, sm: 3 } } }}>
           <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 3 }}>
@@ -215,17 +275,32 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
             <Typography color="text.secondary">{result.months} 个月 Premium · {price(result)}</Typography>
           </Stack>
           <Divider sx={{ mb: 3 }} />
-          {result.checkout_url && <>
+          {result.checkout_url && expired && <>
+            <Alert severity="warning">付款链接已超过 3 分钟有效期并作废。如果尚未付款，请重新排队获取新链接；如果已经付款，请勿重复支付，可登录该账号在 X 的 Premium 页面确认到账。</Alert>
+            <Button variant="contained" onClick={() => { reset(); void generate(); }} sx={{ mt: 2, minHeight: 48 }}>重新排队获取链接</Button>
+          </>}
+          {result.checkout_url && !expired && <>
+            {secondsLeft !== null && <Alert severity={secondsLeft <= 60 ? "warning" : "info"} sx={{ mb: 2 }} role="timer">
+              链接剩余 <Box component="strong" sx={{ fontVariantNumeric: "tabular-nums" }}>{Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")}</Box>，请立即前往 Stripe 付款，超时后需重新排队。
+            </Alert>}
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
               <Button component="a" href={result.checkout_url} target="_blank" rel="noopener noreferrer" variant="contained" endIcon={<OpenInNewRounded />} sx={{ minHeight: 48 }}>前往 Stripe 付款</Button>
               <Button variant="outlined" onClick={() => void copy()} startIcon={<ContentCopyOutlined />}>复制链接</Button>
             </Stack>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>{result.expires_at ? `请在 ${new Date(result.expires_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} 前完成付款。` : "请尽快完成付款。"}若 Stripe 提示付款被拒绝，则尚未支付成功。已扣款或正在银行验证时，请勿重复支付。</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>若 Stripe 提示付款被拒绝，则尚未支付成功。已扣款或正在银行验证时，请勿重复支付。</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>付款成功后 Premium 会直接赠送到 @{result.username}，没有兑换码，可登录该账号在 X 的 Premium 页面确认到账。</Typography>
             <Box component="details" sx={{ mt: 1 }}>
               <Box component="summary" sx={{ cursor: "pointer", color: "text.secondary", fontSize: 13, py: 1.5, minHeight: 44 }}>查看完整链接</Box>
               <TextField label="Stripe 付款链接" value={result.checkout_url} slotProps={{ input: { readOnly: true } }} onFocus={(e) => e.target.select()} />
             </Box>
+            <PublicOrderLookup username={result.username} />
           </>}
+          {result.status === "succeeded" && (
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>付款已核实，Premium 会赠送到该账号，没有兑换码。可登录该账号在 X 的 Premium 页面确认到账。</Typography>
+              <Button component="a" href="https://x.com/i/premium" target="_blank" rel="noopener noreferrer" variant="contained" endIcon={<OpenInNewRounded />} sx={{ minHeight: 48 }}>打开 X 查看 Premium</Button>
+            </Box>
+          )}
           <Stack direction="row" spacing={1} sx={{ mt: 2, ml: -2 }}>
             {result.checkout_url && <Button onClick={() => { reset(); requestAnimationFrame(() => usernameInput.current?.focus()); }}>更换套餐</Button>}
             <Button onClick={() => { reset(); setUsername(""); requestAnimationFrame(() => usernameInput.current?.focus()); }}>为其他账号生成链接</Button>

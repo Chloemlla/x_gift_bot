@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"xgift/internal/checkout"
 )
 
 // Customer lookup is independent of folder filters and pagination.
 func (s *server) customerOrder(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
-	user := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("username")), "@"))
+	user, validUser := checkout.NormalizeUsername(r.URL.Query().Get("username"))
 	var c codeRow
 	var digest string
 	query := "SELECT id,hint,batch,months,status,username,message,created,updated,progress,COALESCE(recipient_id,''),copyable,hash FROM codes WHERE "
@@ -25,7 +24,7 @@ func (s *server) customerOrder(w http.ResponseWriter, r *http.Request) {
 		query += "id=?"
 		arg = id
 	} else {
-		if !usernamePattern.MatchString(user) {
+		if !validUser {
 			message(w, 400, "请输入正确的客户 X 用户名。")
 			return
 		}
@@ -41,6 +40,7 @@ func (s *server) customerOrder(w http.ResponseWriter, r *http.Request) {
 		message(w, 503, "无法读取客户订单。")
 		return
 	}
+	s.reconcileStatus(r.Context(), &c)
 	plain := ""
 	if c.Copyable {
 		b, e := s.vault.Get("redemption:" + c.ID)
@@ -63,19 +63,10 @@ func (s *server) customerOrder(w http.ResponseWriter, r *http.Request) {
 		if e == nil {
 			defer clear(b)
 			if json.Unmarshal(b, &order) == nil && order.RecipientID == c.RecipientID && order.Username == c.Username && order.Months == c.Months {
-				link = checkout.CheckoutLink(&order)
-				if order.PreviousSession != "" {
-					old, e := s.vault.Get("replacement-original:" + order.PreviousSession)
-					if e == nil {
-						var audit struct {
-							Original checkout.Record `json:"original"`
-						}
-						if json.Unmarshal(old, &audit) == nil && audit.Original.RecipientID == c.RecipientID && audit.Original.Username == c.Username {
-							previousLink = checkout.CheckoutLink(&audit.Original)
-						}
-						clear(old)
-					}
+				if c.Status != "succeeded" {
+					link = checkout.CheckoutLink(&order)
 				}
+
 			}
 		}
 	}

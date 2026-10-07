@@ -36,7 +36,6 @@ var assets embed.FS
 
 type nonceContextKey struct{}
 
-var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{1,15}$`)
 var codePattern = regexp.MustCompile(`^XG-[A-F0-9]{48}$`)
 
 type server struct {
@@ -136,70 +135,12 @@ func Run(ctx context.Context) error {
 			return err
 		}
 	}
-	dbpath := filepath.Join(dir, "site.db")
-	f, err := os.OpenFile(dbpath, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return err
-	}
-	f.Close()
-	if err = os.Chmod(dbpath, 0600); err != nil {
-		return err
-	}
-	db, err := sql.Open("sqlite3", dbpath+"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=FULL&_foreign_keys=on")
+	db, err := openSiteDB(filepath.Join(dir, "site.db"))
 	if err != nil {
 		return err
 	}
 	s.db = db
 	defer db.Close()
-	db.SetMaxOpenConns(1)
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS codes (
- id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, hint TEXT NOT NULL, batch TEXT NOT NULL,
- months INTEGER NOT NULL CHECK(months IN (3,6)),
- status TEXT NOT NULL CHECK(status IN ('active','processing','succeeded','review','revoked')),
- username TEXT NOT NULL DEFAULT '', recipient_id TEXT UNIQUE,
- message TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, updated INTEGER NOT NULL
- ); CREATE INDEX IF NOT EXISTS codes_created ON codes(created);`)
-	if err != nil {
-		return err
-	}
-	// Inspect the schema so upgrades preserve all existing redemption codes.
-	columns, err := db.Query("PRAGMA table_info(codes)")
-	if err != nil {
-		return err
-	}
-	hasProgress := false
-	for columns.Next() {
-		var cid, required, primary int
-		var name, typ string
-		var defaultValue any
-		if err = columns.Scan(&cid, &name, &typ, &required, &defaultValue, &primary); err != nil {
-			columns.Close()
-			return err
-		}
-		if name == "progress" {
-			hasProgress = true
-		}
-	}
-	err = columns.Err()
-	columns.Close()
-	if err != nil {
-		return err
-	}
-	if !hasProgress {
-		if _, err = db.Exec("ALTER TABLE codes ADD COLUMN progress INTEGER NOT NULL DEFAULT 0"); err != nil {
-			return err
-		}
-	}
-	if err = migrateFolders(db); err != nil {
-		return err
-	}
-	if err = migrateBatches(db); err != nil {
-		return err
-	}
-	// A crash is never interpreted as permission to submit the same payment again.
-	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "订单处理被中断，请查询原订单或联系管理员核实；请勿重复兑换。", time.Now().Unix()); err != nil {
-		return err
-	}
 	raw, err := v.Get("proxy")
 	if err != nil {
 		return err
@@ -238,6 +179,8 @@ func Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/redeem", s.human("redeem", s.redeem))
 	mux.HandleFunc("GET /api/manual-link/plans", s.publicLinkPlans)
 	mux.HandleFunc("POST /api/manual-link", s.human("manual_link", s.publicLink))
+	mux.HandleFunc("GET /api/manual-link/queue", s.publicLinkQueueSummary)
+	mux.HandleFunc("GET /api/manual-link/order", s.publicOrderStatus)
 	mux.HandleFunc("GET /api/manual-link/queue/current", s.currentPublicLinkQueue)
 	mux.HandleFunc("POST /api/manual-link/queue/{ticket}/leave", s.leavePublicLinkQueue)
 	mux.HandleFunc("GET /api/manual-link/queue/{ticket}", s.publicLinkQueueStatus)
@@ -271,7 +214,7 @@ func Run(ctx context.Context) error {
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return errors.New("listen address must use a loopback IP")
 	}
-	h := &http.Server{Addr: addr, Handler: s.middleware(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 50 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	h := &http.Server{Addr: addr, Handler: s.middleware(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 125 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	done := make(chan error, 1)
 	go func() { done <- h.ListenAndServe() }()
 	log.Printf("xgift-web listening on %s; payments enabled=%t", addr, s.payments)
@@ -291,7 +234,7 @@ func Run(ctx context.Context) error {
 	}
 	s.jobs.Wait()
 	s.linkQueue.mu.Lock()
-	queueErr := s.persistPublicLinkQueueLocked()
+	queueErr := s.saveQueue()
 	s.linkQueue.mu.Unlock()
 	if queueErr != nil {
 		return queueErr
@@ -301,6 +244,120 @@ func Run(ctx context.Context) error {
 	}
 	return err
 }
+
+// redeemLockWait is how long a redemption waits for another order to finish.
+var redeemLockWait = 30 * time.Second
+
+// tryLock takes the single in-process order slot and checkout.lock, which the
+// CLI shares. It never blocks; release frees both.
+func (s *server) tryLock() (release func(), ok bool) {
+	select {
+	case s.work <- struct{}{}:
+	default:
+		return nil, false
+	}
+	lock, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		<-s.work
+		return nil, false
+	}
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		lock.Close()
+		<-s.work
+		return nil, false
+	}
+	return func() { syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); lock.Close(); <-s.work }, true
+}
+
+// waitLock retries tryLock until it succeeds, wait elapses or ctx ends.
+func (s *server) waitLock(ctx context.Context, wait time.Duration) (func(), bool) {
+	deadline := time.Now().Add(wait)
+	for {
+		if release, ok := s.tryLock(); ok {
+			return release, true
+		}
+		if time.Now().After(deadline) {
+			return nil, false
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// openSiteDB opens the redemption database and applies additive migrations.
+func openSiteDB(dbpath string) (*sql.DB, error) {
+	f, err := os.OpenFile(dbpath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
+	if err = os.Chmod(dbpath, 0600); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite3", dbpath+"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=FULL&_foreign_keys=on")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			db.Close()
+		}
+	}()
+	db.SetMaxOpenConns(1)
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS codes (
+ id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, hint TEXT NOT NULL, batch TEXT NOT NULL,
+ months INTEGER NOT NULL CHECK(months IN (3,6)),
+ status TEXT NOT NULL CHECK(status IN ('active','processing','succeeded','review','revoked')),
+ username TEXT NOT NULL DEFAULT '', recipient_id TEXT UNIQUE,
+ message TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, updated INTEGER NOT NULL
+ ); CREATE INDEX IF NOT EXISTS codes_created ON codes(created);`)
+	if err != nil {
+		return nil, err
+	}
+	// Inspect the schema so upgrades preserve all existing redemption codes.
+	columns, err := db.Query("PRAGMA table_info(codes)")
+	if err != nil {
+		return nil, err
+	}
+	hasProgress := false
+	for columns.Next() {
+		var cid, required, primary int
+		var name, typ string
+		var defaultValue any
+		if err = columns.Scan(&cid, &name, &typ, &required, &defaultValue, &primary); err != nil {
+			columns.Close()
+			return nil, err
+		}
+		if name == "progress" {
+			hasProgress = true
+		}
+	}
+	err = columns.Err()
+	columns.Close()
+	if err != nil {
+		return nil, err
+	}
+	if !hasProgress {
+		if _, err = db.Exec("ALTER TABLE codes ADD COLUMN progress INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return nil, err
+		}
+	}
+	if err = migrateFolders(db); err != nil {
+		return nil, err
+	}
+	if err = migrateBatches(db); err != nil {
+		return nil, err
+	}
+	// A crash is never interpreted as permission to submit the same payment again.
+	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "订单处理被中断，请查询原订单或联系管理员核实；请勿重复兑换。", time.Now().Unix()); err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
 func privateFile(path string) ([]byte, error) {
 	i, e := os.Lstat(path)
 	if e != nil {
@@ -333,7 +390,6 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 		return false
 	}
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
-	d.DisallowUnknownFields()
 	if d.Decode(v) != nil {
 		message(w, 400, "请求格式不正确。")
 		return false
@@ -408,7 +464,7 @@ func (s *server) allow(key string, max int) bool {
 			}
 		}
 		if len(s.limits) > 10000 {
-			return false
+			clear(s.limits) // never lock everyone out because the table filled up
 		}
 	}
 	l := s.limits[key]
@@ -448,6 +504,9 @@ func (s *server) middleware(next http.Handler) http.Handler {
 			} else if r.URL.Path == "/api/manual-link" {
 				max = 4
 				bucket = "manual-link:"
+			} else if r.URL.Path == "/api/manual-link/order" {
+				max = 6
+				bucket = "order:"
 			} else if r.URL.Path == "/api/check" {
 				max = 8
 				bucket = "check:"
@@ -487,8 +546,8 @@ func readInput(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 		return "", "", false
 	}
 	q.Code = strings.ToUpper(strings.TrimSpace(q.Code))
-	q.Username = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(q.Username), "@"))
-	if !codePattern.MatchString(q.Code) || !usernamePattern.MatchString(q.Username) {
+	var ok bool
+	if q.Username, ok = checkout.NormalizeUsername(q.Username); !codePattern.MatchString(q.Code) || !ok {
 		message(w, 400, "请填写完整兑换码和正确的 X 用户名（不是显示名称）。")
 		return "", "", false
 	}
@@ -510,9 +569,6 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message, "progress": c.Progress, "rechecking": s.autoChecking(&c), "payment_declined": s.paymentDeclined(&c)})
 }
 
-// eligibilityCheck is the read-only X pre-check; tests substitute a fake.
-var eligibilityCheck = checkout.Eligibility
-
 // check is a read-only eligibility probe: no code lookup, no checkout, no writes.
 // It stays available while payments are paused or running. Read-only checks
 // have their own bounded concurrency and never occupy the payment worker.
@@ -523,8 +579,8 @@ func (s *server) check(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &q) {
 		return
 	}
-	q.Username = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(q.Username), "@"))
-	if !usernamePattern.MatchString(q.Username) {
+	var ok bool
+	if q.Username, ok = checkout.NormalizeUsername(q.Username); !ok {
 		message(w, 400, "请填写正确的 X 用户名（不是显示名称）。")
 		return
 	}
@@ -537,7 +593,7 @@ func (s *server) check(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
 	defer cancel()
-	_, e := eligibilityCheck(ctx, s.vault, q.Username, s.port)
+	_, e := checkout.Eligibility(ctx, s.vault, q.Username, s.port)
 	if e != nil {
 		switch {
 		case errors.Is(e, checkout.ErrNotEligible):
@@ -579,18 +635,6 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		message(w, 409, "兑换码已使用或已停用，请联系提供方。")
 		return
 	}
-	select {
-	case s.work <- struct{}{}:
-	default:
-		message(w, 503, "正在处理其他请求，请稍后重试。")
-		return
-	}
-	handedOff := false
-	defer func() {
-		if !handedOff {
-			<-s.work
-		}
-	}()
 	recipient := c.RecipientID
 	if !resuming {
 		ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
@@ -608,23 +652,23 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The same lock is used by the CLI. Keep it until the final database write.
-	lock, e := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
-	if e != nil {
-		message(w, 503, "订单服务暂时不可用，请稍后重试。")
+	// Payments are serialized; wait briefly for another order instead of failing.
+	// The lock is shared with the CLI and kept until the final database write.
+	release, ok := s.waitLock(r.Context(), redeemLockWait)
+	if !ok {
+		message(w, 503, "正在处理其他订单，请稍后重试。兑换码未使用。")
 		return
 	}
-	if e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); e != nil {
-		lock.Close()
-		message(w, 503, "订单处理中，请稍后重试。")
-		return
-	}
-	release := func() { syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); lock.Close() }
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	if !resuming {
 		// A prior CLI order must not fulfill a newly presented redemption code.
 		for _, key := range []string{"checkout:" + recipient, "checkout:" + user} {
 			if _, e = s.vault.Get(key); !errors.Is(e, sql.ErrNoRows) {
-				release()
 				message(w, 409, "这个账号已有订单记录，需要管理员核实后处理。兑换码未使用。")
 				return
 			}
@@ -637,13 +681,11 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		result, e = s.db.Exec("UPDATE codes SET status='processing',progress=20,username=?,recipient_id=?,message=?,updated=? WHERE id=? AND status='active'", user, recipient, "正在处理，请不要重复提交。", time.Now().Unix(), c.ID)
 	}
 	if e != nil {
-		release()
 		message(w, 409, "无法开始处理订单，请刷新后查询兑换状态。")
 		return
 	}
 	n, e := result.RowsAffected()
 	if e != nil || n != 1 {
-		release()
 		message(w, 409, "兑换码状态已改变，请刷新后查询。")
 		return
 	}
@@ -651,7 +693,6 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	s.jobs.Add(1)
 	go func() {
 		defer s.jobs.Done()
-		defer func() { <-s.work }()
 		defer release()
 		ctx, cancel := context.WithTimeout(s.ctx, 240*time.Second)
 		defer cancel()
@@ -679,37 +720,12 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 			clear(failure)
 			log.Printf("order %s stopped at stage %s; upstream details remain encrypted", c.ID, stage)
 		}
-		status, msg := "review", "订单尚未完成，请联系管理员核实处理阶段；请勿重复兑换。"
-		if record != nil && record.SubmittedAt != 0 {
-			msg = "付款结果正在自动核实，请保留本页等待；系统不会重复扣款。"
-		} else if record != nil && record.ConfirmParameters == "" && record.ConfirmKey == "" {
-			if record.Status == "creating" {
-				msg = "创建赠送订单未完成，尚未提交付款。请联系管理员处理，请勿重复兑换。"
-			} else if record.Status == "created" {
-				msg = "订单已创建，尚未提交付款。可以重新检查并继续兑换。"
-			}
-		}
-		if errors.Is(err, checkout.ErrXReadFailure) {
-			msg = "暂时无法向 X 核实账号或套餐，本次未提交付款。请稍后点击「重新检查并继续兑换」。"
-		} else if errors.Is(err, checkout.ErrNotEligible) {
-			msg = "X 当前不允许该账号接收 Premium 赠送，本次未提交付款。账号符合条件后，可重新检查并继续兑换。"
-		} else if errors.Is(err, checkout.ErrUserNotFound) {
-			msg = "未找到绑定的 X 账号，本次未提交付款。请核对原账号后重新检查。"
-		}
+		status, msg := "review", redeemMessage(record, err)
 		if err == nil && record != nil && record.Status == "succeeded" && record.RecipientID == recipient && record.Months == c.Months {
 			plan, planErr := s.catalogPlan(c.Months)
 			if planErr == nil && record.Amount == plan.Minor && record.Currency == strings.ToUpper(plan.Currency) {
 				status, msg = "succeeded", fmt.Sprintf("已为 @%s 完成 %d 个月 Premium 赠送。", user, c.Months)
 			}
-		}
-		if record != nil && record.Status == "requires_action" {
-			msg = "付款需要持卡人完成银行验证，请联系管理员。请勿重复兑换。"
-		}
-		if checkout.IsPaymentDeclined(record) {
-			msg = "付款被支付机构拒绝，本次兑换未完成。请联系管理员处理，请勿重复提交。"
-		}
-		if errors.Is(err, checkout.ErrPaymentPaused) {
-			msg = "充值已自动暂停，原订单已保留。请联系管理员处理付款方式。"
 		}
 		updated, e := s.db.Exec("UPDATE codes SET status=?,message=?,updated=?,progress=CASE WHEN ?='succeeded' THEN 100 ELSE progress END WHERE id=? AND status='processing'", status, msg, time.Now().Unix(), status, c.ID)
 		if e != nil {
@@ -726,6 +742,31 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	}()
 	reply(w, 202, map[string]any{"status": "processing", "progress": 20, "months": c.Months, "message": "正在处理，请保留本页并等待结果。"})
 }
+
+// redeemMessage explains an unfinished redemption; payment state wins over errors.
+func redeemMessage(record *checkout.Record, err error) string {
+	switch {
+	case errors.Is(err, checkout.ErrPaymentPaused):
+		return "充值已自动暂停，原订单已保留。请联系管理员处理付款方式。"
+	case checkout.IsPaymentDeclined(record):
+		return "付款被支付机构拒绝，本次兑换未完成。请联系管理员处理，请勿重复提交。"
+	case record != nil && record.Status == "requires_action":
+		return "付款需要持卡人完成银行验证，请联系管理员。请勿重复兑换。"
+	case errors.Is(err, checkout.ErrXReadFailure):
+		return "暂时无法向 X 核实账号或套餐，本次未提交付款。请稍后点击「重新检查并继续兑换」。"
+	case errors.Is(err, checkout.ErrNotEligible):
+		return "X 当前不允许该账号接收 Premium 赠送，本次未提交付款。账号符合条件后，可重新检查并继续兑换。"
+	case errors.Is(err, checkout.ErrUserNotFound):
+		return "未找到绑定的 X 账号，本次未提交付款。请核对原账号后重新检查。"
+	case record != nil && record.SubmittedAt != 0:
+		return "付款结果正在自动核实，请保留本页等待；系统不会重复扣款。"
+	case record != nil && record.ConfirmParameters == "" && record.ConfirmKey == "" && (record.Status == "creating" || record.Status == "created"):
+		return "订单尚未提交付款。可以重新检查并继续兑换。"
+	default:
+		return "订单尚未完成，请联系管理员核实处理阶段；请勿重复兑换。"
+	}
+}
+
 func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 	var q struct {
 		Folder string `json:"folder"`
@@ -737,8 +778,8 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q.Batch = strings.TrimSpace(q.Batch)
-	if (q.Months != 3 && q.Months != 6) || q.Count < 1 || q.Count > 500 || len(q.Batch) > 120 || (q.Folder != "" && !folderIDPattern.MatchString(q.Folder)) {
-		message(w, 400, "请选择 3 或 6 个月，数量 1–500，批次名称不超过 120 字节。")
+	if (q.Months != 3 && q.Months != 6) || q.Count < 1 || q.Count > 2000 || len(q.Batch) > 120 || (q.Folder != "" && !folderIDPattern.MatchString(q.Folder)) {
+		message(w, 400, "请选择 3 或 6 个月，数量 1–2000，批次名称不超过 120 字节。")
 		return
 	}
 	if q.Batch == "" {

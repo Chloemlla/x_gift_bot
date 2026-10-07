@@ -10,8 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	_ "github.com/mattn/go-sqlite3"
-	"golang.org/x/crypto/pbkdf2"
 	"net/url"
 	"os"
 	"os/exec"
@@ -19,6 +17,9 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // Extract only the two X authentication cookies. No other site's credentials are read.

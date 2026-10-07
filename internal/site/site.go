@@ -515,9 +515,6 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	reply(w, 200, map[string]any{"status": c.Status, "months": c.Months, "message": c.Message, "progress": c.Progress, "rechecking": s.autoChecking(&c), "payment_declined": s.paymentDeclined(&c)})
 }
 
-// eligibilityCheck is the read-only X pre-check; tests substitute a fake.
-var eligibilityCheck = checkout.Eligibility
-
 // check is a read-only eligibility probe: no code lookup, no checkout, no writes.
 // It stays available while payments are paused or running. Read-only checks
 // have their own bounded concurrency and never occupy the payment worker.
@@ -542,7 +539,7 @@ func (s *server) check(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
 	defer cancel()
-	_, e := eligibilityCheck(ctx, s.vault, q.Username, s.port)
+	_, e := checkout.Eligibility(ctx, s.vault, q.Username, s.port)
 	if e != nil {
 		switch {
 		case errors.Is(e, checkout.ErrNotEligible):

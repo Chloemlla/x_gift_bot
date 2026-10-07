@@ -482,7 +482,7 @@ func (s *server) runRecovery(id, binding string) {
 		if err != nil {
 			return
 		}
-		state, detail, stop := s.recoverOneOptions(item, binding, q.Mode, q.VerifiedUnpaid)
+		state, detail, stop := s.recoverOne(item, binding, q.Mode, q.VerifiedUnpaid)
 		s.recoveryMu.Lock()
 		q, err = s.loadRecovery()
 		if err != nil || q == nil || q.ID != id {
@@ -526,10 +526,7 @@ func (s *server) runRecovery(id, binding string) {
 		}
 	}
 }
-func (s *server) recoverOne(item recoveryItem, binding string) (state, detail string, stop bool) {
-	return s.recoverOneOptions(item, binding, "pay", false)
-}
-func (s *server) recoverOneOptions(item recoveryItem, binding, mode string, verified bool) (state, detail string, stop bool) {
+func (s *server) recoverOne(item recoveryItem, binding, mode string, verified bool) (state, detail string, stop bool) {
 	if mode != "links" {
 		_, _, current, err := checkout.CardSummary(s.vault)
 		if err != nil || current != binding {

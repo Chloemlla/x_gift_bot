@@ -140,10 +140,6 @@ func readCard(v *vault.Vault) (card, error) {
 	return c, nil
 }
 
-// legacyCardFingerprint was used while the historic single card was assumed to
-// be the one that declined old orders; multi-card rotation now tracks real
-// decline evidence instead.
-
 // readCardsOptional behaves like readCards but reports an unconfigured card
 // set as empty, which lets `cards add` create the first record.
 func readCardsOptional(v *vault.Vault) ([]card, error) {
@@ -290,18 +286,6 @@ func blockPaymentCard(v *vault.Vault, fingerprint, reason string) error {
 	}
 	blocks[fingerprint] = cardBlock{Reason: reason, BlockedAt: time.Now().Unix()}
 	return saveCardBlocks(v, blocks)
-}
-
-// coolPaymentCard keeps a declined card out of rotation for the cooldown while
-// leaving any permanent provider block in place. Caller must not hold
-// paymentRouteMu.
-func coolPaymentCard(v *vault.Vault, fingerprint, reason string) error {
-	if fingerprint == "" {
-		return nil
-	}
-	paymentRouteMu.Lock()
-	defer paymentRouteMu.Unlock()
-	return coolPaymentCardLocked(v, fingerprint, reason)
 }
 
 func coolPaymentCardLocked(v *vault.Vault, fingerprint, reason string) error {

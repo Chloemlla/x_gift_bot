@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Box, Button, Card, CardContent, Divider, LinearProgress, Stack, Step, StepLabel, Stepper, Typography } from "@mui/material";
+import { Alert, Box, Button, Card, CardContent, Divider, LinearProgress, Stack, Step, StepLabel, Stepper, Typography } from "@mui/material";
 import ScheduleRounded from "@mui/icons-material/ScheduleRounded";
 import LockOutlined from "@mui/icons-material/LockOutlined";
 
@@ -66,6 +66,11 @@ export function PaymentQueueCard({ progress, username, months, price, onCancel, 
         <Stepper alternativeLabel activeStep={submitting ? 0 : processing ? 2 : 1} sx={{ mx: -1, mb: 3, "& .MuiStepLabel-label": { fontSize: 12, mt: 1 }, "& .MuiStepIcon-root": { fontSize: 22 } }}>
           {["提交请求", "排队等待", "生成链接"].map((label) => <Step key={label}><StepLabel>{label}</StepLabel></Step>)}
         </Stepper>
+
+        <Alert severity="warning" icon={false} sx={{ mb: 3 }}>
+          <Typography variant="body2" fontWeight={600}>轮到你后，付款链接只保留 3 分钟</Typography>
+          <Typography variant="body2" sx={{ mt: 0.5 }}>请提前准备好银行卡，并保持此页面打开（可切到后台）。超时未付款链接会作废，需要重新排队。建议开启下方通知。</Typography>
+        </Alert>
 
         <Divider sx={{ mb: 2 }} />
         <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={0.5}>

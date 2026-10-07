@@ -45,6 +45,14 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
   const [notifyReady, setNotifyReady] = useState(false);
   const notifiedTicket = useRef<string | null>(null);
   const mounted = useRef(true);
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!result?.expires_at || !result.checkout_url) return;
+    const timer = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(timer);
+  }, [result]);
+  const secondsLeft = result?.expires_at ? Math.max(0, Math.floor(result.expires_at - Date.now() / 1000)) : null;
+  const expired = secondsLeft === 0;
   const cleanUser = username.trim().replace(/^@/, "").toLowerCase();
   const valid = /^[a-z0-9_]{1,15}$/.test(cleanUser);
   async function loadPlans(recover = false) {
@@ -170,12 +178,26 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
         <LinkRounded color="primary" aria-hidden="true" />
         <Typography id="manual-payment-title" variant="h2" sx={{ fontSize: 21 }}>手动付款链接</Typography>
       </Stack>
-      {!(publicMode && (busy || result)) && <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>{publicMode ? "为指定的 X 账号生成付款链接，随后前往 Stripe 自行付款。" : "填写 X 用户名和套餐时长，生成 Stripe 链接后手动付款，无需兑换码。"}</Typography>}
+      {!(publicMode && (busy || result)) && <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{publicMode ? "为指定的 X 账号生成 Stripe 付款链接，付款成功后 Premium 直接赠送到该账号。" : "填写 X 用户名和套餐时长，生成 Stripe 链接后手动付款，无需兑换码。"}</Typography>}
+      {publicMode && !(busy || result) && (
+        <Box component="ol" sx={{ m: 0, mb: 3, p: 0, listStyle: "none", display: "grid", gap: 1 }}>
+          {[
+            "填写 X 用户名、选择套餐后提交，按顺序排队；高峰期可能需要等待较久，请保持本页打开",
+            "轮到你时生成 Stripe 付款链接，链接只保留 3 分钟，请提前准备好银行卡，看到链接立即付款",
+            "付款成功后 Premium 直接赠送到该账号，没有兑换码；可登录该账号在 X 的 Premium 页面确认到账",
+          ].map((text, i) => (
+            <Box component="li" key={text} sx={{ display: "flex", gap: 1.25, alignItems: "flex-start" }}>
+              <Box aria-hidden="true" sx={{ flexShrink: 0, width: 22, height: 22, mt: "1px", borderRadius: "50%", bgcolor: "action.selected", color: "text.secondary", display: "grid", placeItems: "center", fontSize: 13, fontWeight: 600 }}>{i + 1}</Box>
+              <Typography variant="body2" color="text.secondary">{text}</Typography>
+            </Box>
+          ))}
+        </Box>
+      )}
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} aria-labelledby="confirm-payment-title" aria-describedby="confirm-payment-description" fullWidth maxWidth="xs">
         <DialogTitle id="confirm-payment-title">确认生成付款链接？</DialogTitle>
         <DialogContent>
           <DialogContentText id="confirm-payment-description" color="text.primary">如果不想要付款，请不要点击生成链接。</DialogContentText>
-          <DialogContentText sx={{ mt: 2 }}>刷新页面会保留排队；关闭或离开网站后会自动退出排队。</DialogContentText>
+          <DialogContentText sx={{ mt: 2 }}>提交后需要排队。轮到你时付款链接只保留 3 分钟，超时作废并需重新排队，请提前准备好银行卡。付款成功后 Premium 会直接赠送到 @{cleanUser || "填写的账号"}，不会生成兑换码。刷新页面会保留排队；关闭或离开网站后会自动退出排队。</DialogContentText>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2.5, gap: 1 }}>
           <Button onClick={() => setConfirmOpen(false)}>暂不生成</Button>
@@ -215,17 +237,31 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
             <Typography color="text.secondary">{result.months} 个月 Premium · {price(result)}</Typography>
           </Stack>
           <Divider sx={{ mb: 3 }} />
-          {result.checkout_url && <>
+          {result.checkout_url && expired && <>
+            <Alert severity="warning">付款链接已超过 3 分钟有效期并作废。如果尚未付款，请重新排队获取新链接；如果已经付款，请勿重复支付，可登录该账号在 X 的 Premium 页面确认到账。</Alert>
+            <Button variant="contained" onClick={() => { reset(); void generate(); }} sx={{ mt: 2, minHeight: 48 }}>重新排队获取链接</Button>
+          </>}
+          {result.checkout_url && !expired && <>
+            {secondsLeft !== null && <Alert severity={secondsLeft <= 60 ? "warning" : "info"} sx={{ mb: 2 }} role="timer">
+              链接剩余 <Box component="strong" sx={{ fontVariantNumeric: "tabular-nums" }}>{Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")}</Box>，请立即前往 Stripe 付款，超时后需重新排队。
+            </Alert>}
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
               <Button component="a" href={result.checkout_url} target="_blank" rel="noopener noreferrer" variant="contained" endIcon={<OpenInNewRounded />} sx={{ minHeight: 48 }}>前往 Stripe 付款</Button>
               <Button variant="outlined" onClick={() => void copy()} startIcon={<ContentCopyOutlined />}>复制链接</Button>
             </Stack>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>{result.expires_at ? `请在 ${new Date(result.expires_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} 前完成付款。` : "请尽快完成付款。"}若 Stripe 提示付款被拒绝，则尚未支付成功。已扣款或正在银行验证时，请勿重复支付。</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>若 Stripe 提示付款被拒绝，则尚未支付成功。已扣款或正在银行验证时，请勿重复支付。</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>付款成功后 Premium 会直接赠送到 @{result.username}，没有兑换码，可登录该账号在 X 的 Premium 页面确认到账。</Typography>
             <Box component="details" sx={{ mt: 1 }}>
               <Box component="summary" sx={{ cursor: "pointer", color: "text.secondary", fontSize: 13, py: 1.5, minHeight: 44 }}>查看完整链接</Box>
               <TextField label="Stripe 付款链接" value={result.checkout_url} slotProps={{ input: { readOnly: true } }} onFocus={(e) => e.target.select()} />
             </Box>
           </>}
+          {result.status === "succeeded" && (
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>付款已核实，Premium 会赠送到该账号，没有兑换码。可登录该账号在 X 的 Premium 页面确认到账。</Typography>
+              <Button component="a" href="https://x.com/i/premium" target="_blank" rel="noopener noreferrer" variant="contained" endIcon={<OpenInNewRounded />} sx={{ minHeight: 48 }}>打开 X 查看 Premium</Button>
+            </Box>
+          )}
           <Stack direction="row" spacing={1} sx={{ mt: 2, ml: -2 }}>
             {result.checkout_url && <Button onClick={() => { reset(); requestAnimationFrame(() => usernameInput.current?.focus()); }}>更换套餐</Button>}
             <Button onClick={() => { reset(); setUsername(""); requestAnimationFrame(() => usernameInput.current?.focus()); }}>为其他账号生成链接</Button>

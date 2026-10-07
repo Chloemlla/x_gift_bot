@@ -505,7 +505,7 @@ func (s *server) middleware(next http.Handler) http.Handler {
 				max = 4
 				bucket = "manual-link:"
 			} else if r.URL.Path == "/api/manual-link/order" {
-				max = 10
+				max = 6
 				bucket = "order:"
 			} else if r.URL.Path == "/api/check" {
 				max = 8

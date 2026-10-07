@@ -38,6 +38,19 @@ type Record struct {
 	Created     int64  `json:"created"`
 }
 
+var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{1,15}$`)
+var ownerPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+// NormalizeUsername trims, lowercases and strips one leading @; ok reports a
+// valid X username.
+func NormalizeUsername(s string) (user string, ok bool) {
+	user = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(s), "@"))
+	return user, usernamePattern.MatchString(user)
+}
+
+// ValidOwner reports whether s is a public-link browser cookie value.
+func ValidOwner(s string) bool { return ownerPattern.MatchString(s) }
+
 var sessionPattern = regexp.MustCompile(`^cs_live_[A-Za-z0-9]+$`)
 var sessionPathPattern = regexp.MustCompile(`^/[A-Za-z]/pay/`)
 
@@ -74,8 +87,8 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 			return nil, ErrPaymentPaused
 		}
 	}
-	user = strings.ToLower(strings.TrimPrefix(user, "@"))
-	if !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(user) {
+	user, ok := NormalizeUsername(user)
+	if !ok {
 		return nil, errors.New("invalid username")
 	}
 	catalog, e := ReadCatalog(v)

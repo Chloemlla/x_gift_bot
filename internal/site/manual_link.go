@@ -2,12 +2,9 @@ package site
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"log"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -32,24 +29,22 @@ func (s *server) manualLinkPlans(w http.ResponseWriter, r *http.Request) {
 	reply(w, 200, map[string]any{"plans": plans})
 }
 
-func (s *server) publicLinkPlans(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie("__Host-xgift-link"); err != nil || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(c.Value) {
-		var b [32]byte
-		if _, err = rand.Read(b[:]); err != nil {
-			message(w, 503, "请稍后重试。")
-			return
-		}
-		http.SetCookie(w, &http.Cookie{Name: "__Host-xgift-link", Value: hex.EncodeToString(b[:]), Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 30 * 24 * 60 * 60})
+// linkOwner returns this browser's public-link cookie, issuing one if needed.
+func linkOwner(w http.ResponseWriter, r *http.Request) string {
+	if c, err := r.Cookie("__Host-xgift-link"); err == nil && checkout.ValidOwner(c.Value) {
+		return c.Value
 	}
+	owner := token(32)
+	http.SetCookie(w, &http.Cookie{Name: "__Host-xgift-link", Value: owner, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 30 * 24 * 60 * 60})
+	return owner
+}
+
+func (s *server) publicLinkPlans(w http.ResponseWriter, r *http.Request) {
+	linkOwner(w, r)
 	s.manualLinkPlans(w, r)
 }
 func (s *server) publicLink(w http.ResponseWriter, r *http.Request) {
-	c, err := r.Cookie("__Host-xgift-link")
-	if err != nil || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(c.Value) {
-		message(w, 400, "请刷新页面后重新生成链接。")
-		return
-	}
-	s.generateManualLink(w, r, c.Value)
+	s.generateManualLink(w, r, linkOwner(w, r))
 }
 func (s *server) manualLink(w http.ResponseWriter, r *http.Request) {
 	s.generateManualLink(w, r, "")
@@ -66,8 +61,8 @@ func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publ
 	if !decode(w, r, &q) {
 		return
 	}
-	q.Username = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(q.Username), "@"))
-	if !usernamePattern.MatchString(q.Username) || q.Months < 1 || q.Months > 24 {
+	var ok bool
+	if q.Username, ok = checkout.NormalizeUsername(q.Username); !ok || q.Months < 1 || q.Months > 24 {
 		message(w, 400, "请填写正确的 X 用户名并选择套餐时长。")
 		return
 	}

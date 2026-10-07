@@ -56,7 +56,7 @@ func (s *server) restorePublicLinkQueue() error {
 	q := &s.linkQueue
 	q.jobs = nil
 	for _, j := range saved {
-		if j == nil || j.Cancelled || j.ID == "" || j.Owner == "" || !usernamePattern.MatchString(j.Request.Username) {
+		if j == nil || j.Cancelled || j.ID == "" || j.Owner == "" || !validUsername(j.Request.Username) {
 			continue
 		}
 		if j.State != "done" {
@@ -75,4 +75,9 @@ func (s *server) restorePublicLinkQueue() error {
 	s.refreshPublicLinkWait(now)
 	log.Printf("public queue restored: tickets=%d", len(q.jobs))
 	return nil
+}
+
+func validUsername(s string) bool {
+	user, ok := checkout.NormalizeUsername(s)
+	return ok && user == s
 }

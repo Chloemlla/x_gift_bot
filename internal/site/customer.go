@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"xgift/internal/checkout"
 )
 
 // Customer lookup is independent of folder filters and pagination.
 func (s *server) customerOrder(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
-	user := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("username")), "@"))
+	user, validUser := checkout.NormalizeUsername(r.URL.Query().Get("username"))
 	var c codeRow
 	var digest string
 	query := "SELECT id,hint,batch,months,status,username,message,created,updated,progress,COALESCE(recipient_id,''),copyable,hash FROM codes WHERE "
@@ -25,7 +24,7 @@ func (s *server) customerOrder(w http.ResponseWriter, r *http.Request) {
 		query += "id=?"
 		arg = id
 	} else {
-		if !usernamePattern.MatchString(user) {
+		if !validUser {
 			message(w, 400, "请输入正确的客户 X 用户名。")
 			return
 		}

@@ -36,7 +36,6 @@ var assets embed.FS
 
 type nonceContextKey struct{}
 
-var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{1,15}$`)
 var codePattern = regexp.MustCompile(`^XG-[A-F0-9]{48}$`)
 
 type server struct {
@@ -534,8 +533,8 @@ func readInput(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 		return "", "", false
 	}
 	q.Code = strings.ToUpper(strings.TrimSpace(q.Code))
-	q.Username = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(q.Username), "@"))
-	if !codePattern.MatchString(q.Code) || !usernamePattern.MatchString(q.Username) {
+	var ok bool
+	if q.Username, ok = checkout.NormalizeUsername(q.Username); !codePattern.MatchString(q.Code) || !ok {
 		message(w, 400, "请填写完整兑换码和正确的 X 用户名（不是显示名称）。")
 		return "", "", false
 	}
@@ -567,8 +566,8 @@ func (s *server) check(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &q) {
 		return
 	}
-	q.Username = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(q.Username), "@"))
-	if !usernamePattern.MatchString(q.Username) {
+	var ok bool
+	if q.Username, ok = checkout.NormalizeUsername(q.Username); !ok {
 		message(w, 400, "请填写正确的 X 用户名（不是显示名称）。")
 		return
 	}

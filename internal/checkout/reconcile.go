@@ -30,7 +30,7 @@ func Reconcile(ctx context.Context, v *vault.Vault, recipient string, port int) 
 	if err != nil {
 		return nil, err
 	}
-	if r.RecipientID != recipient || r.Amount != plan.Minor || r.Currency != strings.ToUpper(plan.Currency) || r.ProductID != plan.ProductID || !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(r.Username) || !sessionURL(r.URL, r.SessionID) {
+	if r.RecipientID != recipient || r.Amount != plan.Minor || r.Currency != strings.ToUpper(plan.Currency) || r.ProductID != plan.ProductID || !usernamePattern.MatchString(r.Username) || !sessionURL(r.URL, r.SessionID) {
 		return nil, errors.New("recorded order identity or price mismatch")
 	}
 	if r.Status == "succeeded" {

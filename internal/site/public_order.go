@@ -3,8 +3,6 @@ package site
 import (
 	"log"
 	"net/http"
-	"regexp"
-	"strings"
 	"time"
 	"xgift/internal/checkout"
 )
@@ -14,17 +12,13 @@ import (
 // orders; only coarse status, plan and time are returned.
 func (s *server) publicOrderStatus(w http.ResponseWriter, r *http.Request) {
 	c, err := r.Cookie("__Host-xgift-link")
-	if err != nil || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(c.Value) {
+	if err != nil || !checkout.ValidOwner(c.Value) {
 		message(w, 404, "本浏览器没有付款记录。请使用生成付款链接时的同一浏览器查询。")
 		return
 	}
-	user := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("username")), "@"))
-	if !usernamePattern.MatchString(user) {
+	user, ok := checkout.NormalizeUsername(r.URL.Query().Get("username"))
+	if !ok {
 		message(w, 400, "请填写正确的 X 用户名。")
-		return
-	}
-	if s.vault == nil {
-		message(w, 503, "暂时无法查询，请稍后重试。")
 		return
 	}
 	order, err := checkout.PublicOrderStatus(s.vault, user, c.Value)

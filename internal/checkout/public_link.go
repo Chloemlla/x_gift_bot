@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 	"xgift/internal/vault"
@@ -33,28 +32,34 @@ type publicLinkRecord struct {
 // PublicLinkForUsername never uses a saved card or an automatic-payment record.
 // Caller must hold checkout.lock. The browser cookie identifies queue requests;
 // verified public links may be retrieved across browsers for the same recipient.
-func PublicLinkForUsername(ctx context.Context, v *vault.Vault, user, owner string, port, months int, verifiedUnpaid ...bool) (*Record, error) {
-	user = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(user), "@"))
-	if !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(user) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(owner) {
-		return nil, errors.New("invalid public link request")
-	}
-	cat, err := ReadCatalog(v)
-	if err != nil {
-		return nil, err
-	}
-	plan, err := cat.PlanFor(months)
-	if err != nil {
-		return nil, err
-	}
-	x, err := newXClient(v, port)
+func PublicLinkForUsername(ctx context.Context, v *vault.Vault, user, owner string, port, months int) (*Record, error) {
+	user, plan, x, err := publicSetup(v, user, owner, port, months)
 	if err != nil {
 		return nil, err
 	}
 	defer x.close()
-	return publicLinkForClient(ctx, v, user, owner, plan, x, verifiedUnpaid...)
+	return publicLinkForClient(ctx, v, user, owner, plan, x)
 }
 
-func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string, plan Plan, x *xClient, verifiedUnpaid ...bool) (*Record, error) {
+// publicSetup validates a public request and opens the X client for its plan.
+func publicSetup(v *vault.Vault, user, owner string, port, months int) (string, Plan, *xClient, error) {
+	user, ok := NormalizeUsername(user)
+	if !ok || !ValidOwner(owner) {
+		return "", Plan{}, nil, errors.New("invalid public link request")
+	}
+	cat, err := ReadCatalog(v)
+	if err != nil {
+		return "", Plan{}, nil, err
+	}
+	plan, err := cat.PlanFor(months)
+	if err != nil {
+		return "", Plan{}, nil, err
+	}
+	x, err := newXClient(v, port)
+	return user, plan, x, err
+}
+
+func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string, plan Plan, x *xClient) (*Record, error) {
 	months := plan.Months
 	x.publicReplacement = ""
 	defer func() { x.publicReplacement = "" }()
@@ -134,10 +139,9 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 			return nil, e
 		}
 		proof, _ := json.Marshal(struct {
-			Previous       json.RawMessage `json:"previous"`
-			VerifiedUnpaid bool            `json:"verified_unpaid"`
-			VerifiedAt     int64           `json:"verified_at"`
-		}{old, len(verifiedUnpaid) > 0 && verifiedUnpaid[0], time.Now().Unix()})
+			Previous   json.RawMessage `json:"previous"`
+			VerifiedAt int64           `json:"verified_at"`
+		}{old, time.Now().Unix()})
 		next, _ := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: r})
 		err = v.ReplaceArchived("public-checkout:"+recipient, fmt.Sprintf("public-checkout-history:%s:%d", recipient, time.Now().UnixNano()), old, proof, next)
 	} else {
@@ -352,19 +356,7 @@ func publicLinkFresh(r *Record, now time.Time) bool {
 // payment window. A cache miss must join the normal queue, never create here.
 // Caller holds checkout.lock across the entire operation.
 func TryCachedPublicLink(ctx context.Context, v *vault.Vault, user, owner string, port, months int) (*Record, bool, error) {
-	user = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(user), "@"))
-	if !regexp.MustCompile(`^[a-z0-9_]{1,15}$`).MatchString(user) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(owner) {
-		return nil, false, errors.New("invalid public link request")
-	}
-	cat, err := ReadCatalog(v)
-	if err != nil {
-		return nil, false, err
-	}
-	plan, err := cat.PlanFor(months)
-	if err != nil {
-		return nil, false, err
-	}
-	x, err := newXClient(v, port)
+	user, plan, x, err := publicSetup(v, user, owner, port, months)
 	if err != nil {
 		return nil, false, err
 	}

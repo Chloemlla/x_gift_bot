@@ -225,7 +225,7 @@ func replaceRecoveryLink(ctx context.Context, v *vault.Vault, r *Record, s *stri
 	if err := gate.checkCreation(ctx, time.Now()); err != nil {
 		return r, err
 	}
-	next := Record{Username: r.Username, RecipientID: r.RecipientID, Months: r.Months, Amount: r.Amount, Currency: r.Currency, ProductID: r.ProductID, Status: "creating", Created: time.Now().Unix(), ReplacementCount: r.ReplacementCount + 1, PreviousSession: r.SessionID, CreationAttempts: 1}
+	next := Record{Username: r.Username, RecipientID: r.RecipientID, Months: r.Months, Amount: r.Amount, Currency: r.Currency, ProductID: r.ProductID, Status: "creating", Created: time.Now().Unix(), ReplacementCount: r.ReplacementCount + 1, PreviousSession: r.SessionID}
 	fresh, err := json.Marshal(&next)
 	if err != nil {
 		return r, err

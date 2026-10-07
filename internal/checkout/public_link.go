@@ -119,13 +119,6 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 	if existing != nil && !replace {
 		r = *existing
 	}
-	// One attempt per explicit request. Older unpublished reservations predate
-	// CreationAttempts, so count their first upstream attempt conservatively.
-	if existing != nil && !replace && r.CreationAttempts == 0 && !r.CreationRetryable {
-		r.CreationAttempts = 1
-	}
-	r.CreationAttempts++
-	r.CreationRetryable = true
 	persist := func() error {
 		b, e := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: r})
 		if e != nil {
@@ -163,11 +156,6 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 	r.SessionID, r.URL, err = x.create(ctx, user, recipient, plan)
 	if err != nil {
 		if errors.Is(err, ErrCheckoutRateLimited) {
-			// No upstream attempt occurred. A queue wait cannot consume retries.
-			r.CreationAttempts--
-			if e := persist(); e != nil {
-				return nil, e
-			}
 			return nil, err
 		}
 		return nil, ErrPublicLinkPending

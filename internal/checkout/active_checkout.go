@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 	"xgift/internal/vault"
 )
@@ -45,69 +44,20 @@ func readActiveCheckout(v *vault.Vault) (activeCheckout, error) {
 	if err = json.Unmarshal(b, &a); err != nil {
 		return a, err
 	}
-	// Accept the previous fixed 15-minute format, but apply the new deadline.
-	// Never reset the creation clock when upgrading or restarting.
-	deadline := time.Unix(a.Order.Created, 0).Add(publicLinkTTL).UnixMilli()
-	legacyDeadline := time.Unix(a.Order.Created, 0).Add(15 * time.Minute).UnixMilli()
-	if a.ExpiresAt != 0 && (a.Order.SessionID == "" || a.Order.Created <= 0 || (a.ExpiresAt != deadline && a.ExpiresAt != legacyDeadline)) {
-		return a, errors.New("invalid active checkout reservation")
-	}
+	// The window always ends at creation + publicLinkTTL, never sliding.
 	if a.ExpiresAt != 0 {
-		a.ExpiresAt = deadline
+		a.ExpiresAt = time.Unix(a.Order.Created, 0).Add(publicLinkTTL).UnixMilli()
 	}
 	return a, nil
 }
 
-// Bootstrap once under checkout.lock so the first post-upgrade creation cannot
-// invalidate the most recently published legacy public link. Unknown outcomes
-// stay protected until their fixed deadline; only verified paid evidence frees it.
-func bootstrapActiveCheckout(v *vault.Vault, now time.Time) (activeCheckout, error) {
+// currentActiveCheckout treats a missing reservation as no active window.
+func currentActiveCheckout(v *vault.Vault) (activeCheckout, error) {
 	a, err := readActiveCheckout(v)
-	if !errors.Is(err, sql.ErrNoRows) {
-		return a, err
+	if errors.Is(err, sql.ErrNoRows) {
+		return activeCheckout{}, nil
 	}
-	for _, prefix := range []string{"public-checkout:", "checkout:"} {
-		names, err := v.NamesWithPrefix(prefix)
-		if err != nil {
-			return a, err
-		}
-		for _, name := range names {
-			b, e := v.Get(name)
-			if e != nil {
-				return a, e
-			}
-			var r Record
-			if prefix == "public-checkout:" {
-				var saved publicLinkRecord
-				e = json.Unmarshal(b, &saved)
-				r = saved.Order
-			} else {
-				e = json.Unmarshal(b, &r)
-			}
-			clear(b)
-			if e != nil {
-				return a, e
-			}
-			if r.Status == "succeeded" || !publicLinkFresh(&r, now) || CheckoutLink(&r) == "" {
-				continue
-			}
-			if prefix == "public-checkout:" && (r.Status != "created" || !unsubmitted(&r) || r.CardFingerprint != "") {
-				continue
-			}
-			if r.Created > a.Order.Created {
-				a.Order = r
-			}
-		}
-	}
-	if a.Order.SessionID != "" {
-		r := a.Order
-		a.Plan = Plan{Months: r.Months, Minor: r.Amount, Currency: strings.ToLower(r.Currency), ProductID: r.ProductID}
-		if cat, e := ReadCatalog(v); e == nil {
-			a.Plan.Merchant = cat.Merchant
-		}
-		a.ExpiresAt = time.Unix(r.Created, 0).Add(publicLinkTTL).UnixMilli()
-	}
-	return a, saveActiveCheckout(v, a)
+	return a, err
 }
 
 // Callers hold checkout.lock. A successful publication reserves its original
@@ -116,7 +66,7 @@ func holdPublicCheckout(v *vault.Vault, r *Record, p Plan, now time.Time) error 
 	if r.Status != "created" || !publicLinkFresh(r, now) {
 		return nil
 	}
-	current, err := bootstrapActiveCheckout(v, now)
+	current, err := currentActiveCheckout(v)
 	if err != nil {
 		return err
 	}
@@ -160,7 +110,7 @@ func CheckoutCreationWait(v *vault.Vault, now time.Time) (time.Duration, error) 
 }
 
 func (x *xClient) checkCreation(ctx context.Context, now time.Time) error {
-	a, err := bootstrapActiveCheckout(x.vault, now)
+	a, err := currentActiveCheckout(x.vault)
 	if err != nil {
 		return err
 	}

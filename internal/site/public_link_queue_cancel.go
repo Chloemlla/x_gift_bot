@@ -8,12 +8,6 @@ import (
 // The middleware enforces same-origin POSTs. Both the opaque ticket and browser
 // cookie must match; no username-only cancellation or deletion of orders.
 func (s *server) cancelPublicLinkQueue(w http.ResponseWriter, r *http.Request) {
-	// Old pages send an empty beacon on refresh as well as close. Treat it
-	// as a disconnect lease; explicit button requests carry a JSON body.
-	if r.ContentLength == 0 {
-		s.leavePublicLinkQueue(w, r)
-		return
-	}
 	cookie, err := r.Cookie("__Host-xgift-link")
 	if err != nil {
 		message(w, 404, "排队记录不存在。")

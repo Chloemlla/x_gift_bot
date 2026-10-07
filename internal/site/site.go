@@ -335,7 +335,6 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 		return false
 	}
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
-	d.DisallowUnknownFields()
 	if d.Decode(v) != nil {
 		message(w, 400, "请求格式不正确。")
 		return false

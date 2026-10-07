@@ -58,7 +58,6 @@ func (s *server) manualLink(w http.ResponseWriter, r *http.Request) {
 }
 
 type manualLinkRequest struct {
-	QueueProtocol  int    `json:"queue_protocol,omitempty"`
 	Username       string `json:"username"`
 	Months         int    `json:"months"`
 	VerifiedUnpaid bool   `json:"verified_unpaid"`
@@ -67,12 +66,6 @@ type manualLinkRequest struct {
 func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publicOwner string) {
 	var q manualLinkRequest
 	if !decode(w, r, &q) {
-		return
-	}
-	// Legacy pages treat every 2xx response as a completed payment link and
-	// cannot understand queue tickets. Reject before any order or queue mutation.
-	if publicOwner != "" && q.QueueProtocol != 1 {
-		message(w, http.StatusConflict, "页面已更新，请刷新此页面后重新生成付款链接。本次请求尚未创建订单。")
 		return
 	}
 	q.Username = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(q.Username), "@"))

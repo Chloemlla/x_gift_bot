@@ -18,7 +18,7 @@ function saveQueue(value: QueueSession | null) {
   try { if (value) sessionStorage.setItem(queueStorageKey, JSON.stringify(value)); else sessionStorage.removeItem(queueStorageKey); } catch { /* Cookie-based recovery remains available. */ }
 }
 function savedQueue(): QueueSession | null {
-  try { const value = JSON.parse(sessionStorage.getItem(queueStorageKey) || "null"); return value && typeof value.ticket === "string" && /^[a-z0-9_]{1,15}$/.test(value.username) && [3,6].includes(value.months) ? value : null; } catch { return null; }
+  try { const value = JSON.parse(sessionStorage.getItem(queueStorageKey) || "null"); return value && typeof value.ticket === "string" && /^[a-z0-9_]{1,15}$/.test(value.username) && Number.isInteger(value.months) && value.months >= 1 && value.months <= 24 ? value : null; } catch { return null; }
 }
 function price(p: Plan) { return `${p.currency} ${(p.amount / 100).toFixed(2)}`; }
 export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?: boolean; onShow?: () => void }) {

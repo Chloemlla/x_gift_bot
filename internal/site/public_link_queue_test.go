@@ -486,3 +486,20 @@ func TestStoredQueueFailuresAreFinalClientErrors(t *testing.T) {
 		t.Fatal("final failure looks transient", w.Code, w.Body.String())
 	}
 }
+
+func TestPublicQueueRestoreSkipsInvalidTicketsInsteadOfFailing(t *testing.T) {
+	s := checkFixture(t)
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "yearly", Months: 12}, "owner-a")
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "bad", Months: 30}, "owner-b")
+	s.linkQueue.dirty = true
+	if err := s.persistPublicLinkQueueLocked(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := &server{vault: s.vault}
+	if err := restarted.restorePublicLinkQueue(); err != nil {
+		t.Fatal(err)
+	}
+	if len(restarted.linkQueue.jobs) != 1 || restarted.linkQueue.jobs[0].request.Months != 12 {
+		t.Fatal("12-month ticket lost or invalid ticket kept", len(restarted.linkQueue.jobs))
+	}
+}

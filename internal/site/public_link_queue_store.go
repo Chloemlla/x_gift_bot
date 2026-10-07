@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"time"
+	"xgift/internal/checkout"
 )
 
 const publicQueueKey = "public-link-queue:v1"
@@ -100,11 +101,18 @@ func (s *server) restorePublicLinkQueue() error {
 	}
 	q := &s.linkQueue
 	now := time.Now()
+	cat, catalogErr := checkout.ReadCatalog(s.vault)
 	jobs := make([]*publicLinkJob, 0, len(saved.Jobs))
 	ids := make(map[string]bool)
-	for _, j := range saved.Jobs {
-		if j.ID == "" || ids[j.ID] || j.Owner == "" || j.Request.Username == "" || (j.Request.Months != 3 && j.Request.Months != 6) || (j.State != "queued" && j.State != "processing" && j.State != "done") || (j.State == "done" && (j.Code < 200 || j.Code > 599 || !json.Valid(j.Result))) {
-			return errors.New("invalid public queue ticket")
+	for i, j := range saved.Jobs {
+		// One bad ticket must not keep the whole site from starting.
+		if j.ID == "" || ids[j.ID] || j.Owner == "" || !usernamePattern.MatchString(j.Request.Username) || j.Request.Months < 1 || j.Request.Months > 24 || (j.State != "queued" && j.State != "processing" && j.State != "done") || (j.State == "done" && (j.Code < 200 || j.Code > 599 || !json.Valid(j.Result))) {
+			log.Printf("public queue restore skipped invalid ticket: index=%d state=%q months=%d", i, j.State, j.Request.Months)
+			continue
+		}
+		if _, err := cat.PlanFor(j.Request.Months); catalogErr == nil && err != nil && j.State != "done" {
+			log.Printf("public queue restore skipped ticket for unconfigured plan: index=%d months=%d", i, j.Request.Months)
+			continue
 		}
 		ids[j.ID] = true
 		if j.Cancelled {

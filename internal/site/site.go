@@ -777,8 +777,8 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q.Batch = strings.TrimSpace(q.Batch)
-	if (q.Months != 3 && q.Months != 6) || q.Count < 1 || q.Count > 500 || len(q.Batch) > 120 || (q.Folder != "" && !folderIDPattern.MatchString(q.Folder)) {
-		message(w, 400, "请选择 3 或 6 个月，数量 1–500，批次名称不超过 120 字节。")
+	if (q.Months != 3 && q.Months != 6) || q.Count < 1 || q.Count > 2000 || len(q.Batch) > 120 || (q.Folder != "" && !folderIDPattern.MatchString(q.Folder)) {
+		message(w, 400, "请选择 3 或 6 个月，数量 1–2000，批次名称不超过 120 字节。")
 		return
 	}
 	if q.Batch == "" {

@@ -305,7 +305,7 @@ func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]any{"batch": recoveryView(q)})
 		return
 	}
-	if time.Now().Unix()-q.Created > 600 {
+	if time.Now().Unix()-q.Created > 3600 {
 		message(w, 409, "预览已过期，请重新生成。")
 		return
 	}

@@ -171,9 +171,6 @@ func replacementEvidence(v *vault.Vault, r *Record) error {
 	if r.Status == "succeeded" || r.Status == "requires_action" {
 		return errors.New("original payment is not replaceable")
 	}
-	if r.ReplacementCount >= 3 {
-		return errors.New("replacement link limit reached")
-	}
 	if unsubmitted(r) && r.Status == "created" {
 		return nil
 	}

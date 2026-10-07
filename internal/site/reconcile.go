@@ -80,7 +80,7 @@ func (s *server) reconcileLoop() {
 		case <-ticker.C:
 		}
 		var c codeRow
-		err := s.db.QueryRow("SELECT id,recipient_id,username,months,status,progress,updated FROM codes WHERE status='review' AND recipient_id IS NOT NULL AND id>? AND updated>? ORDER BY id LIMIT 1", cursor, time.Now().Add(-24*time.Hour).Unix()).Scan(&c.ID, &c.RecipientID, &c.Username, &c.Months, &c.Status, &c.Progress, &c.Updated)
+		err := s.db.QueryRow("SELECT id,recipient_id,username,months,status,progress,updated FROM codes WHERE status='review' AND recipient_id IS NOT NULL AND id>? AND updated>? ORDER BY id LIMIT 1", cursor, time.Now().Add(-7*24*time.Hour).Unix()).Scan(&c.ID, &c.RecipientID, &c.Username, &c.Months, &c.Status, &c.Progress, &c.Updated)
 		if err != nil {
 			cursor = ""
 			continue
@@ -98,7 +98,7 @@ func (s *server) reconcileLoop() {
 }
 
 func (s *server) autoChecking(c *codeRow) bool {
-	if c.Status != "review" || c.RecipientID == "" || c.Updated < time.Now().Add(-24*time.Hour).Unix() {
+	if c.Status != "review" || c.RecipientID == "" || c.Updated < time.Now().Add(-7*24*time.Hour).Unix() {
 		return false
 	}
 	raw, err := s.vault.Get("checkout:" + c.RecipientID)

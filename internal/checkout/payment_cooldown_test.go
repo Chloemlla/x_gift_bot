@@ -79,8 +79,8 @@ func TestNetworkFailoverOnlyReplaysSafeRequests(t *testing.T) {
 				}
 				if until > time.Now().Unix() {
 					cooling++
-					if until < before.Add(6*time.Hour).Unix() || until > time.Now().Add(6*time.Hour).Unix() {
-						t.Fatal("cooldown duration not six hours")
+					if until < before.Add(paymentNodeCooldown).Unix() || until > time.Now().Add(paymentNodeCooldown).Unix() {
+						t.Fatal("cooldown duration wrong")
 					}
 				}
 			}

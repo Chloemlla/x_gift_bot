@@ -23,7 +23,7 @@ func TestPublicLinkOwnershipAndPaymentIsolation(t *testing.T) {
 		{"stored card", "owner", func(r *Record) { r.CardFingerprint = "private-card" }, false, false},
 		{"payment method", "owner", func(r *Record) { r.PaymentMethod = "pm_private" }, false, false},
 		{"submitted", "owner", func(r *Record) { r.SubmittedAt = 123 }, false, false},
-		{"ambiguous creation", "owner", func(r *Record) { r.Status = "creating" }, false, false},
+		{"unconfirmed creation retained", "owner", func(r *Record) { r.Status = "creating" }, false, true},
 		{"different plan to verify before replacement", "owner", func(r *Record) { r.Months = 3 }, false, true},
 		{"admin order", "owner", func(r *Record) {}, true, false},
 	} {

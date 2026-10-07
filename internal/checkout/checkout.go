@@ -14,6 +14,7 @@ import (
 )
 
 type Record struct {
+	GenerationRequest string       `json:"generation_request,omitempty"`
 	LinkBlocked       bool         `json:"link_blocked,omitempty"`
 	ReplacementCount  int          `json:"replacement_count,omitempty"`
 	PreviousSession   string       `json:"previous_session,omitempty"`

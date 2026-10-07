@@ -53,6 +53,7 @@ func (s *server) manualLink(w http.ResponseWriter, r *http.Request) {
 type manualLinkRequest struct {
 	Username       string `json:"username"`
 	Months         int    `json:"months"`
+	RequestID      string `json:"request_id,omitempty"`
 	VerifiedUnpaid bool   `json:"verified_unpaid"`
 }
 
@@ -76,7 +77,8 @@ func (s *server) generateManualLink(w http.ResponseWriter, r *http.Request, publ
 		return
 	}
 	if publicOwner != "" {
-		if s.tryServePublicLink(w, r, q, publicOwner) {
+		if q.RequestID != "" && !checkout.ValidOwner(q.RequestID) {
+			message(w, 400, "无效的生成请求。")
 			return
 		}
 		s.enqueuePublicLink(w, q, publicOwner)
@@ -119,7 +121,7 @@ func (s *server) createLink(ctx context.Context, q manualLinkRequest, publicOwne
 	var record *checkout.Record
 	var err error
 	if publicOwner != "" {
-		record, err = checkout.PublicLinkForUsername(ctx, s.vault, q.Username, publicOwner, s.port, q.Months)
+		record, err = checkout.PublicLinkForRequest(ctx, s.vault, q.Username, publicOwner, s.port, q.Months, q.RequestID)
 	} else {
 		record, err = checkout.ManualLinkForUsername(ctx, s.vault, q.Username, s.port, q.Months, q.VerifiedUnpaid)
 	}
@@ -187,37 +189,10 @@ func (s *server) linkResult(record *checkout.Record, publicOwner string) linkOut
 	}
 	result["checkout_url"] = link
 	if publicOwner != "" {
+		result["message"] = "已生成新的付款链接。旧链接无法由本站作废；若原付款结果未知，请先核实，勿在多个链接重复付款。"
 		result["expires_at"] = record.Created + int64(checkout.PublicLinkTTL/time.Second)
 		s.invalidateOlderPublicResults(record.Username, link)
 		log.Printf("public link ready: months=%d stripe_verified=true", record.Months)
 	}
 	return linkOutcome{status: 200, body: result}
-}
-
-// The current payment-window holder may retrieve its link or replace its own
-// plan without queueing behind others. Busy locks fall back to the queue.
-func (s *server) tryServePublicLink(w http.ResponseWriter, r *http.Request, q manualLinkRequest, owner string) bool {
-	user, months, _, err := checkout.PublicCheckoutWindow(s.vault, time.Now())
-	if err != nil || user != q.Username {
-		return false
-	}
-	release, ok := s.tryLock()
-	if !ok {
-		return false
-	}
-	defer release()
-	ctx, cancel := context.WithTimeout(r.Context(), 110*time.Second)
-	defer cancel()
-	var record *checkout.Record
-	hit := true
-	if months != q.Months {
-		record, err = checkout.PublicLinkForUsername(ctx, s.vault, q.Username, owner, s.port, q.Months)
-	} else {
-		record, hit, err = checkout.TryCachedPublicLink(ctx, s.vault, q.Username, owner, s.port, q.Months)
-	}
-	if err != nil || !hit {
-		return false
-	}
-	s.linkResult(record, owner).write(w)
-	return true
 }

@@ -3,7 +3,7 @@ import { Alert, Box, Button } from "@mui/material";
 import ReceiptLongOutlined from "@mui/icons-material/ReceiptLongOutlined";
 import { request } from "./shared";
 
-type OrderStatus = { username: string; months: number; created: number; state: "paid" | "open" | "ended" | "not_created"; expires_at?: number; stripe_checked?: boolean; message?: string };
+type OrderStatus = { username: string; months: number; created: number; state: "paid" | "open" | "ended" | "not_created" | "unknown"; expires_at?: number; stripe_checked?: boolean; message?: string };
 
 function time(seconds: number) {
   return new Date(seconds * 1000).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -25,9 +25,10 @@ export function PublicOrderLookup({ username }: { username: string }) {
         paid: { severity: "success" as const, text: `${plan}：已确认付款。Premium 直接赠送到该账号，没有兑换码，可登录该账号在 X 的 Premium 页面查看。` },
         open: { severity: "info" as const, text: `${plan}：付款链接仍在 3 分钟有效期内，请回到本页的付款入口完成付款。` },
         ended: data.stripe_checked
-          ? { severity: "warning" as const, text: `${plan}：链接已过期，Stripe 显示这笔订单未付款。需要时可重新排队获取新链接。` }
-          : { severity: "warning" as const, text: `${plan}：链接已过期，暂时无法向 Stripe 核实付款结果。如已扣款，请登录该账号在 X 的 Premium 页面确认到账，切勿重复付款；可稍后再查询。` },
-        not_created: { severity: "info" as const, text: `${plan}：未生成付款链接，没有产生付款。` },
+          ? { severity: "warning" as const, text: `${plan}：本站付款窗口已结束，尚未确认付款成功；旧链接可能仍可付款。请核实后再决定是否生成新链接。` }
+          : { severity: "warning" as const, text: `${plan}：本站付款窗口已结束，暂时无法向 Stripe 核实付款结果。如已扣款，请登录该账号在 X 的 Premium 页面确认到账，切勿重复付款；可稍后再查询。` },
+        unknown: { severity: "warning" as const, text: `${plan}：付款结果尚未核实。本站未自动提交付款；请先核实原付款，勿在多个链接重复支付。` },
+        not_created: { severity: "info" as const, text: `${plan}：建单结果尚未确定，本站未自动提交付款；请勿据此认定没有付款。` },
       }[data.state] ?? { severity: "info", text: "暂时无法确认订单状态。" });
     } catch { setFound({ severity: "error", text: "连接中断，请稍后重试。" }); }
     finally { setBusy(false); }

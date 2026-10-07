@@ -345,6 +345,11 @@ func (s *server) processPublicLinkQueue(ctx context.Context, execute func(http.R
 	}
 	q.blockedUntil = time.Time{}
 	job.state, job.finished, job.code = "done", time.Now(), w.code
+	// A stored result never changes, so it must not look like a transient
+	// gateway error that browsers keep retrying.
+	if job.code >= 500 {
+		job.code = http.StatusUnprocessableEntity
+	}
 	if job.code == 200 {
 		duration := job.finished.Sub(job.started)
 		if duration < 20*time.Second {

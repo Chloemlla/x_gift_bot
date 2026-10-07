@@ -469,3 +469,20 @@ func TestDeclinedRetryMovesBehindWaitingUsers(t *testing.T) {
 		t.Fatal("declined user jumped queue", calls)
 	}
 }
+
+func TestStoredQueueFailuresAreFinalClientErrors(t *testing.T) {
+	s := &server{}
+	s.enqueuePublicLink(httptest.NewRecorder(), manualLinkRequest{Username: "first", Months: 3}, "owner")
+	id := s.linkQueue.jobs[0].id
+	s.processPublicLinkQueue(context.Background(), func(w http.ResponseWriter, _ *http.Request, _ manualLinkRequest, _ string) {
+		message(w, 502, "upstream failed")
+	})
+	r := httptest.NewRequest("GET", "/", nil)
+	r.SetPathValue("ticket", id)
+	r.AddCookie(&http.Cookie{Name: "__Host-xgift-link", Value: "owner"})
+	w := httptest.NewRecorder()
+	s.publicLinkQueueStatus(w, r)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "upstream failed") {
+		t.Fatal("final failure looks transient", w.Code, w.Body.String())
+	}
+}

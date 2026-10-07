@@ -111,6 +111,9 @@ func (s *server) restorePublicLinkQueue() error {
 			continue
 		}
 		job := &publicLinkJob{id: j.ID, owner: j.Owner, state: j.State, left: queueTime(j.Left), request: j.Request, seen: queueTime(j.Seen), finished: queueTime(j.Finished), nextAttempt: queueTime(j.NextAttempt), started: queueTime(j.Started), code: j.Code, result: j.Result}
+		if job.state == "done" && job.code >= 500 {
+			job.code = http.StatusUnprocessableEntity // older snapshots stored final 5xx results
+		}
 		if job.state != "done" {
 			// Give existing browsers a full reconnect grace period after downtime.
 			job.state = "queued"

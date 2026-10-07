@@ -110,6 +110,7 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 	defer func() { <-s.work }()
 	lock, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
+		w.Header().Set("Retry-After", "3")
 		message(w, 503, "无法锁定订单，请稍后重试。")
 		return
 	}
@@ -159,12 +160,12 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 		case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):
 			message(w, 409, "该账号已有兑换或后台订单，请使用原付款链接或联系管理员；主页不会重复创建订单。")
 		case errors.Is(err, checkout.ErrPublicLinkPending):
-			message(w, 502, "暂未取得付款链接，系统没有提交付款。请用相同账号和套餐重试；请勿同时使用其他入口重复建单。")
+			message(w, 409, "暂未取得付款链接，系统没有提交付款。请用相同账号和套餐重试；请勿同时使用其他入口重复建单。")
 		case errors.Is(err, checkout.ErrPublicLinkConflict):
 			message(w, 409, "该账号暂时无法生成新链接，请使用原付款页面或联系管理员核实。")
 		case errors.Is(err, checkout.ErrVerifyUnpaid):
 			if publicOwner != "" {
-				message(w, 502, "付款链接暂不可用，请重新获取。")
+				message(w, 409, "原付款链接已失效且未完成付款，请重新排队获取新链接。")
 			} else {
 				reply(w, 409, map[string]any{"message": "原付款链接已失效，请核实原订单未付款后再重新生成。", "needs_unpaid_verification": true})
 			}

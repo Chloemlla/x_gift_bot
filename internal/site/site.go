@@ -135,70 +135,12 @@ func Run(ctx context.Context) error {
 			return err
 		}
 	}
-	dbpath := filepath.Join(dir, "site.db")
-	f, err := os.OpenFile(dbpath, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return err
-	}
-	f.Close()
-	if err = os.Chmod(dbpath, 0600); err != nil {
-		return err
-	}
-	db, err := sql.Open("sqlite3", dbpath+"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=FULL&_foreign_keys=on")
+	db, err := openSiteDB(filepath.Join(dir, "site.db"))
 	if err != nil {
 		return err
 	}
 	s.db = db
 	defer db.Close()
-	db.SetMaxOpenConns(1)
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS codes (
- id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, hint TEXT NOT NULL, batch TEXT NOT NULL,
- months INTEGER NOT NULL CHECK(months IN (3,6)),
- status TEXT NOT NULL CHECK(status IN ('active','processing','succeeded','review','revoked')),
- username TEXT NOT NULL DEFAULT '', recipient_id TEXT UNIQUE,
- message TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, updated INTEGER NOT NULL
- ); CREATE INDEX IF NOT EXISTS codes_created ON codes(created);`)
-	if err != nil {
-		return err
-	}
-	// Inspect the schema so upgrades preserve all existing redemption codes.
-	columns, err := db.Query("PRAGMA table_info(codes)")
-	if err != nil {
-		return err
-	}
-	hasProgress := false
-	for columns.Next() {
-		var cid, required, primary int
-		var name, typ string
-		var defaultValue any
-		if err = columns.Scan(&cid, &name, &typ, &required, &defaultValue, &primary); err != nil {
-			columns.Close()
-			return err
-		}
-		if name == "progress" {
-			hasProgress = true
-		}
-	}
-	err = columns.Err()
-	columns.Close()
-	if err != nil {
-		return err
-	}
-	if !hasProgress {
-		if _, err = db.Exec("ALTER TABLE codes ADD COLUMN progress INTEGER NOT NULL DEFAULT 0"); err != nil {
-			return err
-		}
-	}
-	if err = migrateFolders(db); err != nil {
-		return err
-	}
-	if err = migrateBatches(db); err != nil {
-		return err
-	}
-	// A crash is never interpreted as permission to submit the same payment again.
-	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "订单处理被中断，请查询原订单或联系管理员核实；请勿重复兑换。", time.Now().Unix()); err != nil {
-		return err
-	}
 	raw, err := v.Get("proxy")
 	if err != nil {
 		return err
@@ -343,6 +285,77 @@ func (s *server) waitLock(ctx context.Context, wait time.Duration) (func(), bool
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+// openSiteDB opens the redemption database and applies additive migrations.
+func openSiteDB(dbpath string) (*sql.DB, error) {
+	f, err := os.OpenFile(dbpath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
+	if err = os.Chmod(dbpath, 0600); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite3", dbpath+"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=FULL&_foreign_keys=on")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			db.Close()
+		}
+	}()
+	db.SetMaxOpenConns(1)
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS codes (
+ id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, hint TEXT NOT NULL, batch TEXT NOT NULL,
+ months INTEGER NOT NULL CHECK(months IN (3,6)),
+ status TEXT NOT NULL CHECK(status IN ('active','processing','succeeded','review','revoked')),
+ username TEXT NOT NULL DEFAULT '', recipient_id TEXT UNIQUE,
+ message TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, updated INTEGER NOT NULL
+ ); CREATE INDEX IF NOT EXISTS codes_created ON codes(created);`)
+	if err != nil {
+		return nil, err
+	}
+	// Inspect the schema so upgrades preserve all existing redemption codes.
+	columns, err := db.Query("PRAGMA table_info(codes)")
+	if err != nil {
+		return nil, err
+	}
+	hasProgress := false
+	for columns.Next() {
+		var cid, required, primary int
+		var name, typ string
+		var defaultValue any
+		if err = columns.Scan(&cid, &name, &typ, &required, &defaultValue, &primary); err != nil {
+			columns.Close()
+			return nil, err
+		}
+		if name == "progress" {
+			hasProgress = true
+		}
+	}
+	err = columns.Err()
+	columns.Close()
+	if err != nil {
+		return nil, err
+	}
+	if !hasProgress {
+		if _, err = db.Exec("ALTER TABLE codes ADD COLUMN progress INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return nil, err
+		}
+	}
+	if err = migrateFolders(db); err != nil {
+		return nil, err
+	}
+	if err = migrateBatches(db); err != nil {
+		return nil, err
+	}
+	// A crash is never interpreted as permission to submit the same payment again.
+	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "订单处理被中断，请查询原订单或联系管理员核实；请勿重复兑换。", time.Now().Unix()); err != nil {
+		return nil, err
+	}
+	return db, nil
 }
 
 func privateFile(path string) ([]byte, error) {
@@ -707,37 +720,12 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 			clear(failure)
 			log.Printf("order %s stopped at stage %s; upstream details remain encrypted", c.ID, stage)
 		}
-		status, msg := "review", "订单尚未完成，请联系管理员核实处理阶段；请勿重复兑换。"
-		if record != nil && record.SubmittedAt != 0 {
-			msg = "付款结果正在自动核实，请保留本页等待；系统不会重复扣款。"
-		} else if record != nil && record.ConfirmParameters == "" && record.ConfirmKey == "" {
-			if record.Status == "creating" {
-				msg = "创建赠送订单未完成，尚未提交付款。请联系管理员处理，请勿重复兑换。"
-			} else if record.Status == "created" {
-				msg = "订单已创建，尚未提交付款。可以重新检查并继续兑换。"
-			}
-		}
-		if errors.Is(err, checkout.ErrXReadFailure) {
-			msg = "暂时无法向 X 核实账号或套餐，本次未提交付款。请稍后点击「重新检查并继续兑换」。"
-		} else if errors.Is(err, checkout.ErrNotEligible) {
-			msg = "X 当前不允许该账号接收 Premium 赠送，本次未提交付款。账号符合条件后，可重新检查并继续兑换。"
-		} else if errors.Is(err, checkout.ErrUserNotFound) {
-			msg = "未找到绑定的 X 账号，本次未提交付款。请核对原账号后重新检查。"
-		}
+		status, msg := "review", redeemMessage(record, err)
 		if err == nil && record != nil && record.Status == "succeeded" && record.RecipientID == recipient && record.Months == c.Months {
 			plan, planErr := s.catalogPlan(c.Months)
 			if planErr == nil && record.Amount == plan.Minor && record.Currency == strings.ToUpper(plan.Currency) {
 				status, msg = "succeeded", fmt.Sprintf("已为 @%s 完成 %d 个月 Premium 赠送。", user, c.Months)
 			}
-		}
-		if record != nil && record.Status == "requires_action" {
-			msg = "付款需要持卡人完成银行验证，请联系管理员。请勿重复兑换。"
-		}
-		if checkout.IsPaymentDeclined(record) {
-			msg = "付款被支付机构拒绝，本次兑换未完成。请联系管理员处理，请勿重复提交。"
-		}
-		if errors.Is(err, checkout.ErrPaymentPaused) {
-			msg = "充值已自动暂停，原订单已保留。请联系管理员处理付款方式。"
 		}
 		updated, e := s.db.Exec("UPDATE codes SET status=?,message=?,updated=?,progress=CASE WHEN ?='succeeded' THEN 100 ELSE progress END WHERE id=? AND status='processing'", status, msg, time.Now().Unix(), status, c.ID)
 		if e != nil {
@@ -754,6 +742,30 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	}()
 	reply(w, 202, map[string]any{"status": "processing", "progress": 20, "months": c.Months, "message": "正在处理，请保留本页并等待结果。"})
 }
+// redeemMessage explains an unfinished redemption; payment state wins over errors.
+func redeemMessage(record *checkout.Record, err error) string {
+	switch {
+	case errors.Is(err, checkout.ErrPaymentPaused):
+		return "充值已自动暂停，原订单已保留。请联系管理员处理付款方式。"
+	case checkout.IsPaymentDeclined(record):
+		return "付款被支付机构拒绝，本次兑换未完成。请联系管理员处理，请勿重复提交。"
+	case record != nil && record.Status == "requires_action":
+		return "付款需要持卡人完成银行验证，请联系管理员。请勿重复兑换。"
+	case errors.Is(err, checkout.ErrXReadFailure):
+		return "暂时无法向 X 核实账号或套餐，本次未提交付款。请稍后点击「重新检查并继续兑换」。"
+	case errors.Is(err, checkout.ErrNotEligible):
+		return "X 当前不允许该账号接收 Premium 赠送，本次未提交付款。账号符合条件后，可重新检查并继续兑换。"
+	case errors.Is(err, checkout.ErrUserNotFound):
+		return "未找到绑定的 X 账号，本次未提交付款。请核对原账号后重新检查。"
+	case record != nil && record.SubmittedAt != 0:
+		return "付款结果正在自动核实，请保留本页等待；系统不会重复扣款。"
+	case record != nil && record.ConfirmParameters == "" && record.ConfirmKey == "" && (record.Status == "creating" || record.Status == "created"):
+		return "订单尚未提交付款。可以重新检查并继续兑换。"
+	default:
+		return "订单尚未完成，请联系管理员核实处理阶段；请勿重复兑换。"
+	}
+}
+
 func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 	var q struct {
 		Folder string `json:"folder"`

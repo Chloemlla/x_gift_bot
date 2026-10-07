@@ -273,7 +273,7 @@ func Run(ctx context.Context) error {
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return errors.New("listen address must use a loopback IP")
 	}
-	h := &http.Server{Addr: addr, Handler: s.middleware(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 50 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	h := &http.Server{Addr: addr, Handler: s.middleware(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 125 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	done := make(chan error, 1)
 	go func() { done <- h.ListenAndServe() }()
 	log.Printf("xgift-web listening on %s; payments enabled=%t", addr, s.payments)
@@ -293,7 +293,7 @@ func Run(ctx context.Context) error {
 	}
 	s.jobs.Wait()
 	s.linkQueue.mu.Lock()
-	queueErr := s.persistPublicLinkQueueLocked()
+	queueErr := s.saveQueue()
 	s.linkQueue.mu.Unlock()
 	if queueErr != nil {
 		return queueErr
@@ -303,6 +303,49 @@ func Run(ctx context.Context) error {
 	}
 	return err
 }
+
+// redeemLockWait is how long a redemption waits for another order to finish.
+var redeemLockWait = 30 * time.Second
+
+// tryLock takes the single in-process order slot and checkout.lock, which the
+// CLI shares. It never blocks; release frees both.
+func (s *server) tryLock() (release func(), ok bool) {
+	select {
+	case s.work <- struct{}{}:
+	default:
+		return nil, false
+	}
+	lock, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		<-s.work
+		return nil, false
+	}
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		lock.Close()
+		<-s.work
+		return nil, false
+	}
+	return func() { syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); lock.Close(); <-s.work }, true
+}
+
+// waitLock retries tryLock until it succeeds, wait elapses or ctx ends.
+func (s *server) waitLock(ctx context.Context, wait time.Duration) (func(), bool) {
+	deadline := time.Now().Add(wait)
+	for {
+		if release, ok := s.tryLock(); ok {
+			return release, true
+		}
+		if time.Now().After(deadline) {
+			return nil, false
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
 func privateFile(path string) ([]byte, error) {
 	i, e := os.Lstat(path)
 	if e != nil {
@@ -409,7 +452,7 @@ func (s *server) allow(key string, max int) bool {
 			}
 		}
 		if len(s.limits) > 10000 {
-			return false
+			clear(s.limits) // never lock everyone out because the table filled up
 		}
 	}
 	l := s.limits[key]
@@ -580,18 +623,6 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		message(w, 409, "兑换码已使用或已停用，请联系提供方。")
 		return
 	}
-	select {
-	case s.work <- struct{}{}:
-	default:
-		message(w, 503, "正在处理其他请求，请稍后重试。")
-		return
-	}
-	handedOff := false
-	defer func() {
-		if !handedOff {
-			<-s.work
-		}
-	}()
 	recipient := c.RecipientID
 	if !resuming {
 		ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
@@ -609,23 +640,23 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The same lock is used by the CLI. Keep it until the final database write.
-	lock, e := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
-	if e != nil {
-		message(w, 503, "订单服务暂时不可用，请稍后重试。")
+	// Payments are serialized; wait briefly for another order instead of failing.
+	// The lock is shared with the CLI and kept until the final database write.
+	release, ok := s.waitLock(r.Context(), redeemLockWait)
+	if !ok {
+		message(w, 503, "正在处理其他订单，请稍后重试。兑换码未使用。")
 		return
 	}
-	if e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); e != nil {
-		lock.Close()
-		message(w, 503, "订单处理中，请稍后重试。")
-		return
-	}
-	release := func() { syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); lock.Close() }
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	if !resuming {
 		// A prior CLI order must not fulfill a newly presented redemption code.
 		for _, key := range []string{"checkout:" + recipient, "checkout:" + user} {
 			if _, e = s.vault.Get(key); !errors.Is(e, sql.ErrNoRows) {
-				release()
 				message(w, 409, "这个账号已有订单记录，需要管理员核实后处理。兑换码未使用。")
 				return
 			}
@@ -638,13 +669,11 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		result, e = s.db.Exec("UPDATE codes SET status='processing',progress=20,username=?,recipient_id=?,message=?,updated=? WHERE id=? AND status='active'", user, recipient, "正在处理，请不要重复提交。", time.Now().Unix(), c.ID)
 	}
 	if e != nil {
-		release()
 		message(w, 409, "无法开始处理订单，请刷新后查询兑换状态。")
 		return
 	}
 	n, e := result.RowsAffected()
 	if e != nil || n != 1 {
-		release()
 		message(w, 409, "兑换码状态已改变，请刷新后查询。")
 		return
 	}
@@ -652,7 +681,6 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 	s.jobs.Add(1)
 	go func() {
 		defer s.jobs.Done()
-		defer func() { <-s.work }()
 		defer release()
 		ctx, cancel := context.WithTimeout(s.ctx, 240*time.Second)
 		defer cancel()

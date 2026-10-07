@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
-	"syscall"
 	"time"
 	"xgift/internal/checkout"
 )
@@ -34,21 +32,11 @@ func (s *server) reconcileStatus(ctx context.Context, c *codeRow) {
 	if c.Status != "review" || c.RecipientID == "" {
 		return
 	}
-	select {
-	case s.work <- struct{}{}:
-	default:
+	release, ok := s.tryLock()
+	if !ok {
 		return
 	}
-	defer func() { <-s.work }()
-	lock, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return
-	}
-	defer lock.Close()
-	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-		return
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	defer release()
 	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 	record, err := checkout.Reconcile(ctx, s.vault, c.RecipientID, s.port)

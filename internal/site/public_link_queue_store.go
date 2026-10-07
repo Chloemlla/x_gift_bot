@@ -11,69 +11,23 @@ import (
 	"xgift/internal/checkout"
 )
 
-const publicQueueKey = "public-link-queue:v1"
+// v2 stores times as RFC 3339; an unreadable older snapshot starts empty.
+const publicQueueKey = "public-link-queue:v2"
 
-type savedPublicQueue struct {
-	Version         int              `json:"version"`
-	SavedAt         int64            `json:"saved_at"`
-	AverageDuration time.Duration    `json:"average_duration_ns"`
-	Jobs            []savedPublicJob `json:"jobs"`
-}
-
-type savedPublicJob struct {
-	ID          string            `json:"id"`
-	Owner       string            `json:"owner"`
-	State       string            `json:"state"`
-	Request     manualLinkRequest `json:"request"`
-	Left        int64             `json:"left,omitempty"`
-	Seen        int64             `json:"seen"`
-	Finished    int64             `json:"finished"`
-	NextAttempt int64             `json:"next_attempt"`
-	Started     int64             `json:"started"`
-	Cancelled   bool              `json:"cancelled,omitempty"`
-	Code        int               `json:"code"`
-	Result      []byte            `json:"result,omitempty"`
-}
-
-func queueMillis(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.UnixMilli()
-}
-func queueTime(ms int64) time.Time {
-	if ms == 0 {
-		return time.Time{}
-	}
-	return time.UnixMilli(ms)
-}
-
-// Caller holds the queue mutex. Encrypt ownership cookies and checkout URLs with
-// the vault; admission and processing transitions reach disk before acknowledgement.
-func (s *server) persistPublicLinkQueueLocked() error {
-	q := &s.linkQueue
-	if !q.dirty || s.vault == nil {
-		return nil
-	}
-	saved := savedPublicQueue{Version: 1, SavedAt: time.Now().UnixMilli(), AverageDuration: q.averageDuration, Jobs: make([]savedPublicJob, 0, len(q.jobs))}
-	for _, j := range q.jobs {
-		saved.Jobs = append(saved.Jobs, savedPublicJob{ID: j.id, Owner: j.owner, State: j.state, Request: j.request, Seen: queueMillis(j.seen), Finished: queueMillis(j.finished), NextAttempt: queueMillis(j.nextAttempt), Started: queueMillis(j.started), Code: j.code, Result: j.result, Cancelled: j.cancelled, Left: queueMillis(j.left)})
-	}
-	b, err := json.Marshal(saved)
+// saveQueue encrypts ownership cookies and checkout URLs with the vault.
+// Admission and processing transitions reach disk before acknowledgement.
+// Caller holds the queue mutex.
+func (s *server) saveQueue() error {
+	b, err := json.Marshal(s.linkQueue.jobs)
 	if err != nil {
 		return err
 	}
 	defer clear(b)
-	if err = s.vault.Put(publicQueueKey, b); err != nil {
-		return err
-	}
-	q.dirty = false
-	q.lastPersist = time.Now()
-	return nil
+	return s.vault.Put(publicQueueKey, b)
 }
 
 func (s *server) savePublicQueueOrReply(w http.ResponseWriter) bool {
-	if err := s.persistPublicLinkQueueLocked(); err != nil {
+	if err := s.saveQueue(); err != nil {
 		log.Printf("public queue admission checkpoint failed")
 		message(w, http.StatusServiceUnavailable, "暂时无法保存排队信息，请稍后重试。")
 		return false
@@ -83,6 +37,7 @@ func (s *server) savePublicQueueOrReply(w http.ResponseWriter) bool {
 
 // Restore before starting HTTP or workers. In-flight requests re-enter the same
 // position and use the checkout ledger to reconcile any completed upstream order.
+// The queue is soft state: a damaged snapshot or ticket is dropped, never fatal.
 func (s *server) restorePublicLinkQueue() error {
 	b, err := s.vault.Get(publicQueueKey)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -92,49 +47,29 @@ func (s *server) restorePublicLinkQueue() error {
 		return fmt.Errorf("read public queue: %w", err)
 	}
 	defer clear(b)
-	var saved savedPublicQueue
+	var saved []*publicLinkJob
 	if err = json.Unmarshal(b, &saved); err != nil {
-		return errors.New("invalid public queue snapshot")
+		log.Printf("public queue snapshot unreadable; starting empty")
 	}
-	if saved.Version != 1 || len(saved.Jobs) > 500 || saved.AverageDuration < 0 {
-		return errors.New("invalid public queue snapshot")
-	}
-	q := &s.linkQueue
 	now := time.Now()
 	cat, catalogErr := checkout.ReadCatalog(s.vault)
-	jobs := make([]*publicLinkJob, 0, len(saved.Jobs))
-	ids := make(map[string]bool)
-	for i, j := range saved.Jobs {
-		// One bad ticket must not keep the whole site from starting.
-		if j.ID == "" || ids[j.ID] || j.Owner == "" || !usernamePattern.MatchString(j.Request.Username) || j.Request.Months < 1 || j.Request.Months > 24 || (j.State != "queued" && j.State != "processing" && j.State != "done") || (j.State == "done" && (j.Code < 200 || j.Code > 599 || !json.Valid(j.Result))) {
-			log.Printf("public queue restore skipped invalid ticket: index=%d state=%q months=%d", i, j.State, j.Request.Months)
+	q := &s.linkQueue
+	q.jobs = nil
+	for _, j := range saved {
+		if j == nil || j.Cancelled || j.ID == "" || j.Owner == "" || !usernamePattern.MatchString(j.Request.Username) {
 			continue
 		}
-		if _, err := cat.PlanFor(j.Request.Months); catalogErr == nil && err != nil && j.State != "done" {
-			log.Printf("public queue restore skipped ticket for unconfigured plan: index=%d months=%d", i, j.Request.Months)
-			continue
-		}
-		ids[j.ID] = true
-		if j.Cancelled {
-			continue
-		}
-		job := &publicLinkJob{id: j.ID, owner: j.Owner, state: j.State, left: queueTime(j.Left), request: j.Request, seen: queueTime(j.Seen), finished: queueTime(j.Finished), nextAttempt: queueTime(j.NextAttempt), started: queueTime(j.Started), code: j.Code, result: j.Result}
-		if job.state == "done" && job.code >= 500 {
-			job.code = http.StatusUnprocessableEntity // older snapshots stored final 5xx results
-		}
-		if job.state != "done" {
+		if j.State != "done" {
+			if _, err := cat.PlanFor(j.Request.Months); catalogErr == nil && err != nil {
+				continue
+			}
 			// Give existing browsers a full reconnect grace period after downtime.
-			job.state = "queued"
-			job.seen = now
-			job.started = time.Time{}
-			job.nextAttempt = time.Time{}
+			j.State, j.Seen, j.Started, j.NextAttempt = "queued", now, time.Time{}, time.Time{}
 		}
-		jobs = append(jobs, job)
+		q.jobs = append(q.jobs, j)
 	}
-	q.jobs, q.averageDuration = jobs, saved.AverageDuration
-	q.prune(now)
-	q.dirty = true
-	if err := s.persistPublicLinkQueueLocked(); err != nil {
+	s.prune(now)
+	if err := s.saveQueue(); err != nil {
 		return err
 	}
 	s.refreshPublicLinkWait(now)

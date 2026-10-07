@@ -7,9 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
-	"syscall"
 	"time"
 	"xgift/internal/checkout"
 )
@@ -311,29 +309,12 @@ func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 		message(w, 409, "预览已过期，请重新生成。")
 		return
 	}
-	select {
-	case s.work <- struct{}{}:
-	default:
+	release, ok := s.tryLock()
+	if !ok {
 		message(w, 409, "当前有订单处理中，请稍后再试。")
 		return
 	}
 	handed := false
-	defer func() {
-		if !handed {
-			<-s.work
-		}
-	}()
-	lock, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		message(w, 503, "无法锁定付款队列。")
-		return
-	}
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lock.Close()
-		message(w, 409, "另一任务正在处理订单。")
-		return
-	}
-	release := func() { syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); lock.Close() }
 	defer func() {
 		if !handed {
 			release()
@@ -396,7 +377,6 @@ func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 	s.jobs.Add(1)
 	go func() {
 		defer s.jobs.Done()
-		defer func() { <-s.work }()
 		defer release()
 		s.runRecovery(q.ID, binding)
 	}()

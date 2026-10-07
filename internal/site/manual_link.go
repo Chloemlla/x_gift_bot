@@ -132,8 +132,11 @@ func (s *server) executeManualLink(w http.ResponseWriter, r *http.Request, q man
 	if err != nil {
 		// Error classification only: never log links, ownership cookies, card data,
 		// upstream response bodies or authorization headers.
+		// Waiting for the active payment window is normal at the queue head.
 		reason := manualLinkFailureReason(err)
-		log.Printf("manual link failed: public=%t username=%s months=%d reason=%s", publicOwner != "", q.Username, q.Months, reason)
+		if !errors.Is(err, checkout.ErrCheckoutRateLimited) {
+			log.Printf("manual link failed: public=%t username=%s months=%d reason=%s", publicOwner != "", q.Username, q.Months, reason)
+		}
 		switch {
 		case errors.Is(err, checkout.ErrCheckoutRateLimited):
 			seconds := 15

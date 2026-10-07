@@ -379,8 +379,8 @@ func run() error {
 	}
 	result, e := checkout.Run(ctx, v, command, *pay, *port, *months)
 	if result != nil {
-		if e == nil || result.Status == "requires_action" || result.Status == "unknown" || result.Status == "submitting" {
-			fmt.Println(result.URL)
+		if link := checkout.CheckoutLink(result); link != "" {
+			fmt.Println(link)
 		}
 		fmt.Fprintln(os.Stderr, "Checkout status:", result.Status)
 	}

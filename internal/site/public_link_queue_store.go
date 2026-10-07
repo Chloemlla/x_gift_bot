@@ -11,7 +11,7 @@ import (
 	"xgift/internal/checkout"
 )
 
-// v2 stores times as RFC 3339; an unreadable older snapshot starts empty.
+// v2 stores times as RFC 3339; unreadable snapshots fail closed.
 const publicQueueKey = "public-link-queue:v2"
 
 // saveQueue encrypts ownership cookies and checkout URLs with the vault.
@@ -37,7 +37,7 @@ func (s *server) savePublicQueueOrReply(w http.ResponseWriter) bool {
 
 // Restore before starting HTTP or workers. In-flight requests re-enter the same
 // position and use the checkout ledger to reconcile any completed upstream order.
-// The queue is soft state: a damaged snapshot or ticket is dropped, never fatal.
+// A damaged snapshot or ticket stops startup rather than losing waiting users.
 func (s *server) restorePublicLinkQueue() error {
 	b, err := s.vault.Get(publicQueueKey)
 	var saved []*publicLinkJob
@@ -50,7 +50,7 @@ func (s *server) restorePublicLinkQueue() error {
 	} else {
 		defer clear(b)
 		if err = json.Unmarshal(b, &saved); err != nil {
-			log.Printf("public queue snapshot unreadable; starting empty")
+			return fmt.Errorf("public queue snapshot unreadable; refusing to discard tickets")
 		}
 	}
 	if saved == nil {
@@ -61,19 +61,21 @@ func (s *server) restorePublicLinkQueue() error {
 	q := &s.linkQueue
 	q.jobs = nil
 	for _, j := range saved {
-		if j == nil || j.Cancelled || j.ID == "" || j.Owner == "" || !validUsername(j.Request.Username) {
-			continue
+		if j == nil || j.ID == "" || j.Owner == "" || !validUsername(j.Request.Username) {
+			return errors.New("invalid saved public queue ticket; refusing to discard it")
 		}
 		if j.State != "done" {
-			if _, err := cat.PlanFor(j.Request.Months); catalogErr == nil && err != nil {
-				continue
+			if _, err := cat.PlanFor(j.Request.Months); catalogErr != nil || err != nil {
+				return errors.New("saved public queue plan unavailable; refusing to discard tickets")
 			}
 			// Give existing browsers a full reconnect grace period after downtime.
-			j.State, j.Seen, j.Started, j.NextAttempt = "queued", now, time.Time{}, time.Time{}
+			j.State, j.Seen, j.Left, j.Started, j.NextAttempt = "queued", now, time.Time{}, time.Time{}, time.Time{}
 		}
 		q.jobs = append(q.jobs, j)
 	}
-	s.prune(now)
+	q.preserveUntil = now.Add(5 * time.Minute)
+	// Preserve every saved ticket and its position across rollout, including
+	// completed history. Normal request-time pruning remains separate.
 	if err := s.saveQueue(); err != nil {
 		return err
 	}
@@ -115,8 +117,7 @@ func (s *server) readV1Queue() ([]*publicLinkJob, error) {
 		} `json:"jobs"`
 	}
 	if err = json.Unmarshal(b, &v1); err != nil {
-		log.Printf("v1 public queue snapshot unreadable; starting empty")
-		return nil, nil
+		return nil, errors.New("v1 public queue unreadable; refusing to discard tickets")
 	}
 	ms := func(v int64) time.Time {
 		if v == 0 {

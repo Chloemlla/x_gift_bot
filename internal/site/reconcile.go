@@ -40,7 +40,7 @@ func (s *server) reconcileStatus(ctx context.Context, c *codeRow) {
 	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 	record, err := checkout.Reconcile(ctx, s.vault, c.RecipientID, s.port)
-	if record != nil && checkout.IsPaymentDeclined(record) && record.RecipientID == c.RecipientID && record.Username == c.Username && record.Months == c.Months {
+	if record != nil && record.Status != "succeeded" && checkout.IsPaymentDeclined(record) && record.RecipientID == c.RecipientID && record.Username == c.Username && record.Months == c.Months {
 		msg := "付款被支付机构拒绝，本次兑换未完成。请联系管理员处理，请勿重复提交。"
 		if _, e := s.db.Exec("UPDATE codes SET message=? WHERE id=? AND status='review' AND recipient_id=? AND username=? AND months=?", msg, c.ID, c.RecipientID, c.Username, c.Months); e == nil {
 			c.Message = msg
@@ -80,17 +80,12 @@ func (s *server) reconcileLoop() {
 		case <-ticker.C:
 		}
 		var c codeRow
-		err := s.db.QueryRow("SELECT id,recipient_id,username,months,status,progress,updated FROM codes WHERE status='review' AND recipient_id IS NOT NULL AND id>? AND updated>? ORDER BY id LIMIT 1", cursor, time.Now().Add(-7*24*time.Hour).Unix()).Scan(&c.ID, &c.RecipientID, &c.Username, &c.Months, &c.Status, &c.Progress, &c.Updated)
+		err := s.db.QueryRow("SELECT id,recipient_id,username,months,status,progress,updated FROM codes WHERE status='review' AND recipient_id IS NOT NULL AND id>? ORDER BY id LIMIT 1", cursor).Scan(&c.ID, &c.RecipientID, &c.Username, &c.Months, &c.Status, &c.Progress, &c.Updated)
 		if err != nil {
 			cursor = ""
 			continue
 		}
 		cursor = c.ID
-		// Definite declines need operator action, not endless background polls.
-		// An explicit status query can still discover a later manual payment.
-		if s.paymentDeclined(&c) {
-			continue
-		}
 		ctx, cancel := context.WithTimeout(s.ctx, 8*time.Second)
 		s.reconcileStatus(ctx, &c)
 		cancel()

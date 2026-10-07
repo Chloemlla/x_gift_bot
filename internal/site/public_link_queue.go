@@ -28,10 +28,11 @@ type publicLinkJob struct {
 
 // Queue tickets and their browser ownership survive restarts in the vault.
 type publicLinkQueue struct {
-	mu           sync.Mutex
-	jobs         []*publicLinkJob
-	blockedUntil time.Time
-	windowUser   string
+	mu            sync.Mutex
+	jobs          []*publicLinkJob
+	preserveUntil time.Time
+	blockedUntil  time.Time
+	windowUser    string
 }
 
 // linkBuildTime is the typical time to verify X and create one checkout.
@@ -41,6 +42,9 @@ const linkBuildTime = 20 * time.Second
 // Caller holds the queue mutex.
 func (s *server) prune(now time.Time) {
 	q := &s.linkQueue
+	if now.Before(q.preserveUntil) {
+		return
+	}
 	keep := q.jobs[:0]
 	for _, j := range q.jobs {
 		if j.State == "queued" && (j.Cancelled || now.Sub(j.Seen) > 5*time.Minute || (!j.Left.IsZero() && now.Sub(j.Left) > 90*time.Second)) {
@@ -81,7 +85,7 @@ func (s *server) enqueuePublicLink(w http.ResponseWriter, request manualLinkRequ
 			if !s.savePublicQueueOrReply(w) {
 				return
 			}
-			q.respond(w, j)
+			s.respondPublicLink(w, j)
 			return
 		}
 	}
@@ -94,11 +98,12 @@ func (s *server) enqueuePublicLink(w http.ResponseWriter, request manualLinkRequ
 	if !s.savePublicQueueOrReply(w) {
 		return
 	}
-	q.respond(w, j)
+	s.respondPublicLink(w, j)
 }
 
 // All callers hold the queue mutex; only this browser may read its ticket.
-func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
+func (s *server) respondPublicLink(w http.ResponseWriter, job *publicLinkJob) {
+	q := &s.linkQueue
 	if job.Cancelled {
 		message(w, 404, "已退出排队。")
 		return
@@ -109,6 +114,42 @@ func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
 		if job.Code == 200 && !job.liveLink(time.Now()) {
 			message(w, http.StatusGone, "上次的付款链接已结束，如需付款请重新排队。可用「查询付款状态」确认是否已付款。")
 			return
+		}
+		if job.Code == 200 && job.liveLink(time.Now()) {
+			// A saved response is history, not proof that a link remains payable.
+			release, ok := s.tryLock()
+			if !ok {
+				message(w, 409, "正在核实原付款链接，请稍后查询。")
+				return
+			}
+			defer release()
+			ctx, cancel := context.WithTimeout(s.ctx, 8*time.Second)
+			defer cancel()
+			order, err := checkout.PublicOrderStatus(s.vault, job.Request.Username, job.Owner)
+			var previous struct {
+				URL string `json:"checkout_url"`
+			}
+			json.Unmarshal(job.Result, &previous)
+			if err != nil || order == nil || order.URL != previous.URL {
+				message(w, http.StatusGone, "历史付款链接已停止提供，请查询原订单付款状态。")
+				return
+			}
+			if order.Status == "succeeded" {
+				reply(w, 200, map[string]any{"status": "succeeded", "message": "原订单已付款成功，无需再次付款。"})
+				return
+			}
+			if err = checkout.VerifyExistingPublicLink(ctx, s.vault, order); err != nil {
+				message(w, 409, "原付款结果尚未核实，请查询付款状态；请勿重复付款。")
+				return
+			}
+			if order.Status == "succeeded" {
+				reply(w, 200, map[string]any{"status": "succeeded", "message": "原订单已付款成功，无需再次付款。"})
+				return
+			}
+			if checkout.CheckoutLink(order) == "" || !checkout.PublicOrderOpen(order, time.Now()) {
+				message(w, http.StatusGone, "原付款链接已停止提供，请查询付款状态。")
+				return
+			}
 		}
 		reply(w, job.Code, job.Result)
 		return
@@ -174,7 +215,7 @@ func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 	for _, j := range q.jobs {
 		if j.ID == r.PathValue("ticket") && j.Owner == c.Value && !j.Cancelled {
 			j.Seen, j.Left = now, time.Time{}
-			q.respond(w, j)
+			s.respondPublicLink(w, j)
 			return
 		}
 	}

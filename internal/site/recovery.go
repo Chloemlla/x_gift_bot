@@ -69,7 +69,7 @@ func (s *server) saveRecovery(q *recoveryBatch) error {
 	}
 	return s.vault.Put("admin-recovery:latest", b)
 }
-func recoveryView(q *recoveryBatch) any {
+func (s *server) recoveryView(q *recoveryBatch) any {
 	if q == nil {
 		return nil
 	}
@@ -79,6 +79,17 @@ func recoveryView(q *recoveryBatch) any {
 	for i := range out.Items {
 		out.Items[i].Recipient = ""
 		out.Items[i].Digest = ""
+		out.Items[i].CheckoutURL = ""
+		if q.Items[i].Recipient != "" {
+			raw, err := s.vault.Get("checkout:" + q.Items[i].Recipient)
+			if err == nil {
+				var order checkout.Record
+				if json.Unmarshal(raw, &order) == nil && order.RecipientID == q.Items[i].Recipient && order.Username == q.Items[i].Username && order.Months == q.Items[i].Months {
+					out.Items[i].CheckoutURL = checkout.CheckoutLink(&order)
+				}
+				clear(raw)
+			}
+		}
 	}
 	return out
 }
@@ -133,7 +144,7 @@ func (s *server) recoveryStatus(w http.ResponseWriter, r *http.Request) {
 		message(w, 503, "无法读取当前订单状态。")
 		return
 	}
-	reply(w, 200, map[string]any{"batch": recoveryView(q), "network": network, "cards": cards, "rotation": rotation, "paused": paused, "summary": map[string]int{"review": review, "processing": processing}})
+	reply(w, 200, map[string]any{"batch": s.recoveryView(q), "network": network, "cards": cards, "rotation": rotation, "paused": paused, "summary": map[string]int{"review": review, "processing": processing}})
 }
 func (s *server) recoveryCandidate(id string) (recoveryItem, error) {
 	item := recoveryItem{ID: id, State: "skipped"}
@@ -278,7 +289,7 @@ func (s *server) recoveryPreview(w http.ResponseWriter, r *http.Request) {
 		message(w, 503, "无法保存预览。")
 		return
 	}
-	reply(w, 200, map[string]any{"batch": recoveryView(q)})
+	reply(w, 200, map[string]any{"batch": s.recoveryView(q)})
 }
 func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -302,7 +313,7 @@ func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if q.State != "preview" {
-		reply(w, 200, map[string]any{"batch": recoveryView(q)})
+		reply(w, 200, map[string]any{"batch": s.recoveryView(q)})
 		return
 	}
 	if time.Now().Unix()-q.Created > 3600 {
@@ -380,7 +391,7 @@ func (s *server) recoveryStart(w http.ResponseWriter, r *http.Request) {
 		defer release()
 		s.runRecovery(q.ID, binding)
 	}()
-	reply(w, 202, map[string]any{"batch": recoveryView(q)})
+	reply(w, 202, map[string]any{"batch": s.recoveryView(q)})
 }
 func (s *server) recoveryStop(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -404,7 +415,7 @@ func (s *server) recoveryStop(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	reply(w, 200, map[string]any{"batch": recoveryView(q)})
+	reply(w, 200, map[string]any{"batch": s.recoveryView(q)})
 }
 func (s *server) finishRecovery(id, state, msg string) {
 	s.recoveryMu.Lock()

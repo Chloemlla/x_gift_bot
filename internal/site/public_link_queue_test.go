@@ -2,6 +2,7 @@ package site
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -70,8 +71,8 @@ func TestPublicQueueFIFOOwnershipDeduplicationAndRateWait(t *testing.T) {
 	if strings.Join(calls, ",") != "first,first,second" {
 		t.Fatal(calls)
 	}
-	if w := status("owner-a"); w.Code != 200 || !strings.Contains(w.Body.String(), "synthetic-first") || strings.Contains(w.Body.String(), "synthetic-second") {
-		t.Fatal("wrong order returned", w.Body.String())
+	if w := status("owner-a"); w.Code != 409 || strings.Contains(w.Body.String(), "synthetic-first") || strings.Contains(w.Body.String(), "synthetic-second") {
+		t.Fatal("unverified cached order returned", w.Body.String())
 	}
 	if a == enqueue(first, "owner-a") {
 		t.Fatal("new submission reused completed ticket")
@@ -170,6 +171,9 @@ func checkFixture(t *testing.T) *server {
 
 func TestRestoreKeepsV1QueueOrder(t *testing.T) {
 	s := checkFixture(t)
+	if err := s.vault.Put("catalog", []byte(`{"merchant":"acct_Test","currency":"usd","plans":[{"months":3,"amount":30000,"product":"prod_Test3"},{"months":6,"amount":60000,"product":"prod_Test6"}]}`)); err != nil {
+		t.Fatal(err)
+	}
 	seen := time.Now().UnixMilli()
 	v1 := fmt.Sprintf(`{"version":1,"jobs":[{"id":"a","owner":"%s","state":"queued","request":{"username":"alice","months":6},"seen":%d},{"id":"b","owner":"%s","state":"processing","request":{"username":"bob","months":3},"seen":%d}]}`, strings.Repeat("a", 64), seen, strings.Repeat("b", 64), seen)
 	if err := s.vault.Put("public-link-queue:v1", []byte(v1)); err != nil {
@@ -181,5 +185,65 @@ func TestRestoreKeepsV1QueueOrder(t *testing.T) {
 	jobs := s.linkQueue.jobs
 	if len(jobs) != 2 || jobs[0].ID != "a" || jobs[1].ID != "b" || jobs[1].State != "queued" || jobs[1].Request.Months != 3 {
 		t.Fatalf("v1 queue not carried over: %+v", jobs)
+	}
+}
+
+func TestRestoreRetainsAllTicketsAndOrder(t *testing.T) {
+	s := checkFixture(t)
+	s.vault.Put("catalog", []byte(`{"merchant":"acct_Test","currency":"usd","plans":[{"months":3,"amount":30000,"product":"prod_Test"}]}`))
+	old := time.Now().Add(-time.Hour)
+	saved := []*publicLinkJob{
+		{ID: "first", Owner: "a", State: "queued", Request: manualLinkRequest{Username: "alice", Months: 3}, Seen: old, Left: old},
+		{ID: "second", Owner: "b", State: "done", Request: manualLinkRequest{Username: "bob", Months: 3}, Finished: old, Result: json.RawMessage(`{"status":"succeeded"}`)},
+		{ID: "third", Owner: "c", State: "queued", Request: manualLinkRequest{Username: "carol", Months: 3}, Cancelled: true},
+	}
+	b, _ := json.Marshal(saved)
+	s.vault.Put(publicQueueKey, b)
+	if err := s.restorePublicLinkQueue(); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.linkQueue.jobs) != 3 {
+		t.Fatal("tickets lost on restore")
+	}
+	for i, j := range saved {
+		if s.linkQueue.jobs[i].ID != j.ID || s.linkQueue.jobs[i].Owner != j.Owner || s.linkQueue.jobs[i].Request != j.Request {
+			t.Fatal("queue identity/order changed")
+		}
+	}
+}
+
+func TestDamagedQueueFailsClosedWithoutOverwrite(t *testing.T) {
+	s := checkFixture(t)
+	before := []byte(`{"broken":`)
+	s.vault.Put(publicQueueKey, before)
+	if err := s.restorePublicLinkQueue(); err == nil {
+		t.Fatal("damaged queue reset")
+	}
+	after, _ := s.vault.Get(publicQueueKey)
+	if string(after) != string(before) {
+		t.Fatal("damaged queue overwritten")
+	}
+}
+
+func TestQueueNeverReplaysPaidLink(t *testing.T) {
+	s := checkFixture(t)
+	s.ctx = context.Background()
+	s.lockPath = filepath.Join(t.TempDir(), "checkout.lock")
+	owner := strings.Repeat("a", 64)
+	// Same synthetic browser binding as PublicOrderStatus, no upstream requests.
+	sum := sha256.Sum256([]byte(owner))
+	link := "https://checkout.stripe.com/a/pay/cs_live_Test"
+	order := map[string]any{"username": "recipient", "recipient_id": "1234", "months": 3, "status": "succeeded", "session_id": "cs_live_Test", "url": link, "created": time.Now().Unix()}
+	b, _ := json.Marshal(map[string]any{"owner": fmt.Sprintf("%x", sum), "order": order})
+	s.vault.Put("public-checkout:1234", b)
+	result, _ := json.Marshal(map[string]any{"checkout_url": link, "expires_at": time.Now().Add(time.Minute).Unix()})
+	job := &publicLinkJob{Owner: owner, State: "done", Code: 200, Request: manualLinkRequest{Username: "recipient", Months: 3}, Result: result}
+	w := httptest.NewRecorder()
+	s.respondPublicLink(w, job)
+	if w.Code != 200 || strings.Contains(w.Body.String(), link) || !strings.Contains(w.Body.String(), "succeeded") {
+		t.Fatal("paid checkout link replayed")
+	}
+	if string(job.Result) != string(result) {
+		t.Fatal("historical queue result overwritten")
 	}
 }

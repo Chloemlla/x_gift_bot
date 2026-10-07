@@ -14,7 +14,7 @@ var ErrVerifyUnpaid = errors.New("inactive checkout requires operator verificati
 
 // CheckoutLink validates before exposing a persisted link to the admin UI.
 func CheckoutLink(r *Record) string {
-	if r != nil && sessionURL(r.URL, r.SessionID) {
+	if r != nil && !r.LinkBlocked && (r.Status == "created" || r.Status == "requires_action") && sessionURL(r.URL, r.SessionID) {
 		return r.URL
 	}
 	return ""
@@ -90,6 +90,10 @@ func PrepareRecoveryLinkForRecipient(ctx context.Context, v *vault.Vault, user, 
 	return prepareRecoveryLink(ctx, v, &r, s, plan, verifiedUnpaid, eligible, create)
 }
 func prepareRecoveryLink(ctx context.Context, v *vault.Vault, r *Record, s *stripeClient, plan Plan, verified bool, eligible func() error, create func() (string, string, error)) (*Record, error) {
+	r.LinkBlocked = true
+	if err := save(v, r); err != nil {
+		return r, err
+	}
 	var lookupErr error
 	if unsubmitted(r) {
 		page, err := s.page(ctx, r, true)
@@ -110,6 +114,10 @@ func prepareRecoveryLink(ctx context.Context, v *vault.Vault, r *Record, s *stri
 				return r, err
 			}
 			if err = rememberVerifiedCheckout(v, r, plan, page); err != nil {
+				return r, err
+			}
+			r.LinkBlocked = false
+			if err = save(v, r); err != nil {
 				return r, err
 			}
 			return r, holdPublicCheckout(v, r, plan, time.Now())

@@ -76,7 +76,9 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 	if existing != nil && existing.Status == "succeeded" {
 		return existing, nil
 	}
-	replace := false
+	if existing != nil && existing.Status == "creating" {
+		return existing, ErrPublicLinkPending
+	}
 	if existing != nil && existing.Status == "created" {
 		// Validate the old session against its original product, even when the
 		// visitor selected a different plan. Never return that link for a new plan.
@@ -86,26 +88,17 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 			b, _ := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: *existing})
 			return existing, v.Put("public-checkout:"+recipient, b)
 		}
-		declined := errors.Is(err, ErrPublicPaymentDeclined)
-		if declined {
-			released, releaseErr := releaseDeclinedCheckout(v, existing.SessionID)
-			if releaseErr != nil {
-				return nil, releaseErr
-			}
-			if released {
-				return nil, ErrPublicPaymentDeclined
-			}
-		}
-		if err != nil && !errors.Is(err, ErrVerifyUnpaid) && !declined {
+		if err != nil {
 			return nil, err
 		}
 		if err == nil && publicLinkMatches(existing, plan) && publicLinkFresh(existing, time.Now()) {
 			return existing, holdPublicCheckout(v, existing, plan, time.Now())
 		}
-		replace = true
-		if !declined {
-			x.publicReplacement = existing.SessionID
+		existing.LinkBlocked = true
+		if err = persistPublicVerification(v, existing); err != nil {
+			return nil, err
 		}
+		return nil, ErrVerifyUnpaid
 	}
 	if err = x.checkCreation(ctx, time.Now()); err != nil {
 		return nil, err
@@ -121,9 +114,6 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 		return nil, err
 	}
 	r := Record{Username: user, RecipientID: recipient, Months: months, Amount: plan.Minor, Currency: strings.ToUpper(plan.Currency), ProductID: plan.ProductID, Status: "creating", Created: time.Now().Unix()}
-	if existing != nil && !replace {
-		r = *existing
-	}
 	persist := func() error {
 		b, e := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: r})
 		if e != nil {
@@ -131,31 +121,8 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 		}
 		return v.Put("public-checkout:"+recipient, b)
 	}
-	// Preserve previous sessions without interpreting inactivity as payment failure.
-	// The public reservation remains isolated from saved-card payment records.
-	if replace {
-		old, e := v.Get("public-checkout:" + recipient)
-		if e != nil {
-			return nil, e
-		}
-		proof, _ := json.Marshal(struct {
-			Previous   json.RawMessage `json:"previous"`
-			VerifiedAt int64           `json:"verified_at"`
-		}{old, time.Now().Unix()})
-		next, _ := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: r})
-		err = v.ReplaceArchived("public-checkout:"+recipient, fmt.Sprintf("public-checkout-history:%s:%d", recipient, time.Now().UnixNano()), old, proof, next)
-	} else {
-		err = persist()
-	}
-	if err != nil {
+	if err = persist(); err != nil {
 		return nil, err
-	}
-	// The user requested a replacement for this public order. Retire only its
-	// own reservation; a different recipient's payment window remains protected.
-	if replace {
-		if err = x.releasePublicReplacement(v); err != nil {
-			return nil, err
-		}
 	}
 	r.SessionID, r.URL, err = x.create(ctx, user, recipient, plan)
 	if err != nil {
@@ -198,7 +165,13 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 
 // Verify against Stripe, not merely X's "Unpaid" response or a cached URL.
 // No card tokenization or payment confirmation occurs in this path.
-func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Record, plan Plan) error {
+func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Record, plan Plan) (resultErr error) {
+	defer func() {
+		r.LinkBlocked = resultErr != nil || r.Status != "created"
+		if err := persistPublicVerification(v, r); err != nil {
+			resultErr = err
+		}
+	}()
 	read := x.readCheckout
 	if read == nil {
 		read = func(ctx context.Context, r *Record) (*paymentPage, error) {
@@ -216,7 +189,7 @@ func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Re
 			r.Status = "succeeded"
 			return nil
 		}
-		return ErrVerifyUnpaid
+		return ErrPublicPaymentInProgress
 	}
 	if err != nil {
 		return err
@@ -327,7 +300,7 @@ func publicLinkExisting(v *vault.Vault, user, recipient string, plan Plan) (*Rec
 	}
 	switch r.Status {
 	case "created", "succeeded":
-		if CheckoutLink(&r) == "" {
+		if !sessionURL(r.URL, r.SessionID) {
 			return nil, ErrPublicLinkConflict
 		}
 	case "creating":
@@ -394,4 +367,57 @@ func cachedPublicLinkForClient(ctx context.Context, v *vault.Vault, user, owner 
 		err = holdPublicCheckout(v, r, plan, time.Now())
 	}
 	return r, true, err
+}
+
+// Verification updates the same session only, preserving browser ownership.
+// Callers hold checkout.lock; never overwrite a newer checkout with an old read.
+func persistPublicVerification(v *vault.Vault, r *Record) error {
+	key := "public-checkout:" + r.RecipientID
+	raw, err := v.Get(key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer clear(raw)
+	var saved publicLinkRecord
+	if err = json.Unmarshal(raw, &saved); err != nil {
+		return err
+	}
+	if saved.Order.SessionID != r.SessionID {
+		return ErrPublicLinkConflict
+	}
+	saved.Order = *r
+	b, err := json.Marshal(saved)
+	if err != nil {
+		return err
+	}
+	return v.Put(key, b)
+}
+
+// VerifyExistingPublicLink only queries the exact persisted public session.
+// Caller holds checkout.lock. No X creation request or card API can run here.
+func VerifyExistingPublicLink(ctx context.Context, v *vault.Vault, r *Record) error {
+	cat, err := ReadCatalog(v)
+	if err != nil {
+		return err
+	}
+	plan, err := cat.PlanFor(r.Months)
+	if err != nil || !publicLinkMatches(r, plan) {
+		return ErrPublicLinkConflict
+	}
+	x := &xClient{vault: v}
+	x.readCheckout = func(ctx context.Context, r *Record) (*paymentPage, error) {
+		s, err := newStripe(ctx, v, r.RecipientID, paymentRead)
+		if err != nil {
+			return nil, err
+		}
+		defer s.close()
+		return s.page(ctx, r, false)
+	}
+	x.readCheckoutPaid = func(ctx context.Context, r *Record, plan Plan) (bool, error) {
+		return verifiedCheckoutPaid(ctx, v, r, plan)
+	}
+	return verifyPublicCheckout(ctx, v, x, r, plan)
 }

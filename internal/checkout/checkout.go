@@ -14,6 +14,7 @@ import (
 )
 
 type Record struct {
+	LinkBlocked       bool         `json:"link_blocked,omitempty"`
 	ReplacementCount  int          `json:"replacement_count,omitempty"`
 	PreviousSession   string       `json:"previous_session,omitempty"`
 	ManualRecovery    bool         `json:"manual_recovery,omitempty"`
@@ -115,6 +116,13 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 	// Public manual checkouts must never be taken over by saved-card payment.
 	if raw, err := v.Get("public-checkout:" + recipient); err == nil {
 		clear(raw)
+		return nil, ErrPublicLinkConflict
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	// Browser and backend payment flows cannot share a recipient. A public
+	// checkout may be paid outside our local lock, so never create/charge here.
+	if _, err := v.Get("public-checkout:" + recipient); err == nil {
 		return nil, ErrPublicLinkConflict
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err

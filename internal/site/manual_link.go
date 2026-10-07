@@ -146,7 +146,7 @@ func (s *server) createLink(ctx context.Context, q manualLinkRequest, publicOwne
 		reason, o = "payment_declined", failed(409, "上游拒绝了本次付款，通道已让给下一位。重试需要重新排队。")
 		o.declined = true
 	case errors.Is(err, checkout.ErrPublicPaymentInProgress):
-		reason, o = "payment_in_progress", failed(409, "该订单正在付款或银行验证中，请先完成当前付款。")
+		reason, o = "payment_in_progress", failed(409, "原付款结果尚未核实，请查询付款状态或联系管理员；不会自动重建或再次扣款。")
 	case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):
 		reason, o = "private_order", failed(409, "该账号已有兑换或后台订单，请使用原付款链接或联系管理员；主页不会重复创建订单。")
 	case errors.Is(err, checkout.ErrPublicLinkPending):
@@ -154,7 +154,7 @@ func (s *server) createLink(ctx context.Context, q manualLinkRequest, publicOwne
 	case errors.Is(err, checkout.ErrPublicLinkConflict):
 		reason, o = "public_order_conflict", failed(409, "该账号暂时无法生成新链接，请使用原付款页面或联系管理员核实。")
 	case errors.Is(err, checkout.ErrVerifyUnpaid) && publicOwner != "":
-		reason, o = "link_expired_unpaid", failed(409, "原付款链接已失效且未完成付款，请重新排队获取新链接。")
+		reason, o = "link_expired_unpaid", failed(409, "原付款链接已停止提供；请查询原订单状态或联系管理员核实，不会自动重建。")
 	case errors.Is(err, checkout.ErrVerifyUnpaid):
 		reason, o = "requires_unpaid_confirmation", linkOutcome{status: 409, body: map[string]any{"message": "原付款链接已失效，请核实原订单未付款后再重新生成。", "needs_unpaid_verification": true}}
 	case errors.Is(err, checkout.ErrNotEligible):
@@ -171,7 +171,7 @@ func (s *server) createLink(ctx context.Context, q manualLinkRequest, publicOwne
 			reason = "x_read_failure"
 		}
 	}
-	log.Printf("manual link failed: public=%t username=%s months=%d reason=%s", publicOwner != "", q.Username, q.Months, reason)
+	log.Printf("manual link failed: public=%t months=%d reason=%s", publicOwner != "", q.Months, reason)
 	return o
 }
 
@@ -189,7 +189,7 @@ func (s *server) linkResult(record *checkout.Record, publicOwner string) linkOut
 	if publicOwner != "" {
 		result["expires_at"] = record.Created + int64(checkout.PublicLinkTTL/time.Second)
 		s.invalidateOlderPublicResults(record.Username, link)
-		log.Printf("public link ready: username=%s months=%d stripe_verified=true", record.Username, record.Months)
+		log.Printf("public link ready: months=%d stripe_verified=true", record.Months)
 	}
 	return linkOutcome{status: 200, body: result}
 }

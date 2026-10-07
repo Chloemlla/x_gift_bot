@@ -93,7 +93,10 @@ func TestPublicCheckoutVerificationRejectsWrongOrInactiveOrders(t *testing.T) {
 			if err == nil {
 				t.Fatal("unverified order accepted")
 			}
-			if (tc.name == "expired" || tc.name == "inactive") && !errors.Is(err, ErrVerifyUnpaid) {
+			if tc.name == "inactive" && !errors.Is(err, ErrPublicPaymentInProgress) {
+				t.Fatal(err)
+			}
+			if tc.name == "expired" && !errors.Is(err, ErrVerifyUnpaid) {
 				t.Fatal(err)
 			}
 		})

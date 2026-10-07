@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Box, Button, Card, CardContent, Checkbox, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Divider, FormControlLabel, LinearProgress, MenuItem, Paper, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Card, CardContent, Checkbox, Divider, FormControlLabel, LinearProgress, MenuItem, Paper, Stack, TextField, Typography } from "@mui/material";
 import LinkRounded from "@mui/icons-material/LinkRounded";
 import ContentCopyOutlined from "@mui/icons-material/ContentCopyOutlined";
 import CheckCircleOutlineRounded from "@mui/icons-material/CheckCircleOutlineRounded";
@@ -8,7 +8,6 @@ import OpenInNewRounded from "@mui/icons-material/OpenInNewRounded";
 import { adminApi } from "./adminApi";
 import { request } from "./shared";
 import { readQueueWithReconnect } from "./queueReconnect";
-import { isPaymentResult } from "./manualPaymentResult";
 import { PublicOrderLookup } from "./PublicOrderLookup";
 
 type Plan = { months: number; amount: number; currency: string };
@@ -54,7 +53,6 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
   const inFlight = useRef(false);
   const queueTicket = useRef<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const canNotify = typeof Notification !== "undefined" && Notification.permission !== "denied";
   const [notifyReady, setNotifyReady] = useState(() => typeof Notification !== "undefined" && Notification.permission === "granted");
@@ -170,7 +168,7 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
       const poll = (path: string) => readQueueWithReconnect(() => request<Result>(path, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(20000)])), controller.signal, undefined, undefined, {onRetry: () => setReconnecting(true)});
       let { ok, data, status } = resume
         ? await poll(`${endpoint}/queue/${encodeURIComponent(resume.ticket)}`)
-        : await request<Result>(endpoint, { username: user, months: selectedPlan.months, verified_unpaid: needsVerification && verified, queue_protocol: publicMode ? 1 : undefined }, AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]));
+        : await request<Result>(endpoint, { username: user, months: selectedPlan.months, verified_unpaid: needsVerification && verified }, AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]));
       if (resume) queueTicket.current = resume.ticket;
       while (ok && typeof data?.ticket === "string" && data.ticket && (data.status === "queued" || data.status === "processing")) {
         queueTicket.current = data.ticket;
@@ -189,7 +187,8 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
       // The previous link already ended (paid or expired): show the clean form.
       if (!ok && status === 410) return;
       if (!ok) { setNeedsVerification(Boolean(data?.needs_unpaid_verification)); setError(data?.message || "生成失败，请稍后重试。"); return; }
-      if (!isPaymentResult(data, user, selectedPlan)) {
+      // A 2xx may only acknowledge a queue ticket; render only a real order.
+      if (data.ticket || (data.status !== "succeeded" && typeof data.checkout_url !== "string")) {
         setError("尚未取得完整的付款订单，请刷新页面后重试。系统会先检查已有链接。"); return;
       }
       setNeedsVerification(false); setVerified(false); setResult(data); onShow?.();
@@ -242,19 +241,8 @@ export function ManualPaymentPanel({ publicMode = false, onShow }: { publicMode?
         {queueSummary.waiting > 0 ? <>当前排队 <strong>{queueSummary.waiting}</strong> 人，现在提交预计{formatWait(queueSummary.estimated_wait_seconds)}后轮到你。</> : <>当前无人排队，提交后预计{formatWait(queueSummary.estimated_wait_seconds)}生成链接。</>}
         {queueSummary.waiting >= 10 && " 等待期间需保持本页打开，请确认有空再提交。"}
       </Alert>}
-      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} aria-labelledby="confirm-payment-title" aria-describedby="confirm-payment-description" fullWidth maxWidth="xs">
-        <DialogTitle id="confirm-payment-title">确认生成付款链接？</DialogTitle>
-        <DialogContent>
-          <DialogContentText id="confirm-payment-description" color="text.primary">如果不想要付款，请不要点击生成链接。</DialogContentText>
-          <DialogContentText sx={{ mt: 2 }}>提交后需要排队{queueSummary?.waiting ? `（当前 ${queueSummary.waiting} 人，预计${formatWait(queueSummary.estimated_wait_seconds)}）` : ""}。轮到你时付款链接只保留 3 分钟，超时作废并需重新排队，请提前准备好银行卡。付款成功后 Premium 会直接赠送到 @{cleanUser || "填写的账号"}，不会生成兑换码。刷新页面会保留排队；关闭或离开网站后会自动退出排队。</DialogContentText>
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2.5, gap: 1 }}>
-          <Button onClick={() => setConfirmOpen(false)}>暂不生成</Button>
-          <Button variant="contained" onClick={() => { setConfirmOpen(false); void generate(); }}>确认生成</Button>
-        </DialogActions>
-      </Dialog>
       {planError && <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" onClick={() => void loadPlans(true)}>重新加载</Button>}>{planError}</Alert>}
-      {!(publicMode && (busy || result)) && <Box component="form" onSubmit={(e) => { e.preventDefault(); if (publicMode) setConfirmOpen(true); else void generate(); }} aria-busy={busy}>
+      {!(publicMode && (busy || result)) && <Box component="form" onSubmit={(e) => { e.preventDefault(); void generate(); }} aria-busy={busy}>
         <Box sx={{
           display: "grid",
           gridTemplateColumns: { xs: "minmax(0, 1fr)", sm: "minmax(0, 1fr) minmax(0, 1fr)", md: publicMode ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(260px, 1fr) minmax(235px, 320px) auto" },

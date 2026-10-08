@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"xgift/internal/vault"
@@ -245,5 +246,52 @@ func TestQueueNeverReplaysPaidLink(t *testing.T) {
 	}
 	if string(job.Result) != string(result) {
 		t.Fatal("historical queue result overwritten")
+	}
+}
+
+func TestRegenerationRequestConcurrentDedupAndRestart(t *testing.T) {
+	s := checkFixture(t)
+	request := manualLinkRequest{Username: "recipient", Months: 3, RequestID: strings.Repeat("a", 64)}
+	var wg sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			s.enqueuePublicLink(w, request, "owner")
+			if w.Code != 202 {
+				t.Errorf("enqueue status %d", w.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(s.linkQueue.jobs) != 1 {
+		t.Fatal("concurrent request queued twice")
+	}
+	original := s.linkQueue.jobs[0].ID
+	s.processPublicLinkQueue(context.Background(), func(_ context.Context, q manualLinkRequest, _ string) linkOutcome {
+		if q.RequestID != request.RequestID {
+			t.Fatal("request changed")
+		}
+		return failed(409, "synthetic finished")
+	})
+	w := httptest.NewRecorder()
+	s.enqueuePublicLink(w, request, "owner")
+	if w.Code != 409 || len(s.linkQueue.jobs) != 1 {
+		t.Fatal("done request generated another ticket")
+	}
+	if err := s.restorePublicLinkQueue(); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	s.enqueuePublicLink(w, request, "owner")
+	if w.Code != 409 || len(s.linkQueue.jobs) != 1 || s.linkQueue.jobs[0].ID != original {
+		t.Fatal("restart replayed request")
+	}
+	request.RequestID = strings.Repeat("b", 64)
+	w = httptest.NewRecorder()
+	s.enqueuePublicLink(w, request, "owner")
+	if w.Code != 202 || len(s.linkQueue.jobs) != 2 || s.linkQueue.jobs[0].ID != original {
+		t.Fatal("new explicit regeneration missing or reordered")
 	}
 }

@@ -13,31 +13,46 @@ import (
 	"xgift/internal/vault"
 )
 
+var ErrPublicPersistence = errors.New("public checkout persistence failed")
+
 var ErrPublicLinkConflict = errors.New("existing checkout requires private review")
 var ErrPublicLinkPrivateOrder = fmt.Errorf("%w: private order exists", ErrPublicLinkConflict)
 var ErrPublicLinkPending = errors.New("public checkout creation returned no usable link")
 var ErrPublicPaymentDeclined = errors.New("public payment declined; rejoin queue")
 var ErrPublicPaymentInProgress = errors.New("public checkout payment is in progress")
 
-// PublicLinkTTL is the fixed payment window, measured from order creation.
+// PublicLinkTTL is the local queue window, not upstream session expiration.
 const PublicLinkTTL = 3 * time.Minute
 
 const publicLinkTTL = PublicLinkTTL
 
 type publicLinkRecord struct {
-	Owner string `json:"owner"`
-	Order Record `json:"order"`
+	Owner     string   `json:"owner"`
+	Order     Record   `json:"order"`
+	History   []Record `json:"history,omitempty"`
+	RequestID string   `json:"request_id,omitempty"`
 }
 
 // PublicLinkForUsername never uses a saved card or an automatic-payment record.
-// Caller must hold checkout.lock. The browser cookie identifies queue requests;
-// verified public links may be retrieved across browsers for the same recipient.
+// Caller must hold checkout.lock. Regeneration is scoped to the owning browser.
 func PublicLinkForUsername(ctx context.Context, v *vault.Vault, user, owner string, port, months int) (*Record, error) {
 	user, plan, x, err := publicSetup(v, user, owner, port, months)
 	if err != nil {
 		return nil, err
 	}
 	defer x.close()
+	return publicLinkForClient(ctx, v, user, owner, plan, x)
+}
+
+// PublicLinkForRequest binds retries to one browser-owned generation request.
+// Caller holds checkout.lock. A different request explicitly creates a fresh link.
+func PublicLinkForRequest(ctx context.Context, v *vault.Vault, user, owner string, port, months int, requestID string) (*Record, error) {
+	user, plan, x, err := publicSetup(v, user, owner, port, months)
+	if err != nil {
+		return nil, err
+	}
+	defer x.close()
+	x.publicRequestID = requestID
 	return publicLinkForClient(ctx, v, user, owner, plan, x)
 }
 
@@ -61,6 +76,7 @@ func publicSetup(v *vault.Vault, user, owner string, port, months int) (string, 
 
 func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string, plan Plan, x *xClient) (*Record, error) {
 	months := plan.Months
+	x.publicGeneration = true
 	x.publicReplacement = ""
 	defer func() { x.publicReplacement = "" }()
 	recipient, err := x.identity(ctx, user, false)
@@ -73,32 +89,77 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 	if err != nil {
 		return nil, err
 	}
-	if existing != nil && existing.Status == "succeeded" {
-		return existing, nil
-	}
-	if existing != nil && existing.Status == "creating" {
-		return existing, ErrPublicLinkPending
-	}
-	if existing != nil && existing.Status == "created" {
-		// Validate the old session against its original product, even when the
-		// visitor selected a different plan. Never return that link for a new plan.
-		oldPlan := Plan{Months: existing.Months, Minor: existing.Amount, Currency: strings.ToLower(existing.Currency), ProductID: existing.ProductID, Merchant: plan.Merchant}
-		err = verifyPublicCheckout(ctx, v, x, existing, oldPlan)
-		if err == nil && existing.Status == "succeeded" {
-			b, _ := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: *existing})
-			return existing, v.Put("public-checkout:"+recipient, b)
+	var saved publicLinkRecord
+	if existing != nil {
+		raw, e := v.Get("public-checkout:" + recipient)
+		if e != nil {
+			return nil, e
 		}
-		if err != nil {
-			return nil, err
+		e = json.Unmarshal(raw, &saved)
+		clear(raw)
+		if e != nil {
+			return nil, e
 		}
-		if err == nil && publicLinkMatches(existing, plan) && publicLinkFresh(existing, time.Now()) {
-			return existing, holdPublicCheckout(v, existing, plan, time.Now())
+		// Regeneration cannot transfer another browser's order or its history.
+		if saved.Owner != ownerHash {
+			return nil, ErrPublicLinkConflict
 		}
-		existing.LinkBlocked = true
-		if err = persistPublicVerification(v, existing); err != nil {
-			return nil, err
+		orders := append(append([]Record{}, saved.History...), *existing)
+		for i := range orders {
+			old := &orders[i]
+			if old.Status == "succeeded" {
+				return old, nil
+			}
+			if old.SessionID == "" {
+				continue
+			}
+			oldPlan := Plan{Months: old.Months, Minor: old.Amount, Currency: strings.ToLower(old.Currency), ProductID: old.ProductID, Merchant: plan.Merchant}
+			// An unavailable read remains unknown. It does not prevent explicit link
+			// creation and is never recorded as proof that the old session is unpaid.
+			if e := verifyPublicCheckout(ctx, v, x, old, oldPlan); errors.Is(e, ErrPublicPersistence) {
+				return nil, e
+			}
+			if old.Status == "succeeded" {
+				return old, nil
+			}
 		}
-		return nil, ErrVerifyUnpaid
+		raw, e = v.Get("public-checkout:" + recipient)
+		if e != nil {
+			return nil, e
+		}
+		e = json.Unmarshal(raw, &saved)
+		clear(raw)
+		if e != nil {
+			return nil, e
+		}
+		*existing = saved.Order
+		if x.publicRequestID != "" && saved.RequestID == x.publicRequestID {
+			if !publicLinkMatches(existing, plan) {
+				return nil, ErrPublicLinkConflict
+			}
+			if existing.Status == "creating" {
+				return existing, ErrPublicLinkPending
+			}
+			// Retry the same request without another upstream mutation.
+			if existing.LinkBlocked {
+				return nil, ErrPublicLinkPending
+			}
+			return existing, nil
+		}
+		for _, old := range saved.History {
+			if x.publicRequestID != "" && old.GenerationRequest == x.publicRequestID {
+				return nil, ErrPublicLinkPending
+			}
+		}
+		x.publicReplacement = existing.SessionID
+		if x.publicReplacement == "" {
+			for _, old := range saved.History {
+				if old.SessionID != "" {
+					x.publicReplacement = old.SessionID
+				}
+			}
+		}
+		saved.History = append(saved.History, *existing)
 	}
 	if err = x.checkCreation(ctx, time.Now()); err != nil {
 		return nil, err
@@ -113,9 +174,9 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 	if err = x.quote(ctx, user, plan); err != nil {
 		return nil, err
 	}
-	r := Record{Username: user, RecipientID: recipient, Months: months, Amount: plan.Minor, Currency: strings.ToUpper(plan.Currency), ProductID: plan.ProductID, Status: "creating", Created: time.Now().Unix()}
+	r := Record{GenerationRequest: x.publicRequestID, Username: user, RecipientID: recipient, Months: months, Amount: plan.Minor, Currency: strings.ToUpper(plan.Currency), ProductID: plan.ProductID, Status: "creating", Created: time.Now().Unix()}
 	persist := func() error {
-		b, e := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: r})
+		b, e := json.Marshal(publicLinkRecord{Owner: ownerHash, Order: r, History: saved.History, RequestID: x.publicRequestID})
 		if e != nil {
 			return e
 		}
@@ -131,15 +192,16 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 		}
 		return nil, ErrPublicLinkPending
 	}
-	if existing != nil && existing.SessionID == r.SessionID {
-		// An upstream replay cannot reset the old session's TTL or become a
-		// newly published link on a later request.
-		r = *existing
+	if publicSessionRetained(saved.History, r.SessionID) {
+		// Never publish an upstream replay as a newly generated session.
+		r.LinkBlocked = true
+		r.SessionID, r.URL = "", ""
 		if err = persist(); err != nil {
 			return nil, err
 		}
 		return nil, ErrPublicLinkPending
 	}
+
 	r.Status = "created"
 	r.Created = time.Now().Unix()
 	if err = persist(); err != nil {
@@ -149,6 +211,9 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 		return nil, err
 	}
 	if err = persist(); err != nil {
+		return nil, err
+	}
+	if err = x.releasePublicReplacement(v); err != nil {
 		return nil, err
 	}
 	if err = holdPublicCheckout(v, &r, plan, time.Now()); err != nil {
@@ -169,7 +234,7 @@ func verifyPublicCheckout(ctx context.Context, v *vault.Vault, x *xClient, r *Re
 	defer func() {
 		r.LinkBlocked = resultErr != nil || r.Status != "created"
 		if err := persistPublicVerification(v, r); err != nil {
-			resultErr = err
+			resultErr = ErrPublicPersistence
 		}
 	}()
 	read := x.readCheckout
@@ -304,10 +369,11 @@ func publicLinkExisting(v *vault.Vault, user, recipient string, plan Plan) (*Rec
 			return nil, ErrPublicLinkConflict
 		}
 	case "creating":
-		// An unpublished request has no payable session to verify. Keep its
-		// retry budget, but allow the current request to choose the product.
-		r.Months, r.Amount, r.Currency, r.ProductID = plan.Months, plan.Minor, strings.ToUpper(plan.Currency), plan.ProductID
-		if r.URL != "" || r.SessionID != "" || r.PreviousSession != "" || r.ReplacementCount != 0 || r.RecoveryAttempts != 0 || r.ManualRecovery || r.LastError != nil {
+		if (r.SessionID != "" || r.URL != "") && !sessionURL(r.URL, r.SessionID) {
+			return nil, ErrPublicLinkConflict
+		}
+		// Preserve an uncertain creation reservation and its original product.
+		if r.PreviousSession != "" || r.ReplacementCount != 0 || r.RecoveryAttempts != 0 || r.ManualRecovery || r.LastError != nil {
 			return nil, ErrPublicLinkConflict
 		}
 	default:
@@ -323,50 +389,6 @@ func publicLinkMatches(r *Record, plan Plan) bool {
 func publicLinkFresh(r *Record, now time.Time) bool {
 	created := time.Unix(r.Created, 0)
 	return r.Created > 0 && !now.Before(created) && now.Sub(created) < publicLinkTTL
-}
-
-// TryCachedPublicLink is a non-creating bypass for the holder of the active
-// payment window. A cache miss must join the normal queue, never create here.
-// Caller holds checkout.lock across the entire operation.
-func TryCachedPublicLink(ctx context.Context, v *vault.Vault, user, owner string, port, months int) (*Record, bool, error) {
-	user, plan, x, err := publicSetup(v, user, owner, port, months)
-	if err != nil {
-		return nil, false, err
-	}
-	defer x.close()
-	return cachedPublicLinkForClient(ctx, v, user, owner, plan, x)
-}
-func cachedPublicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string, plan Plan, x *xClient) (*Record, bool, error) {
-	recipient, err := x.identity(ctx, user, false)
-	if err != nil {
-		return nil, false, err
-	}
-	r, err := publicLinkExisting(v, user, recipient, plan)
-	if err != nil {
-		return nil, false, err
-	}
-	if r == nil || r.Status != "created" || !publicLinkFresh(r, time.Now()) || !publicLinkMatches(r, plan) {
-		return nil, false, nil
-	}
-	if err = verifyPublicCheckout(ctx, v, x, r, plan); err != nil {
-		if errors.Is(err, ErrPublicPaymentDeclined) {
-			if _, releaseErr := releaseDeclinedCheckout(v, r.SessionID); releaseErr != nil {
-				return nil, true, releaseErr
-			}
-		}
-		return nil, true, err
-	}
-	if r.Status == "created" && !publicLinkFresh(r, time.Now()) {
-		return nil, false, nil
-	}
-	if r.Status == "succeeded" {
-		sum := sha256.Sum256([]byte(owner))
-		b, _ := json.Marshal(publicLinkRecord{Owner: hex.EncodeToString(sum[:]), Order: *r})
-		err = v.Put("public-checkout:"+recipient, b)
-	} else {
-		err = holdPublicCheckout(v, r, plan, time.Now())
-	}
-	return r, true, err
 }
 
 // Verification updates the same session only, preserving browser ownership.
@@ -385,10 +407,27 @@ func persistPublicVerification(v *vault.Vault, r *Record) error {
 	if err = json.Unmarshal(raw, &saved); err != nil {
 		return err
 	}
-	if saved.Order.SessionID != r.SessionID {
-		return ErrPublicLinkConflict
+	if saved.Order.SessionID == r.SessionID {
+		if saved.Order.Status == "succeeded" && r.Status != "succeeded" {
+			return nil
+		}
+		saved.Order = *r
+	} else {
+		found := false
+		for i := range saved.History {
+			if saved.History[i].SessionID == r.SessionID {
+				if saved.History[i].Status == "succeeded" && r.Status != "succeeded" {
+					return nil
+				}
+				saved.History[i] = *r
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ErrPublicLinkConflict
+		}
 	}
-	saved.Order = *r
 	b, err := json.Marshal(saved)
 	if err != nil {
 		return err
@@ -403,10 +442,13 @@ func VerifyExistingPublicLink(ctx context.Context, v *vault.Vault, r *Record) er
 	if err != nil {
 		return err
 	}
-	plan, err := cat.PlanFor(r.Months)
-	if err != nil || !publicLinkMatches(r, plan) {
-		return ErrPublicLinkConflict
+	plan := Plan{Months: r.Months, Minor: r.Amount, Currency: strings.ToLower(r.Currency), ProductID: r.ProductID, Merchant: cat.Merchant}
+	paid, err := PublicOrderPaid(ctx, v, r)
+	if paid {
+		return RecordPublicOrderPaid(v, r)
 	}
+	_ = err // unknown history remains unknown; this path verifies only current link
+
 	x := &xClient{vault: v}
 	x.readCheckout = func(ctx context.Context, r *Record) (*paymentPage, error) {
 		s, err := newStripe(ctx, v, r.RecipientID, paymentRead)
@@ -420,4 +462,13 @@ func VerifyExistingPublicLink(ctx context.Context, v *vault.Vault, r *Record) er
 		return verifiedCheckoutPaid(ctx, v, r, plan)
 	}
 	return verifyPublicCheckout(ctx, v, x, r, plan)
+}
+
+func publicSessionRetained(history []Record, session string) bool {
+	for _, r := range history {
+		if r.SessionID != "" && r.SessionID == session {
+			return true
+		}
+	}
+	return false
 }

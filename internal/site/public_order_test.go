@@ -29,7 +29,7 @@ func TestPublicOrderLookupIsScopedToBrowserAndHidesLinks(t *testing.T) {
 		return w
 	}
 	w := lookup(owner, "@Buyer")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"open"`) || !strings.Contains(w.Body.String(), `"months":12`) || strings.Contains(w.Body.String(), "cs_live") {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"unknown"`) || !strings.Contains(w.Body.String(), `"months":12`) || strings.Contains(w.Body.String(), "cs_live") {
 		t.Fatal("latest order wrong or link leaked", w.Code, w.Body.String())
 	}
 	if w = lookup(strings.Repeat("b", 64), "buyer"); w.Code != 404 {

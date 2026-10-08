@@ -35,7 +35,7 @@ func (s *server) publicOrderStatus(w http.ResponseWriter, r *http.Request) {
 	// Confirm payment with Stripe (read-only) so a paid but unrecorded order is
 	// not shown as unpaid. Persist only when the order lock is free.
 	stripeChecked := false
-	if order.Status == "created" {
+	if order.Status != "succeeded" {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		paid, err := checkout.PublicOrderPaid(ctx, s.vault, order)
 		cancel()
@@ -56,8 +56,8 @@ func (s *server) publicOrderStatus(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case order.Status == "succeeded":
 		state = "paid"
-	case order.Status == "creating":
-		state = "not_created"
+	case !stripeChecked || order.Status == "creating":
+		state = "unknown"
 	case checkout.PublicOrderOpen(order, now):
 		state = "open"
 		result["expires_at"] = order.Created + int64(checkout.PublicLinkTTL/time.Second)

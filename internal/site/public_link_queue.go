@@ -2,6 +2,8 @@ package site
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -73,7 +75,22 @@ func (s *server) enqueuePublicLink(w http.ResponseWriter, request manualLinkRequ
 	s.refreshPublicLinkWait(now)
 	s.prune(now)
 	for _, j := range q.jobs {
-		if j.Owner == owner && j.State != "done" && !j.Cancelled {
+		if j.Owner == owner && !j.Cancelled {
+			if request.RequestID != "" && j.Request.RequestID == request.RequestID {
+				if j.Request != request {
+					message(w, 409, "生成请求的内容已改变。")
+					return
+				}
+				j.Seen, j.Left = now, time.Time{}
+				if !s.savePublicQueueOrReply(w) {
+					return
+				}
+				s.respondPublicLink(w, j)
+				return
+			}
+			if j.State == "done" {
+				continue
+			}
 			if j.Request != request {
 				if j.State != "queued" || j.Request.Username != request.Username {
 					continue
@@ -307,7 +324,13 @@ func (s *server) processPublicLinkQueue(ctx context.Context, create func(context
 		return
 	}
 	q.mu.Unlock()
-	out := create(ctx, job.Request, job.Owner)
+	request := job.Request
+	if request.RequestID == "" {
+		// Stable across restarts without changing any retained ticket/request.
+		sum := sha256.Sum256([]byte("public-generation:" + job.ID))
+		request.RequestID = hex.EncodeToString(sum[:])
+	}
+	out := create(ctx, request, job.Owner)
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	defer func() {

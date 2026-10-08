@@ -70,7 +70,7 @@ export function PaymentQueueCard({ progress, username, months, price, onCancel, 
         {onNotify && <Button variant="outlined" fullWidth onClick={onNotify} disabled={notifyReady} sx={{ mb: 2, minHeight: 44 }}>{notifyReady ? "已开启就绪通知" : "链接就绪时通知我"}</Button>}
         <Alert severity="warning" icon={false} sx={{ mb: 3 }}>
           <Typography variant="body2" fontWeight={600}>轮到你后，付款链接只保留 3 分钟</Typography>
-          <Typography variant="body2" sx={{ mt: 0.5 }}>请提前准备好银行卡，超时未付款链接会作废，需要重新排队。等待时请让本页保持打开：手机切到其他应用超过约 1.5 分钟会暂停你的排队，超过 5 分钟会被移出队列。页面标题会显示排队进度和付款倒计时。</Typography>
+          <Typography variant="body2" sx={{ mt: 0.5 }}>请提前准备好银行卡，本站付款窗口结束后可重新排队生成新链接，旧链接可能仍可付款，请勿重复支付。等待时请让本页保持打开：手机切到其他应用超过约 1.5 分钟会暂停你的排队，超过 5 分钟会被移出队列。页面标题会显示排队进度和付款倒计时。</Typography>
         </Alert>
 
         <Divider sx={{ mb: 2 }} />

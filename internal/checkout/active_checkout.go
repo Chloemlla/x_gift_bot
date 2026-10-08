@@ -140,6 +140,14 @@ func (x *xClient) checkCreation(ctx context.Context, now time.Time) error {
 			}
 		} else if remaining := time.Until(time.UnixMilli(a.ExpiresAt)); remaining > 0 {
 			return &CheckoutWaitError{Wait: remaining}
+		} else if x.publicGeneration {
+			// An elapsed local queue window may yield to another explicit link-only
+			// request even when payment is unknown. This does not invalidate the old
+			// session or establish nonpayment; automatic payment paths still wait.
+			a.Released = true
+			if err := saveActiveCheckout(x.vault, a); err != nil {
+				return err
+			}
 		} else if verificationErr != nil && !errors.Is(verificationErr, ErrVerifyUnpaid) {
 			// The 180-second window limits idle checkouts. It is not permission
 			// to invalidate an in-flight payment or ignore a failed status read.

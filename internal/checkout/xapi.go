@@ -40,6 +40,8 @@ func (p Plan) Name() string { return fmt.Sprintf("Premium Gift - %d months", p.M
 type xClient struct {
 	// Set only after validating an explicitly replaced public order.
 	publicReplacement string
+	publicRequestID   string
+	publicGeneration  bool
 	vault             *vault.Vault
 	http              *http.Client
 	regionalHTTP      *http.Client

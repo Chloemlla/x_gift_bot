@@ -85,6 +85,36 @@ func TestActiveCheckoutWindowAndEarlyCompletion(t *testing.T) {
 	}
 }
 
+func TestUndecidableExpiredWindowReleasesAfterGrace(t *testing.T) {
+	v := controlFixture(t)
+	p := Plan{Months: 6, Minor: 60000, Currency: "usd", ProductID: "prod_TEST6MO", Merchant: "acct_Test"}
+	r := Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "USD", ProductID: p.ProductID, Created: time.Now().Add(-time.Hour).Unix(), Status: "created", SessionID: "cs_live_Grace", URL: "https://checkout.stripe.com/c/pay/cs_live_Grace"}
+	a := activeCheckout{Order: r, Plan: p, ExpiresAt: time.Now().Add(-staleWindowGrace - time.Minute).UnixMilli()}
+	if err := saveActiveCheckout(v, a); err != nil {
+		t.Fatal(err)
+	}
+	x := &xClient{vault: v, readCheckout: func(_ context.Context, rec *Record) (*paymentPage, error) {
+		page := publicPageFixture(rec, p)
+		raw, _ := json.Marshal(page)
+		var fields map[string]any
+		json.Unmarshal(raw, &fields)
+		fields["payment_intent"] = map[string]any{"id": "pi_Synthetic", "status": "processing", "amount": 60000, "currency": "usd", "amount_received": 0}
+		raw, _ = json.Marshal(fields)
+		json.Unmarshal(raw, page)
+		return page, nil
+	}}
+	// A still-processing payment long past its window releases the slot so
+	// later card checkouts are not blocked indefinitely; the session itself
+	// remains payable upstream.
+	if err := x.checkCreation(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := readActiveCheckout(v)
+	if err != nil || !stored.Released {
+		t.Fatal("undecidable expired window held the slot past grace")
+	}
+}
+
 func TestExpiredWindowNeverInterruptsPaymentOrAssumesNetworkFailureIsUnpaid(t *testing.T) {
 	for _, state := range []string{"processing", "requires_action", "network_error", "wrong_session"} {
 		t.Run(state, func(t *testing.T) {

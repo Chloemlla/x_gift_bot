@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="先检测 X 账号的 Premium 赠送资格，再生成 Stripe 支付链接。只生成链接，不代付。">
+<title>XGift · Premium 礼品链接生成</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+:root {
+  color-scheme: light;
+  --bg: #F5F5F5;
+  --card: #FFFFFF;
+  --text: #1C1C1C;
+  --sub: #484848;
+  --muted: #6B6B6B;
+  --primary: #415F91;
+  --primary-strong: #284777;
+  --on-primary: #FFFFFF;
+  --primary-soft: #D6E3FF;
+  --divider: #CACACA;
+  --ok-bg: #E7F3EA;
+  --ok-text: #205A30;
+  --err-bg: #FBE9E9;
+  --err-text: #9B1414;
+  --warn-bg: #FFF3D6;
+  --warn-text: #7A5200;
+  --chip-bg: #EEF2F9;
+  --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 24px rgba(16, 24, 40, .08);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #121212;
+    --card: #1E1E1E;
+    --text: #E6E6E6;
+    --sub: #C7C7C7;
+    --muted: #9A9A9A;
+    --primary: #AAC7FF;
+    --primary-strong: #C7DAFF;
+    --on-primary: #0A305F;
+    --primary-soft: #1F3450;
+    --divider: #484848;
+    --ok-bg: #16321F;
+    --ok-text: #99D5A5;
+    --err-bg: #391515;
+    --err-text: #FFB4AB;
+    --warn-bg: #3A2E10;
+    --warn-text: #F3BF61;
+    --chip-bg: #2A313D;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .45);
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.75 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.wrap { max-width: 720px; margin: 0 auto; padding: 40px 20px 64px; }
+header.masthead { display: flex; flex-direction: column; gap: 6px; margin-bottom: 24px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--sub); font-weight: 600; letter-spacing: .01em; }
+.brand svg { width: 26px; height: 26px; border-radius: 6px; }
+h1 { margin: 2px 0 0; font-size: 1.625rem; line-height: 1.3; font-weight: 650; letter-spacing: -.02em; }
+.sub { margin: 0; color: var(--sub); }
+main > .card {
+  background: var(--card);
+  border: 1px solid var(--divider);
+  border-radius: 16px;
+  padding: 22px 22px 24px;
+  margin-top: 16px;
+  box-shadow: var(--shadow);
+}
+@media (max-width: 480px) { .card { padding: 18px 16px 20px; } }
+h2 { display: flex; align-items: center; gap: 10px; font-size: 1.06rem; font-weight: 650; margin: 0 0 12px; }
+.step-n {
+  flex: none; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--primary-soft); color: var(--primary-strong);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: .8rem; font-weight: 700;
+}
+.field { display: block; margin-bottom: 16px; }
+.field > span { display: block; font-size: .85rem; color: var(--sub); margin-bottom: 6px; font-weight: 600; }
+.at-input { display: flex; align-items: stretch; }
+.at-input .at {
+  flex: none; display: flex; align-items: center; padding: 0 12px;
+  border: 1px solid var(--divider); border-right: 0;
+  border-radius: 12px 0 0 12px; color: var(--muted); background: transparent;
+}
+.at-input input {
+  flex: 1; width: 100%; min-width: 0; padding: 12px 14px;
+  font: inherit; color: var(--text);
+  background: transparent; border: 1px solid var(--divider);
+  border-radius: 0 12px 12px 0; outline: none;
+}
+.at-input input:focus-visible { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.plans { border: 0; padding: 0; margin: 0 0 18px; }
+.plans legend { font-size: .85rem; color: var(--sub); font-weight: 600; padding: 0; margin-bottom: 6px; }
+.plan-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.plan { position: relative; }
+.plan input { position: absolute; inset: 0; opacity: 0; margin: 0; }
+.plan label {
+  display: flex; flex-direction: column; gap: 0; align-items: flex-start;
+  min-height: 44px; padding: 7px 16px 8px; cursor: pointer;
+  border: 1px solid var(--divider); border-radius: 12px;
+  transition: border-color .15s, box-shadow .15s, background .15s;
+}
+.plan label strong { font-size: .95rem; font-weight: 650; }
+.plan label small { color: var(--sub); font-size: .8rem; line-height: 1.4; }
+.plan input:checked + label { border-color: var(--primary); background: var(--primary-soft); box-shadow: 0 0 0 1px var(--primary); }
+.plan input:focus-visible + label { box-shadow: 0 0 0 3px var(--primary-soft); }
+.btn {
+  appearance: none; font: inherit; font-weight: 600; cursor: pointer;
+  min-height: 46px; padding: 0 22px; border-radius: 24px;
+  border: 1px solid transparent; transition: background .15s, opacity .15s, transform .05s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+}
+.btn.primary { background: var(--primary); color: var(--on-primary); }
+.btn.primary:hover:not(:disabled) { background: var(--primary-strong); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn:focus-visible { outline: 3px solid var(--primary-soft); outline-offset: 2px; }
+.btn.block { width: 100%; }
+.btn .spin {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--on-primary) 40%, transparent);
+  border-top-color: var(--on-primary);
+  animation: rot 1s linear infinite; display: none;
+}
+.btn.busy .spin { display: inline-block; }
+@keyframes rot { to { transform: rotate(360deg); } }
+.note { border-radius: 12px; padding: 12px 14px; margin-top: 14px; font-size: .9rem; line-height: 1.6; }
+.note.ok { background: var(--ok-bg); color: var(--ok-text); }
+.note.err { background: var(--err-bg); color: var(--err-text); }
+.note.warn { background: var(--warn-bg); color: var(--warn-text); }
+.note code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em; word-break: break-all; }
+.note details { margin-top: 6px; }
+.note details summary { cursor: pointer; }
+.hint { color: var(--muted); font-size: .85rem; margin: 10px 0 14px; }
+.progress { margin-top: 16px; }
+.bar { height: 6px; border-radius: 3px; background: var(--chip-bg); overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0%; background: var(--primary); border-radius: 3px; transition: width .4s ease; }
+.bar i.indet { width: 35%; animation: slide 1.2s ease-in-out infinite alternate; }
+@keyframes slide { from { margin-left: 0; } to { margin-left: 65%; } }
+.progress p { margin: 8px 0 0; color: var(--sub); font-size: .9rem; }
+.result { margin-top: 16px; }
+.result .okrow { display: flex; align-items: center; gap: 8px; color: var(--ok-text); font-weight: 650; margin-bottom: 10px; }
+.result textarea {
+  width: 100%; min-height: 66px; resize: none; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text); background: transparent; border: 1px solid var(--divider);
+  border-radius: 12px; padding: 10px 12px; word-break: break-all;
+}
+.result textarea:focus-visible { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px var(--primary-soft); }
+.result .row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.chip { background: var(--chip-bg); border-radius: 999px; padding: 4px 12px; font-size: .8rem; color: var(--sub); }
+footer { margin-top: 28px; color: var(--muted); font-size: .8rem; line-height: 1.7; }
+.gate { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 40; }
+.gate .box { background: var(--card); border: 1px solid var(--divider); border-radius: 16px; padding: 22px; width: 100%; max-width: 360px; box-shadow: var(--shadow); }
+.gate h2 { margin: 0 0 6px; }
+.gate p { color: var(--sub); font-size: .9rem; margin: 0 0 14px; }
+.gate input {
+  width: 100%; padding: 12px 14px; font: inherit; border: 1px solid var(--divider);
+  border-radius: 12px; background: transparent; color: var(--text); margin-bottom: 12px;
+}
+.gate input:focus-visible { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px var(--primary-soft); }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="masthead">
+    <div class="brand">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="15" fill="#415F91"/><path d="M32 10Q35 27 54 32Q36 36 32 54Q28 36 10 32Q28 28 32 10Z" fill="#FFFFFF"/></svg>
+      XGift · 链接工具
+    </div>
+    <h1>Premium 礼品链接生成</h1>
+    <p class="sub">先检测接收账号资格，再生成 Stripe 支付链接。本页只生成链接，不代付。</p>
+  </header>
+
+  <main>
+    <section class="card" aria-labelledby="step1-h">
+      <h2 id="step1-h"><span class="step-n" aria-hidden="true">1</span> 接收账号与套餐</h2>
+      <form id="checkForm" novalidate>
+        <label class="field">
+          <span>X 用户名</span>
+          <div class="at-input">
+            <span class="at" aria-hidden="true">@</span>
+            <input id="username" name="username" type="text" inputmode="text" autocomplete="off"
+                   autocapitalize="none" spellcheck="false" maxlength="15" placeholder="username" aria-describedby="username-hint">
+          </div>
+        </label>
+        <p class="hint" id="username-hint">1-15 位字母、数字或下划线，不带 @。</p>
+        <fieldset class="plans">
+          <legend>礼品时长</legend>
+          <div class="plan-row" id="planRow"></div>
+        </fieldset>
+        <button class="btn primary block" id="btnCheck" type="submit">
+          <span class="spin" aria-hidden="true"></span><span class="label">检测赠送资格</span>
+        </button>
+      </form>
+      <div id="checkResult" role="status" aria-live="polite" hidden></div>
+    </section>
+
+    <section class="card" aria-labelledby="step2-h">
+      <h2 id="step2-h"><span class="step-n" aria-hidden="true">2</span> 生成支付链接</h2>
+      <p class="hint">检测通过后解锁。生成时会在服务端核对接收账号、套餐价格与商户信息，然后创建 Stripe 支付链接。</p>
+      <button class="btn primary block" id="btnGen" type="button" disabled>
+        <span class="spin" aria-hidden="true"></span><span class="label">生成支付链接</span>
+      </button>
+      <div class="progress" id="progress" hidden role="status" aria-live="polite">
+        <div class="bar"><i id="barFill"></i></div>
+        <p id="progressMsg">正在处理…</p>
+      </div>
+      <div id="linkResult" class="result" hidden></div>
+      <div id="linkError" class="note err" role="status" aria-live="polite" hidden></div>
+    </section>
+  </main>
+
+  <footer>
+    链接由 Stripe 与 X 托管，付款由接收方自行完成；本工具不代付、不收集银行卡信息。<br>
+    未付款的链接 24 小时后自动作废，可重新生成。
+  </footer>
+</div>
+
+<div class="gate" id="gate" role="dialog" aria-modal="true" aria-labelledby="gate-h" hidden>
+  <div class="box">
+    <h2 id="gate-h">需要访问密钥</h2>
+    <p>此页面由管理员开启访问密钥保护，输入后本浏览器将记住。</p>
+    <input id="gateKey" type="password" autocomplete="off" spellcheck="false" aria-label="访问密钥">
+    <button class="btn primary block" id="gateSave" type="button">保存并继续</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (s) => document.querySelector(s);
+  const btnCheck = $("#btnCheck"), btnGen = $("#btnGen");
+  const usernameEl = $("#username"), checkResult = $("#checkResult");
+  const progress = $("#progress"), barFill = $("#barFill"), progressMsg = $("#progressMsg");
+  const linkResult = $("#linkResult"), linkError = $("#linkError");
+  const gate = $("#gate"), gateKey = $("#gateKey");
+
+  let plans = [];
+  let checkedUser = null, checkedId = null;
+  let busy = false;
+  let abort = null;
+  let lastAction = null;
+
+  let KEY = localStorage.getItem("xpg_key") || "";
+  const urlKey = new URLSearchParams(location.search).get("key");
+  if (urlKey) { KEY = urlKey; localStorage.setItem("xpg_key", KEY); history.replaceState(null, "", location.pathname); }
+
+  const money = (() => {
+    const symbols = { BDT: "৳", USD: "$", EUR: "€", GBP: "£", JPY: "¥" };
+    return (minor, currency) => {
+      const s = symbols[currency] ?? "";
+      const v = (minor / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return s ? s + v : currency + " " + v;
+    };
+  })();
+
+  function headers(extra) {
+    const h = Object.assign({ "Content-Type": "application/json" }, extra || {});
+    if (KEY) h["X-XPG-Key"] = KEY;
+    return h;
+  }
+
+  function showGate() {
+    gate.hidden = false;
+    gateKey.focus();
+  }
+  gateSave.addEventListener("click", saveKey);
+  gateKey.addEventListener("keydown", (e) => { if (e.key === "Enter") saveKey(); });
+  function saveKey() {
+    const v = gateKey.value.trim();
+    if (!v) return;
+    KEY = v; localStorage.setItem("xpg_key", v);
+    gate.hidden = true;
+    const action = lastAction; lastAction = null;
+    if (action === "check") runCheck();
+    if (action === "gen") runGen();
+  }
+
+  usernameEl.addEventListener("input", () => {
+    const el = usernameEl;
+    const pos = el.selectionStart;
+    const clean = el.value.replace(/^@+/, "").toLowerCase().replace(/[^a-z0-9_]/g, "");
+    if (clean !== el.value) {
+      el.value = clean.slice(0, 15);
+    }
+    invalidateCheck();
+  });
+
+  function normalizeName() {
+    return usernameEl.value.trim().toLowerCase().replace(/^@+/, "");
+  }
+  function validName(u) { return /^[a-z0-9_]{1,15}$/.test(u); }
+
+  function invalidateCheck() {
+    const u = normalizeName();
+    if (u !== checkedUser) {
+      checkedUser = null; checkedId = null;
+      btnGen.disabled = true;
+      checkResult.hidden = true; checkResult.innerHTML = "";
+    }
+  }
+
+  function renderPlans() {
+    const row = $("#planRow");
+    row.innerHTML = "";
+    plans.forEach((p, i) => {
+      const wrap = document.createElement("span");
+      wrap.className = "plan";
+      const input = document.createElement("input");
+      input.type = "radio"; input.name = "plan"; input.value = p.months;
+      input.checked = i === 0;
+      const box = document.createElement("label");
+      const strong = document.createElement("strong");
+      strong.textContent = p.months + " 个月";
+      const small = document.createElement("small");
+      small.textContent = money(p.amount, p.currency);
+      box.appendChild(strong); box.appendChild(small);
+      wrap.appendChild(input); wrap.appendChild(box);
+      input.addEventListener("change", invalidateCheck);
+      row.appendChild(wrap);
+    });
+  }
+
+  function setBusy(b, btn) {
+    busy = b;
+    btn.classList.toggle("busy", b);
+    btn.disabled = b;
+    if (btn === btnCheck) btnGen.disabled = b || !checkedUser;
+  }
+
+  async function loadPlans() {
+    try {
+      const res = await fetch("/api/plans", { headers: headers() });
+      if (res.status === 401) { showGate(); return; }
+      const j = await res.json();
+      plans = j.plans || [];
+      if (!plans.length) throw new Error("empty");
+      renderPlans();
+    } catch {
+      banner(checkResult, "err", "无法加载套餐配置，请刷新重试。");
+      btnCheck.disabled = true;
+    }
+  }
+
+  function banner(el, cls, html) {
+    el.className = "note " + cls;
+    el.innerHTML = html;
+    el.hidden = false;
+  }
+
+  async function runCheck() {
+    if (busy) return;
+    const u = normalizeName();
+    if (!validName(u)) {
+      banner(checkResult, "warn", "用户名格式无效：1-15 位字母、数字或下划线。");
+      return;
+    }
+    lastAction = "check";
+    setBusy(true, btnCheck);
+    checkResult.hidden = true;
+    try {
+      const res = await fetch("/api/check", { method: "POST", headers: headers(), body: JSON.stringify({ username: u }) });
+      const j = await res.json().catch(() => null);
+      if (res.status === 401) { showGate(); return; }
+      if (res.ok && j && j.eligible) {
+        checkedUser = u; checkedId = j.id;
+        btnGen.disabled = false;
+        banner(checkResult, "ok", "<strong>✓ @" + esc(u) + " 可以接收 Premium 赠品</strong><br>账号 ID " + esc(String(j.id)) + "，已通过实时资格检测。");
+      } else {
+        checkedUser = null; checkedId = null;
+        btnGen.disabled = true;
+        banner(checkResult, "err", "✗ " + esc((j && j.error && j.error.message) || "检测失败，请稍后重试。"));
+      }
+    } catch {
+      banner(checkResult, "err", "✗ 网络异常，请稍后重试。");
+    } finally {
+      setBusy(false, btnCheck);
+      btnGen.disabled = !checkedUser;
+    }
+  }
+
+  btnCheck.addEventListener("click", (e) => { e.preventDefault(); runCheck(); });
+  $("#checkForm").addEventListener("submit", (e) => { e.preventDefault(); runCheck(); });
+
+  function setProgress(percent, message) {
+    progress.hidden = false;
+    progressMsg.textContent = message || "正在处理…";
+    if (percent >= 0) {
+      barFill.classList.remove("indet");
+      barFill.style.width = Math.min(100, Math.max(2, percent)) + "%";
+    } else {
+      barFill.style.width = "";
+      barFill.classList.add("indet");
+    }
+  }
+  function hideProgress() { progress.hidden = true; barFill.classList.remove("indet"); barFill.style.width = "0%"; }
+
+  async function runGen() {
+    if (busy || !checkedUser) return;
+    const u = checkedUser;
+    const chosen = document.querySelector('input[name="plan"]:checked');
+    const months = chosen ? Number(chosen.value) : plans[0].months;
+    lastAction = "gen";
+    setBusy(true, btnGen);
+    linkError.hidden = true;
+    linkResult.hidden = true;
+    btnCheck.disabled = true;
+    setProgress(-1, "正在检测并创建链接…");
+    abort = new AbortController();
+    let failure = null;
+    try {
+      const res = await fetch("/api/link", {
+        method: "POST", headers: headers(), signal: abort.signal,
+        body: JSON.stringify({ username: u, months }),
+      });
+      if (res.status === 401) { showGate(); return; }
+      if (!res.ok || !res.body) {
+        const j = await res.json().catch(() => null);
+        failure = (j && j.error && j.error.message) || "请求失败，请稍后重试。";
+        return;
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i).trim();
+          buf = buf.slice(i + 1);
+          if (!line) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch { continue; }
+          handleEvent(ev);
+        }
+      }
+    } catch (err) {
+      if (err && err.handled) {
+        // 终端事件（结果或错误）已在界面展示。
+      } else if (!abort || !abort.signal.aborted) {
+        failure = "连接中断，请重新生成。";
+      }
+    } finally {
+      abort = null;
+      hideProgress();
+      setBusy(false, btnGen);
+      btnCheck.disabled = false;
+      if (failure) {
+        banner(linkError, "err", "✗ " + esc(failure));
+        btnGen.disabled = false;
+      }
+    }
+  }
+
+  function handleEvent(ev) {
+    if (ev.t === "progress") { setProgress(ev.percent, ev.message); return; }
+    if (ev.t === "beat") return;
+    if (ev.t === "start") { setProgress(10, "开始处理 @" + ev.username + " …"); return; }
+    if (ev.t === "error") {
+      hideProgress();
+      let html = "✗ " + esc(ev.message);
+      if (ev.code === "needs_review") html += '<br>原链接可能已被付款或已过期，需要管理员在后台核对后再生成新链接。';
+      if (ev.detail) html += '<details><summary>技术细节</summary><code>' + esc(ev.detail) + "</code></details>";
+      banner(linkError, "err", html);
+      throw Object.assign(new Error("handled"), { handled: true });
+    }
+    if (ev.t === "result") {
+      hideProgress();
+      renderResult(ev);
+      throw Object.assign(new Error("handled"), { handled: true });
+    }
+  }
+  // handleEvent throws to stop the read loop after a terminal event.
+
+  function renderResult(ev) {
+    if (ev.status === "succeeded") {
+      linkResult.innerHTML = "";
+      const okrow = document.createElement("div");
+      okrow.className = "okrow";
+      okrow.textContent = "✓ 该账号的礼品订单已支付成功，无需再付款；如需再次赠送可稍后重新生成。";
+      const meta = document.createElement("div");
+      meta.className = "chips";
+      meta.innerHTML = chip("用户 @" + esc(ev.username)) + chip("订单 " + esc(ev.session_id || "-"));
+      linkResult.appendChild(okrow); linkResult.appendChild(meta);
+      linkResult.hidden = false;
+      return;
+    }
+    const okrow = document.createElement("div");
+    okrow.className = "okrow";
+    okrow.textContent = "✓ 链接已生成";
+    const ta = document.createElement("textarea");
+    ta.readOnly = true;
+    ta.value = ev.url;
+    ta.setAttribute("aria-label", "支付链接");
+    const row = document.createElement("div");
+    row.className = "row";
+    const copy = document.createElement("button");
+    copy.className = "btn primary"; copy.type = "button"; copy.textContent = "复制链接";
+    copy.addEventListener("click", () => copyLink(ev.url, copy));
+    const open = document.createElement("a");
+    open.className = "btn"; open.href = ev.url; open.target = "_blank"; open.rel = "noopener";
+    open.textContent = "打开链接";
+    row.appendChild(copy); row.appendChild(open);
+    const chips = document.createElement("div");
+    chips.className = "chips";
+    const created = ev.created ? new Date(ev.created * 1000).toLocaleString("zh-CN", { hour12: false }) : "刚刚";
+    chips.innerHTML = chip("@" + esc(ev.username)) + chip(ev.months + " 个月") +
+      chip(money(ev.amount, ev.currency) + " " + ev.currency) + chip("生成于 " + esc(created));
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "把链接发给接收方，由 TA 用自己的银行卡在 Stripe 页面完成付款。链接 24 小时内有效，过期后可重新生成。";
+    linkResult.innerHTML = "";
+    linkResult.appendChild(okrow); linkResult.appendChild(ta); linkResult.appendChild(row);
+    linkResult.appendChild(chips); linkResult.appendChild(hint);
+    linkResult.hidden = false;
+  }
+
+  function chip(text) { return '<span class="chip">' + esc(text) + "</span>"; }
+
+  async function copyLink(url, btn) {
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = url; document.body.appendChild(ta); ta.select();
+      document.execCommand("copy"); ta.remove();
+    }
+    const old = btn.textContent;
+    btn.textContent = "已复制 ✓";
+    setTimeout(() => { btn.textContent = old; }, 1500);
+  }
+
+  btnGen.addEventListener("click", runGen);
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  loadPlans();
+})();
+</script>
+</body>
+</html>

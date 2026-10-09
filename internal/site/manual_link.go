@@ -150,7 +150,7 @@ func (s *server) createLink(ctx context.Context, q manualLinkRequest, publicOwne
 	case errors.Is(err, checkout.ErrPublicPaymentInProgress):
 		reason, o = "payment_in_progress", failed(409, "原付款结果尚未核实，请查询付款状态或联系管理员；不会自动重建或再次扣款。")
 	case errors.Is(err, checkout.ErrPublicLinkPrivateOrder):
-		reason, o = "private_order", failed(409, "该账号已有兑换或后台订单，请使用原付款链接或联系管理员；主页不会重复创建订单。")
+		reason, o = "private_order", failed(409, "该账号有一笔兑换订单的付款仍在处理中，请核实结果后再生成链接。")
 	case errors.Is(err, checkout.ErrPublicLinkPending):
 		reason, o = "creation_pending", failed(409, "暂未取得付款链接，系统没有提交付款。请用相同账号和套餐重试；请勿同时使用其他入口重复建单。")
 	case errors.Is(err, checkout.ErrPublicLinkConflict):

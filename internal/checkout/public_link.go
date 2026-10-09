@@ -100,15 +100,19 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 		if e != nil {
 			return nil, e
 		}
-		// Regeneration cannot transfer another browser's order or its history.
-		if saved.Owner != ownerHash {
-			return nil, ErrPublicLinkConflict
-		}
+		// A different browser adopts the order chain: it never receives the old
+		// sessions' links, only their payment evidence, then generates its own.
 		orders := append(append([]Record{}, saved.History...), *existing)
 		for i := range orders {
 			old := &orders[i]
 			if old.Status == "succeeded" {
-				return old, nil
+				// A settled order only proves its session was paid once; inside its
+				// own payment window the result still answers a fresh request, but a
+				// long-settled record must not veto every later purchase.
+				if publicLinkFresh(old, time.Now()) {
+					return old, nil
+				}
+				continue
 			}
 			if old.SessionID == "" {
 				continue
@@ -119,6 +123,8 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 			if e := verifyPublicCheckout(ctx, v, x, old, oldPlan); errors.Is(e, ErrPublicPersistence) {
 				return nil, e
 			}
+			// A payment newly confirmed during this scan still wins: the requester
+			// must not be charged again for an order that just settled.
 			if old.Status == "succeeded" {
 				return old, nil
 			}
@@ -133,7 +139,7 @@ func publicLinkForClient(ctx context.Context, v *vault.Vault, user, owner string
 			return nil, e
 		}
 		*existing = saved.Order
-		if x.publicRequestID != "" && saved.RequestID == x.publicRequestID {
+		if saved.Owner == ownerHash && x.publicRequestID != "" && saved.RequestID == x.publicRequestID {
 			if !publicLinkMatches(existing, plan) {
 				return nil, ErrPublicLinkConflict
 			}
@@ -336,12 +342,17 @@ func publicIntentIdle(p *paymentPage) bool {
 func publicLinkExisting(v *vault.Vault, user, recipient string, plan Plan) (*Record, error) {
 	for _, key := range []string{"checkout:" + recipient, "checkout:" + user} {
 		b, e := v.Get(key)
-		clear(b)
-		if e == nil {
-			return nil, ErrPublicLinkPrivateOrder
+		if errors.Is(e, sql.ErrNoRows) {
+			continue
 		}
-		if !errors.Is(e, sql.ErrNoRows) {
+		if e != nil {
 			return nil, e
+		}
+		var r Record
+		inFlight := json.Unmarshal(b, &r) == nil && privateOrderInFlight(&r)
+		clear(b)
+		if inFlight {
+			return nil, ErrPublicLinkPrivateOrder
 		}
 	}
 	b, e := v.Get("public-checkout:" + recipient)
@@ -353,33 +364,92 @@ func publicLinkExisting(v *vault.Vault, user, recipient string, plan Plan) (*Rec
 	}
 	defer clear(b)
 	var saved publicLinkRecord
-	if json.Unmarshal(b, &saved) != nil {
+	if json.Unmarshal(b, &saved) == nil && (!unsubmitted(&saved.Order) || saved.Order.CardFingerprint != "") {
+		// Public orders are never submitted by us; payment evidence in this
+		// keyspace is contamination and stays operator-visible.
 		return nil, ErrPublicLinkConflict
 	}
-	r := saved.Order
-	if r.Username != user || r.RecipientID != recipient || !unsubmitted(&r) || r.CardFingerprint != "" {
-		return nil, ErrPublicLinkConflict
+	var r Record
+	usable := false
+	if json.Unmarshal(b, &saved) == nil {
+		r = saved.Order
+		usable = publicRecordUsable(&r, recipient)
+	}
+	if !usable {
+		// Renamed, stale or damaged records used to brick the account until an
+		// operator intervened. Archive and continue as if none existed.
+		if err := archiveBrokenPublicCheckout(v, recipient, b); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	return &r, nil
+}
+
+// privateOrderInFlight reports a card payment submitted by us whose outcome is
+// still open; that is the only private order that vetoes a new public link.
+func privateOrderInFlight(r *Record) bool {
+	return !unsubmitted(r) && !IsPaymentDeclined(r) && r.Status != "succeeded"
+}
+
+// publicRecordUsable validates a stored public order's identity and shape. The
+// recipient key is authoritative: a renamed account still owns its history.
+func publicRecordUsable(r *Record, recipient string) bool {
+	if r.RecipientID != recipient {
+		return false
 	}
 	if r.Months < 1 || r.Months > 24 || r.Amount <= 0 || !catalogCurrencyPattern.MatchString(strings.ToLower(r.Currency)) || !catalogProductPattern.MatchString(r.ProductID) {
-		return nil, ErrPublicLinkConflict
+		return false
 	}
 	switch r.Status {
 	case "created", "succeeded":
-		if !sessionURL(r.URL, r.SessionID) {
-			return nil, ErrPublicLinkConflict
-		}
+		return sessionURL(r.URL, r.SessionID)
 	case "creating":
 		if (r.SessionID != "" || r.URL != "") && !sessionURL(r.URL, r.SessionID) {
-			return nil, ErrPublicLinkConflict
+			return false
 		}
 		// Preserve an uncertain creation reservation and its original product.
-		if r.PreviousSession != "" || r.ReplacementCount != 0 || r.RecoveryAttempts != 0 || r.ManualRecovery || r.LastError != nil {
-			return nil, ErrPublicLinkConflict
-		}
-	default:
-		return nil, ErrPublicLinkConflict
+		return r.PreviousSession == "" && r.ReplacementCount == 0 && r.RecoveryAttempts == 0 && !r.ManualRecovery && r.LastError == nil
 	}
-	return &r, nil
+	return false
+}
+
+// archiveBrokenPublicCheckout preserves an unusable stored order under a
+// history key and clears it, so the account can get a fresh link.
+func archiveBrokenPublicCheckout(v *vault.Vault, recipient string, raw []byte) error {
+	proof, _ := json.Marshal(struct {
+		Previous   json.RawMessage `json:"previous"`
+		ArchivedAt int64           `json:"archived_at"`
+		Reason     string          `json:"reason"`
+	}{json.RawMessage(append([]byte(nil), raw...)), time.Now().Unix(), "unusable_record"})
+	return v.Archive("public-checkout:"+recipient, fmt.Sprintf("public-checkout-history:%s:%d", recipient, time.Now().UnixNano()), raw, proof)
+}
+
+// publicSessionPayable reports whether the stored public order for a recipient
+// still contains a session that could take a browser payment. Stripe expires
+// open checkout sessions after 24 hours; an old or settled record is inert for
+// the card flow.
+func publicSessionPayable(v *vault.Vault, recipient string, now time.Time) (bool, error) {
+	raw, err := v.Get("public-checkout:" + recipient)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer clear(raw)
+	var saved publicLinkRecord
+	if json.Unmarshal(raw, &saved) != nil {
+		return false, nil
+	}
+	orders := append(append([]Record{}, saved.History...), saved.Order)
+	for i := range orders {
+		o := &orders[i]
+		if o.SessionID != "" && o.Status != "succeeded" && o.Created > 0 && now.Sub(time.Unix(o.Created, 0)) < 24*time.Hour {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func publicLinkMatches(r *Record, plan Plan) bool {

@@ -1,0 +1,30 @@
+[Unit]
+Description=XPG standalone Premium gift link generator
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=xgift
+Group=xgift
+WorkingDirectory=/opt/xpg
+EnvironmentFile=/etc/xpg/xpg.env
+ExecStart=/opt/xpg/bin/xpg serve
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/xpg
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

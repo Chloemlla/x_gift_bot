@@ -14,7 +14,7 @@ import (
 )
 
 func TestExplicitPublicRegenerationCreatesFreshSession(t *testing.T) {
-	for _, state := range []string{"open", "old_open", "expired", "inactive", "change_plan", "creating", "paid", "other_owner", "same_request", "history_paid", "newer_paid", "upstream_replay"} {
+	for _, state := range []string{"open", "old_open", "expired", "inactive", "change_plan", "creating", "paid", "stale_paid", "other_owner", "same_request", "history_paid", "newer_paid", "upstream_replay"} {
 		t.Run(state, func(t *testing.T) {
 			v := controlFixture(t)
 			plan := Plan{Months: 3, Minor: 30000, Currency: "usd", Merchant: "acct_Test", ProductID: "prod_Test"}
@@ -32,6 +32,11 @@ func TestExplicitPublicRegenerationCreatesFreshSession(t *testing.T) {
 			saved := publicLinkRecord{Owner: hex.EncodeToString(sum[:]), Order: r}
 			if state == "other_owner" {
 				saved.Owner = "other"
+			}
+			if state == "stale_paid" {
+				r.Status = "succeeded"
+				r.Created = 1
+				saved.Order = r
 			}
 			if state == "history_paid" {
 				old := r
@@ -95,8 +100,16 @@ func TestExplicitPublicRegenerationCreatesFreshSession(t *testing.T) {
 			}}
 			got, err := publicLinkForClient(context.Background(), v, "recipient", owner, plan, x)
 			if state == "other_owner" {
-				if err == nil || mutations != 0 {
-					t.Fatal("ownership bypass")
+				// A different browser adopts the chain and generates its own session;
+				// it never receives the earlier link, only its payment evidence.
+				if err != nil || mutations != 1 || got.SessionID != "cs_live_New" {
+					t.Fatal("cross-browser regeneration blocked", err)
+				}
+				raw, _ := v.Get("public-checkout:1234")
+				var after publicLinkRecord
+				json.Unmarshal(raw, &after)
+				if after.Owner != hex.EncodeToString(sum[:]) || len(after.History) != 1 {
+					t.Fatal("order ownership or history lost during adoption")
 				}
 				return
 			}
@@ -112,6 +125,19 @@ func TestExplicitPublicRegenerationCreatesFreshSession(t *testing.T) {
 			if state == "paid" || state == "history_paid" || state == "newer_paid" {
 				if got.Status != "succeeded" || mutations != 0 {
 					t.Fatal("paid checkout recreated")
+				}
+				return
+			}
+			if state == "stale_paid" {
+				// Long-settled orders must not veto a later purchase.
+				if got.SessionID != "cs_live_New" || mutations != 1 {
+					t.Fatal("stale paid order blocked a new purchase", err)
+				}
+				raw, _ = v.Get("public-checkout:1234")
+				var after publicLinkRecord
+				json.Unmarshal(raw, &after)
+				if len(after.History) != 1 || after.History[0].Status != "succeeded" {
+					t.Fatal("settled order history lost")
 				}
 				return
 			}
@@ -167,7 +193,15 @@ func TestUnknownElapsedWindowAllowsOnlyExplicitLinkCreation(t *testing.T) {
 	for _, public := range []bool{false, true} {
 		v := controlFixture(t)
 		old := Record{RecipientID: "old", SessionID: "cs_live_Old", Status: "created", Created: 1}
-		if err := saveActiveCheckout(v, activeCheckout{Order: old, Plan: Plan{}, ExpiresAt: 1}); err != nil {
+		// Explicit public requests release any elapsed window; automatic paths
+		// retain payment protection while an undecidable window is inside grace.
+		expiresAt := int64(1)
+		if !public {
+			// readActiveCheckout derives the window from the order's creation.
+			old.Created = time.Now().Add(-4 * time.Minute).Unix()
+			expiresAt = time.Now().Add(-time.Minute).UnixMilli()
+		}
+		if err := saveActiveCheckout(v, activeCheckout{Order: old, Plan: Plan{}, ExpiresAt: expiresAt}); err != nil {
 			t.Fatal(err)
 		}
 		x := &xClient{vault: v, publicGeneration: public, readCheckout: func(context.Context, *Record) (*paymentPage, error) {

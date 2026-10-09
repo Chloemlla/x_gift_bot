@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,21 +12,33 @@ import (
 func TestPublicLinkOwnershipAndPaymentIsolation(t *testing.T) {
 	plan := Plan{Months: 6, Minor: 60000, Currency: "usd", ProductID: "prod_TEST6MO"}
 	base := Record{Username: "recipient", RecipientID: "1234", Months: 6, Amount: 60000, Currency: "USD", ProductID: plan.ProductID, Status: "created", SessionID: "cs_live_TestPublic123", URL: "https://checkout.stripe.com/c/pay/cs_live_TestPublic123"}
+	const (
+		useRecord = iota // the stored record is returned
+		absent           // an unusable record is archived and treated as absent
+		blocked          // the lookup refuses with a conflict
+	)
 	for _, tc := range []struct {
 		name    string
 		owner   string
 		change  func(*Record)
-		private bool
-		allowed bool
+		private string
+		expect  int
 	}{
-		{"own public link", "owner", func(r *Record) {}, false, true},
-		{"other browser", "other", func(r *Record) {}, false, true},
-		{"stored card", "owner", func(r *Record) { r.CardFingerprint = "private-card" }, false, false},
-		{"payment method", "owner", func(r *Record) { r.PaymentMethod = "pm_private" }, false, false},
-		{"submitted", "owner", func(r *Record) { r.SubmittedAt = 123 }, false, false},
-		{"unconfirmed creation retained", "owner", func(r *Record) { r.Status = "creating" }, false, true},
-		{"different plan to verify before replacement", "owner", func(r *Record) { r.Months = 3 }, false, true},
-		{"admin order", "owner", func(r *Record) {}, true, false},
+		{"own public link", "owner", func(r *Record) {}, "", useRecord},
+		{"other browser", "other", func(r *Record) {}, "", useRecord},
+		{"stored card", "owner", func(r *Record) { r.CardFingerprint = "private-card" }, "", blocked},
+		{"payment method", "owner", func(r *Record) { r.PaymentMethod = "pm_private" }, "", blocked},
+		{"submitted", "owner", func(r *Record) { r.SubmittedAt = 123 }, "", blocked},
+		{"unconfirmed creation retained", "owner", func(r *Record) { r.Status = "creating" }, "", useRecord},
+		{"renamed account", "owner", func(r *Record) { r.Username = "renamed" }, "", useRecord},
+		{"settled weird status", "owner", func(r *Record) { r.Status = "unknown" }, "", absent},
+		{"different plan to verify before replacement", "owner", func(r *Record) { r.Months = 3 }, "", useRecord},
+		{"private in-flight", "owner", func(r *Record) {}, `{"status":"requires_action","payment_method":"pm_private"}`, blocked},
+		{"private submitting", "owner", func(r *Record) {}, `{"status":"submitting","payment_method":"pm_private"}`, blocked},
+		{"private unknown outcome", "owner", func(r *Record) {}, `{"status":"unknown","submitted_at":123}`, blocked},
+		{"private succeeded", "owner", func(r *Record) {}, `{"status":"succeeded","submitted_at":123}`, useRecord},
+		{"private declined", "owner", func(r *Record) {}, `{"status":"declined","submitted_at":123,"last_error":{"http":402,"type":"card_error"}}`, useRecord},
+		{"private unsubmitted link", "owner", func(r *Record) {}, `{"status":"created","session_id":"cs_live_Other"}`, useRecord},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := controlFixture(t)
@@ -33,20 +46,34 @@ func TestPublicLinkOwnershipAndPaymentIsolation(t *testing.T) {
 			tc.change(&r)
 			b, _ := json.Marshal(publicLinkRecord{Owner: "owner", Order: r})
 			v.Put("public-checkout:1234", b)
-			if tc.private {
-				v.Put("checkout:1234", []byte(`{"status":"requires_action","payment_method":"pm_private"}`))
+			if tc.private != "" {
+				v.Put("checkout:1234", []byte(tc.private))
 			}
 			got, err := publicLinkExisting(v, "recipient", "1234", plan)
-			if tc.allowed {
+			switch tc.expect {
+			case useRecord:
 				if err != nil || got == nil {
 					t.Fatal(err)
 				}
-			} else if got != nil || !errors.Is(err, ErrPublicLinkConflict) {
-				t.Fatalf("private or ambiguous checkout exposed: %v", err)
-			}
-			after, _ := v.Get("public-checkout:1234")
-			if string(after) != string(b) {
-				t.Fatal("read changed checkout")
+				after, _ := v.Get("public-checkout:1234")
+				if string(after) != string(b) {
+					t.Fatal("read changed checkout")
+				}
+			case absent:
+				if err != nil || got != nil {
+					t.Fatalf("unusable record not archived: got=%v err=%v", got, err)
+				}
+				if _, e := v.Get("public-checkout:1234"); !errors.Is(e, sql.ErrNoRows) {
+					t.Fatal("unusable record kept blocking the account")
+				}
+			case blocked:
+				if got != nil || !errors.Is(err, ErrPublicLinkConflict) {
+					t.Fatalf("private or ambiguous checkout exposed: %v", err)
+				}
+				after, _ := v.Get("public-checkout:1234")
+				if string(after) != string(b) {
+					t.Fatal("read changed checkout")
+				}
 			}
 		})
 	}

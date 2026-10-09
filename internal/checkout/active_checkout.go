@@ -20,6 +20,10 @@ func (e *CheckoutWaitError) Error() string {
 }
 func (e *CheckoutWaitError) Unwrap() error { return ErrCheckoutRateLimited }
 
+// staleWindowGrace bounds how long an undecidable expired session may hold
+// the creation slot after its payment window ended; afterwards it releases.
+const staleWindowGrace = 10 * time.Minute
+
 type activeCheckout struct {
 	Order     Record `json:"order"`
 	Plan      Plan   `json:"plan"`
@@ -148,9 +152,11 @@ func (x *xClient) checkCreation(ctx context.Context, now time.Time) error {
 			if err := saveActiveCheckout(x.vault, a); err != nil {
 				return err
 			}
-		} else if verificationErr != nil && !errors.Is(verificationErr, ErrVerifyUnpaid) {
+		} else if verificationErr != nil && !errors.Is(verificationErr, ErrVerifyUnpaid) && time.Until(time.UnixMilli(a.ExpiresAt).Add(staleWindowGrace)) > 0 {
 			// The 180-second window limits idle checkouts. It is not permission
-			// to invalidate an in-flight payment or ignore a failed status read.
+			// to invalidate an in-flight payment or ignore a failed status read,
+			// so a genuinely undecidable session gets one short grace period —
+			// never an indefinite hold on every later request.
 			return &CheckoutWaitError{Wait: 10 * time.Second}
 		} else {
 			// A final live check proved the idle/failed payment can be replaced.

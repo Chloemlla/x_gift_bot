@@ -314,6 +314,8 @@ func describeLinkError(err error) (code, message string) {
 		return "needs_review", "原链接已失效且需人工核对是否已付款；本次未生成新链接"
 	case errors.Is(err, checkout.ErrPublicPaymentDeclined):
 		return "declined", "上一次付款被银行拒绝，可重新生成链接"
+	case errors.Is(err, checkout.ErrPublicPaymentInProgress):
+		return "payment_in_progress", "上一次付款仍在银行处理中，请确认未扣款后再重新生成"
 	case errors.Is(err, checkout.ErrPublicLinkConflict):
 		return "conflict", "该账号存在未完成的订单记录，暂不能生成"
 	case errors.Is(err, checkout.ErrPublicLinkPending):

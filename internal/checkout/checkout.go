@@ -115,18 +115,13 @@ func run(ctx context.Context, v *vault.Vault, user, expectedRecipient string, pa
 		return nil, errors.New("recipient identity changed; refusing to create or pay an order")
 	}
 	// Public manual checkouts must never be taken over by saved-card payment.
-	if raw, err := v.Get("public-checkout:" + recipient); err == nil {
-		clear(raw)
-		return nil, ErrPublicLinkConflict
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	// A live public session may still be paid outside our local lock, so never
+	// create/charge here while one could be payable; settled or expired records
+	// no longer block.
+	if live, err := publicSessionPayable(v, recipient, time.Now()); err != nil {
 		return nil, err
-	}
-	// Browser and backend payment flows cannot share a recipient. A public
-	// checkout may be paid outside our local lock, so never create/charge here.
-	if _, err := v.Get("public-checkout:" + recipient); err == nil {
+	} else if live {
 		return nil, ErrPublicLinkConflict
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
 	}
 	// Fail closed on legacy records rather than silently bypassing an earlier attempt.
 	if _, e = v.Get("checkout:" + user); e == nil {

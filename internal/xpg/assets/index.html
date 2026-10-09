@@ -492,7 +492,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: .8rem; line-height: 1
       linkResult.innerHTML = "";
       const okrow = document.createElement("div");
       okrow.className = "okrow";
-      okrow.textContent = "✓ 该账号的礼品订单已支付成功，无需再生成链接。";
+      okrow.textContent = "✓ 该账号的礼品订单已支付成功，无需再付款；如需再次赠送可稍后重新生成。";
       const meta = document.createElement("div");
       meta.className = "chips";
       meta.innerHTML = chip("用户 @" + esc(ev.username)) + chip("订单 " + esc(ev.session_id || "-"));
